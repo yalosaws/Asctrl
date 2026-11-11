@@ -21,10 +21,49 @@
 |---|---|
 | `src/shared/protocol.ts` | 三方通用的消息格式 |
 | `src/relay/server.ts` | 中继服务器 |
-| `src/agent/` | 被控端（Windows，用 PowerShell 实现各工具） |
+| `agent-app/` | **图形界面被控端**（Tauri：Rust 后台 + 网页界面），发给对方用的就是它 |
+| `src/agent/` | 命令行被控端（Node 版，开发和测试用） |
 | `src/console/tech-client.ts` | 控制端连接库 |
 | `src/console/mcp-server.ts` | 控制端 MCP 服务器 |
-| `test/e2e.ts` | 端到端测试 |
+| `test/e2e.ts` | 端到端测试（两种被控端都能测） |
+
+## 图形界面被控端（agent-app）
+
+打开后大字显示 6 位协助码；有人连接时窗口自动弹到最前，问对方"允许 / 拒绝"（2 分钟不点自动拒绝）；协助中实时显示每一步操作和完整命令，随时可以点"结束协助"。
+
+开发需要 Rust（`rustup`）和 Visual Studio C++ 生成工具。
+
+```bash
+cd agent-app
+npm install
+```
+
+界面调试（浏览器里用演示数据，地址加 `?state=ready|consent|connected|offline|connecting` 切换状态）：
+
+```bash
+npm run dev
+```
+
+真窗口调试：
+
+```bash
+npm run tauri dev
+```
+
+打包正式版（生成 exe 和安装包，在 `src-tauri/target/release/`）：
+
+```bash
+npm run tauri build
+```
+
+**中继地址**按以下顺序决定：
+
+1. 环境变量 `ASCTRL_RELAY_URL`
+2. exe 同目录下的 `relay.txt`（里面写一行地址）
+3. 编译时的环境变量 `ASCTRL_RELAY_URL`（推荐：编译前设好，发给对方的 exe 就不用配置）
+4. 默认 `ws://localhost:8787`
+
+`ASCTRL_CODE`（固定协助码）和 `ASCTRL_AUTO_ACCEPT`（自动同意）只在 debug 编译里生效，用于自动化测试，正式版里无效。
 
 ## 现有工具
 
@@ -69,6 +108,12 @@ npm test
 
 本机起一个中继和一个自动同意的被控端，依次调用全部工具，截图保存在 `test/out/screenshot.jpg`。
 
+测图形界面版（先在 `agent-app` 里运行 `npm run tauri build -- --debug --no-bundle`）：
+
+```bash
+node test/e2e.ts --app agent-app/src-tauri/target/debug/asctrl-agent.exe
+```
+
 ```bash
 npm run typecheck
 ```
@@ -91,7 +136,9 @@ npm run typecheck
 
 ## 后续路线
 
-- [ ] 被控端做成带图形界面的单个 exe（托盘图标 + 大字连接码 + 同意按钮），小白双击就能用
+- [x] 被控端图形界面（大字协助码 + 同意弹窗 + 操作记录）
+- [ ] 代码签名，减少 SmartScreen / 杀毒软件拦截
+- [ ] 托盘图标、开机不自启（只在需要时打开）
 - [ ] 鼠标点击、键盘输入工具（让 AI 能直接操作界面）
 - [ ] 实时画面（或接入 RustDesk / MeshCentral 做远程桌面）
 - [ ] 文件上传下载

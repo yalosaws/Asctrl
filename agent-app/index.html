@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>远程协助</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+
+  <body data-state="connecting">
+    <header class="top">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 13.5z" />
+          <path d="M9 20h6M12 16v4" />
+        </svg>
+        <span>远程协助</span>
+      </div>
+      <div class="pill" id="pill"><i></i><span id="pill-text">连接中</span></div>
+    </header>
+
+    <main>
+      <!-- 连接服务器中 -->
+      <section class="view" data-view="connecting">
+        <div class="spinner" aria-hidden="true"></div>
+        <p class="lead">正在准备…</p>
+      </section>
+
+      <!-- 连不上服务器 -->
+      <section class="view" data-view="offline">
+        <div class="badge-icon warn" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 8v5M12 16.5v.5" /><circle cx="12" cy="12" r="9" /></svg>
+        </div>
+        <p class="lead">暂时连不上服务器</p>
+        <p class="sub">请检查网络是否正常，程序会自动重试</p>
+        <p class="detail" id="offline-detail"></p>
+      </section>
+
+      <!-- 等待连接：显示协助码 -->
+      <section class="view" data-view="ready">
+        <p class="eyebrow">你的协助码</p>
+        <div class="code" id="code" aria-live="polite"></div>
+        <p class="lead">把这 6 个数字告诉帮你修电脑的人</p>
+        <ul class="assure">
+          <li>
+            <svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6z" /><path d="M9 12l2 2 4-4" /></svg>
+            对方连接前，会先问你是否同意
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M9 9l6 6M15 9l-6 6" /></svg>
+            随时可以结束，关掉这个窗口也会断开
+          </li>
+        </ul>
+      </section>
+
+      <!-- 协助中 -->
+      <section class="view" data-view="connected">
+        <div class="helper">
+          <div class="avatar" id="avatar">?</div>
+          <div>
+            <p class="helper-name"><span id="tech-name"></span> 正在帮你看电脑</p>
+            <p class="helper-sub"><i class="live"></i>对方的每一步操作都会显示在下面</p>
+          </div>
+        </div>
+        <div class="log-card">
+          <p class="log-title">操作记录</p>
+          <ol class="log" id="log"></ol>
+          <p class="log-empty" id="log-empty">还没有操作</p>
+        </div>
+        <button class="btn danger block" id="btn-end">结束协助</button>
+      </section>
+    </main>
+
+    <footer class="foot" id="foot">关掉窗口即断开所有连接</footer>
+
+    <!-- 同意弹窗 -->
+    <div class="overlay" id="consent" role="dialog" aria-modal="true" aria-labelledby="consent-title" hidden>
+      <div class="sheet">
+        <div class="avatar lg" id="consent-avatar">?</div>
+        <h2 id="consent-title"><span id="consent-name"></span> 想远程协助你的电脑</h2>
+        <p class="sheet-sub">允许后，对方可以：</p>
+        <ul class="perm">
+          <li>看到你的屏幕</li>
+          <li>查看电脑的配置和运行情况</li>
+          <li>运行命令来修复问题</li>
+        </ul>
+        <div class="timer"><div class="timer-bar" id="timer-bar"></div></div>
+        <p class="timer-text"><span id="timer-sec">120</span> 秒后自动拒绝</p>
+        <div class="actions">
+          <button class="btn ghost" id="btn-deny">拒绝</button>
+          <button class="btn primary" id="btn-allow">允许</button>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

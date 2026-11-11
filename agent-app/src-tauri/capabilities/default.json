@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口只需要核心事件和自己的三个命令",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

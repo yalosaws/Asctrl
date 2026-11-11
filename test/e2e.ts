@@ -1,5 +1,6 @@
 // 端到端测试：本机起中继 + 被控端（自动同意），控制端依次调用每个工具。
-// 用法：npm test
+// 用法：npm test                      测 Node 版被控端
+//       npm test -- --app <exe 路径>  测图形界面版被控端（需要 debug 编译）
 
 import { spawn } from "node:child_process";
 import { writeFileSync, mkdirSync } from "node:fs";
@@ -10,11 +11,19 @@ const PORT = 18787;
 const CODE = "123456";
 const relay = startRelay(PORT);
 
-const agent = spawn(
-  process.execPath,
-  ["src/agent/agent.ts", "--relay", `ws://localhost:${PORT}`, "--code", CODE, "--auto-accept"],
-  { stdio: ["ignore", "pipe", "inherit"] },
-);
+const appIdx = process.argv.indexOf("--app");
+const appExe = appIdx >= 0 ? process.argv[appIdx + 1] : undefined;
+
+const agent = appExe
+  ? spawn(appExe, [], {
+      stdio: ["ignore", "pipe", "inherit"],
+      env: { ...process.env, ASCTRL_RELAY_URL: `ws://localhost:${PORT}`, ASCTRL_CODE: CODE, ASCTRL_AUTO_ACCEPT: "1" },
+    })
+  : spawn(
+      process.execPath,
+      ["src/agent/agent.ts", "--relay", `ws://localhost:${PORT}`, "--code", CODE, "--auto-accept"],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
 agent.stdout.on("data", (d) => process.stdout.write(`  [agent] ${d}`));
 
 let failed = 0;
