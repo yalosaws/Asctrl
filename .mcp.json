@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "asctrl": {
+      "command": "node",
+      "args": ["src/console/mcp-server.ts"],
+      "env": {
+        "RELAY_URL": "ws://localhost:8787",
+        "TECH_NAME": "技术员"
+      }
+    }
+  }
+}
