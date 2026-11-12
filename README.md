@@ -68,6 +68,14 @@ npm run tauri build
 
 **管理员模式**：AI 调用 `request_admin` → 程序里弹出说明，对方点允许 → Windows 弹出 UAC，对方点"是" → 程序以管理员身份重启，协助码不变 → AI 重新 `connect`，对方再点一次允许。顶部会显示"管理员"标记。
 
+## 线上中继
+
+中继部署在 `ws://124.222.182.40:8787`（服务器上 systemd 服务 `asctrl-relay`，代码在 `~/asctrl-relay`，腾讯云安全组和 ufw 已放行 8787）。
+
+- 被控端：打包时设 `ASCTRL_RELAY_URL=ws://124.222.182.40:8787`，地址就编进 exe，对方不用配置。
+- 控制端：`.mcp.json` 已指向这个地址；中继启用了 token，从环境变量 `ASCTRL_RELAY_TOKEN` 读取（不进仓库，向维护者索取）。
+- 更新中继代码：把 `src/relay/server.ts` 和 `src/shared/protocol.ts` 拷到服务器 `~/asctrl-relay/src/` 对应位置，然后 `sudo systemctl restart asctrl-relay`。
+
 ## 现有工具
 
 共 37 个，对标 Claude 直接控制本机时的工具（命令行、文件读写搜索、屏幕鼠标键盘、剪贴板、窗口、后台任务）。✅ 表示命令行被控端（Node 版）也支持，其余只有图形界面版支持。

@@ -4,7 +4,8 @@
       "command": "node",
       "args": ["src/console/mcp-server.ts"],
       "env": {
-        "RELAY_URL": "ws://localhost:8787",
+        "RELAY_URL": "ws://124.222.182.40:8787",
+        "RELAY_TOKEN": "${ASCTRL_RELAY_TOKEN:-}",
         "TECH_NAME": "技术员"
       }
     }
