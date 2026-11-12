@@ -74,6 +74,10 @@ pub fn list() -> Vec<Win> {
             let title = String::from_utf16_lossy(&buf[..n as usize]);
             let mut pid = 0u32;
             GetWindowThreadProcessId(h, Some(&mut pid));
+            // 跳过自己的悬浮层，AI 不该看到也不该操作它
+            if pid == std::process::id() {
+                continue;
+            }
             let mut r = RECT::default();
             let _ = GetWindowRect(h, &mut r);
             out.push(Win {
@@ -173,5 +177,18 @@ pub fn open(target: &str, args: &str, cwd: &str) -> Result<(), String> {
         2 | 3 => Err(format!("找不到「{target}」")),
         5 => Err("拒绝访问".into()),
         n => Err(format!("打开失败（错误码 {n}）")),
+    }
+}
+
+/// 窗口当前位置（屏幕物理像素）；最小化或已关闭时返回 None
+pub fn rect_of(handle: isize) -> Option<(i32, i32, i32, i32)> {
+    let h = HWND(handle as *mut _);
+    unsafe {
+        if !IsWindow(Some(h)).as_bool() || !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
+            return None;
+        }
+        let mut r = RECT::default();
+        GetWindowRect(h, &mut r).ok()?;
+        Some((r.left, r.top, r.right, r.bottom))
     }
 }

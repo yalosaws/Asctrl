@@ -9,101 +9,68 @@
   </head>
 
   <body data-state="connecting">
-    <header class="top">
-      <div class="brand">
-        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 13.5z" />
-          <path d="M9 20h6M12 16v4" />
-        </svg>
-        <span>远程协助</span>
-        <span class="admin-tag" id="admin-tag" hidden>管理员</span>
+    <!-- 受控边框 -->
+    <div id="frames" class="layer"></div>
+    <!-- 屏幕上的标记：取景框、窗口轮廓、点击准星 -->
+    <div id="marks" class="layer"></div>
+    <!-- 粒子、光束、波纹 -->
+    <canvas id="fx" class="layer"></canvas>
+    <!-- 文件卡片、内置终端、打字条、按键 -->
+    <div id="cards" class="layer"></div>
+
+    <!-- 小精灵 -->
+    <div id="orb">
+      <canvas id="orb-canvas"></canvas>
+      <button id="orb-hit" aria-label="远程协助"></button>
+      <span class="orb-tag" id="admin-tag" hidden>管理员</span>
+    </div>
+
+    <div id="caption"><span id="caption-text"></span></div>
+
+    <!-- 协助码 -->
+    <div class="panel code-card" id="code-card" hidden>
+      <p class="eyebrow">你的协助码</p>
+      <div class="code" id="code" aria-live="polite"></div>
+      <p class="hint">把这 6 个数字告诉帮你修电脑的人</p>
+      <p class="assure">对方连接前会先问你是否同意 · 随时可以结束</p>
+    </div>
+
+    <!-- 悬停小菜单 -->
+    <div class="panel menu" id="menu" hidden>
+      <p class="menu-status" id="menu-status"></p>
+      <ol class="menu-log" id="menu-log"></ol>
+      <div class="menu-actions">
+        <button class="btn danger" id="btn-end">结束协助</button>
+        <button class="btn ghost" id="btn-quit">退出程序</button>
       </div>
-      <div class="pill" id="pill"><i></i><span id="pill-text">连接中</span></div>
-    </header>
+    </div>
 
-    <main>
-      <!-- 连接服务器中 -->
-      <section class="view" data-view="connecting">
-        <div class="spinner" aria-hidden="true"></div>
-        <p class="lead">正在准备…</p>
-      </section>
-
-      <!-- 连不上服务器 -->
-      <section class="view" data-view="offline">
-        <div class="badge-icon warn" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="M12 8v5M12 16.5v.5" /><circle cx="12" cy="12" r="9" /></svg>
-        </div>
-        <p class="lead">暂时连不上服务器</p>
-        <p class="sub">请检查网络是否正常，程序会自动重试</p>
-        <p class="detail" id="offline-detail"></p>
-      </section>
-
-      <!-- 等待连接：显示协助码 -->
-      <section class="view" data-view="ready">
-        <p class="eyebrow">你的协助码</p>
-        <div class="code" id="code" aria-live="polite"></div>
-        <p class="lead">把这 6 个数字告诉帮你修电脑的人</p>
-        <ul class="assure">
-          <li>
-            <svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6z" /><path d="M9 12l2 2 4-4" /></svg>
-            对方连接前，会先问你是否同意
-          </li>
-          <li>
-            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M9 9l6 6M15 9l-6 6" /></svg>
-            随时可以结束，关掉这个窗口也会断开
-          </li>
-        </ul>
-      </section>
-
-      <!-- 协助中 -->
-      <section class="view" data-view="connected">
-        <div class="helper">
-          <div class="avatar" id="avatar">?</div>
-          <div>
-            <p class="helper-name"><span id="tech-name"></span> 正在帮你看电脑</p>
-            <p class="helper-sub"><i class="live"></i>对方的每一步操作都会显示在下面</p>
-          </div>
-        </div>
-        <div class="log-card">
-          <p class="log-title">操作记录</p>
-          <ol class="log" id="log"></ol>
-          <p class="log-empty" id="log-empty">还没有操作</p>
-        </div>
-        <button class="btn danger block" id="btn-end">结束协助</button>
-      </section>
-    </main>
-
-    <footer class="foot" id="foot">关掉窗口即断开所有连接</footer>
-
-    <!-- 同意弹窗 -->
-    <div class="overlay" id="consent" role="dialog" aria-modal="true" aria-labelledby="consent-title" hidden>
-      <div class="sheet">
-        <div class="avatar lg" id="consent-avatar">?</div>
-        <h2 id="consent-title"><span id="consent-name"></span> <span id="consent-ask">想远程协助你的电脑</span></h2>
-        <p class="sheet-sub" id="consent-sub">允许后，对方可以：</p>
-        <ul class="perm" id="perm-consent">
-          <li>看到你的屏幕</li>
-          <li>操作鼠标和键盘</li>
-          <li>运行命令、传输文件来修复问题</li>
-        </ul>
-        <ul class="perm" id="perm-admin" hidden>
-          <li>修复系统文件、管理系统服务</li>
-          <li>安装或卸载软件</li>
-          <li>修改系统设置</li>
-        </ul>
-        <ul class="perm" id="perm-reboot" hidden>
-          <li>先保存好正在写的文档、关掉要用的网页</li>
-          <li>电脑会在十几秒后重启</li>
-          <li>重启后这个程序会自动打开，协助码不变</li>
-        </ul>
-        <p class="sheet-note" id="admin-note" hidden>点允许后会弹出 Windows 的确认窗口，请点「是」，程序会自动重新打开</p>
-        <p class="sheet-note" id="reboot-note" hidden>重启后如果要输入开机密码，请照常登录，登录后对方会重新连接</p>
-        <div class="timer"><div class="timer-bar" id="timer-bar"></div></div>
-        <p class="timer-text"><span id="timer-sec">120</span> 秒后自动拒绝</p>
-        <div class="actions">
-          <button class="btn ghost" id="btn-deny">拒绝</button>
-          <button class="btn primary" id="btn-allow">允许</button>
-        </div>
+    <!-- 同意 -->
+    <div class="panel ask" id="consent" role="dialog" aria-modal="true" aria-labelledby="consent-title" hidden>
+      <h2 id="consent-title"><b id="consent-name"></b> <span id="consent-ask">想远程协助你的电脑</span></h2>
+      <p class="sheet-sub" id="consent-sub">允许后，对方可以：</p>
+      <ul class="perm" id="perm-consent">
+        <li>看到你的屏幕</li>
+        <li>操作鼠标和键盘</li>
+        <li>运行命令、传输文件来修复问题</li>
+      </ul>
+      <ul class="perm" id="perm-admin" hidden>
+        <li>修复系统文件、管理系统服务</li>
+        <li>安装或卸载软件</li>
+        <li>修改系统设置</li>
+      </ul>
+      <ul class="perm" id="perm-reboot" hidden>
+        <li>先保存好正在写的文档、关掉要用的网页</li>
+        <li>电脑会在十几秒后重启</li>
+        <li>重启后这个程序会自动打开，协助码不变</li>
+      </ul>
+      <p class="sheet-note" id="admin-note" hidden>点允许后会弹出 Windows 的确认窗口，请点「是」，程序会自动重新打开</p>
+      <p class="sheet-note" id="reboot-note" hidden>重启后如果要输入开机密码，请照常登录，登录后对方会重新连接</p>
+      <div class="timer"><div class="timer-bar" id="timer-bar"></div></div>
+      <p class="timer-text"><span id="timer-sec">120</span> 秒后自动拒绝</p>
+      <div class="actions">
+        <button class="btn ghost" id="btn-deny">拒绝</button>
+        <button class="btn primary" id="btn-allow">允许</button>
       </div>
     </div>
   </body>

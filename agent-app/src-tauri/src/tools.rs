@@ -763,3 +763,55 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         other => fail(format!("未知工具：{other}")),
     }
 }
+
+// ---- 给动画用的位置信息（屏幕物理像素） ----
+
+fn rect_json(r: (i32, i32, i32, i32)) -> Value {
+    serde_json::json!([r.0, r.1, r.2 - r.0, r.3 - r.1])
+}
+
+/// 工具开始前：要点哪里、拖到哪里、操作哪个窗口
+pub fn fx_before(ctx: &Ctx, tool: &str, args: &Value) -> Value {
+    use serde_json::json;
+    let pt = |kx: &str, ky: &str| to_screen(ctx, args, kx, ky).ok().map(|(x, y)| json!([x, y]));
+    let cur = || input::cursor_pos().ok().map(|(x, y)| json!([x, y]));
+    match tool {
+        "click" | "scroll" | "mouse_move" => json!({ "at": pt("x", "y") }),
+        "mouse_down" | "mouse_up" => json!({ "at": pt("x", "y").or_else(cur) }),
+        "drag" => json!({ "from": pt("fromX", "fromY"), "to": pt("toX", "toY") }),
+        "zoom" => json!({ "from": pt("x0", "y0"), "to": pt("x1", "y1") }),
+        "type_text" | "press_keys" | "hold_key" => json!({ "at": cur() }),
+        "focus_window" => {
+            let handle = args.get("handle").and_then(Value::as_i64).map(|h| h as isize);
+            match winmgr::find(handle, str_arg(args, "title")) {
+                Ok(h) => {
+                    let h = h.0 as isize;
+                    json!({ "hwnd": h, "rect": winmgr::rect_of(h).map(rect_json) })
+                }
+                Err(_) => json!({}),
+            }
+        }
+        _ => json!({}),
+    }
+}
+
+/// 工具结束后：截了哪块屏幕、窗口变成了什么样
+pub fn fx_after(ctx: &Ctx, tool: &str, before: &Value) -> Value {
+    use serde_json::json;
+    match tool {
+        "screenshot" => match *ctx.geom.lock().unwrap() {
+            Some(g) => json!({ "shot": [g.left, g.top, (g.width as f64 / g.scale).round(), (g.height as f64 / g.scale).round()] }),
+            None => json!({}),
+        },
+        "focus_window" => match before.get("hwnd").and_then(Value::as_i64) {
+            Some(h) => json!({ "rect": winmgr::rect_of(h as isize).map(rect_json) }),
+            None => json!({}),
+        },
+        "list_windows" => {
+            let rects: Vec<Value> =
+                winmgr::list().iter().filter(|w| !w.minimized).take(24).map(|w| rect_json(w.rect)).collect();
+            json!({ "windows": rects })
+        }
+        _ => json!({}),
+    }
+}

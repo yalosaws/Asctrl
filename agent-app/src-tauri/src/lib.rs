@@ -4,6 +4,7 @@
 mod files;
 mod input;
 mod jobs;
+mod overlay;
 mod powershell;
 mod shell;
 mod tools;
@@ -13,7 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, State, UserAttentionType};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
@@ -90,13 +91,38 @@ fn activity(app: &AppHandle, text: String) {
     let _ = app.emit("activity", json!({ "text": text }));
 }
 
+/// 悬浮层一直在最上面，这里只是确保它可见
 fn bring_to_front(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.unminimize();
         let _ = w.show();
-        let _ = w.set_focus();
-        let _ = w.request_user_attention(Some(UserAttentionType::Critical));
+        let _ = w.set_always_on_top(true);
     }
+}
+
+/// 发给界面的参数：去掉大块数据，长文本截断
+fn fx_args(args: &Value) -> Value {
+    let mut a = args.clone();
+    if let Some(o) = a.as_object_mut() {
+        o.remove("data");
+        for v in o.values_mut() {
+            if let Some(t) = v.as_str() {
+                if t.chars().count() > 4000 {
+                    *v = json!(t.chars().take(4000).collect::<String>());
+                }
+            }
+        }
+    }
+    a
+}
+
+fn fx_text(out: &tools::Output) -> String {
+    let t = out.text.as_deref().or(out.error.as_deref()).unwrap_or("");
+    t.chars().take(6000).collect()
+}
+
+/// 会动鼠标的工具：执行期间暂停悬浮层的交互，免得点到小精灵身上
+fn moves_mouse(tool: &str) -> bool {
+    matches!(tool, "click" | "scroll" | "drag" | "mouse_move" | "mouse_down" | "mouse_up")
 }
 
 /// 弹出一个问题让用户回答，超时算拒绝
@@ -223,10 +249,28 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
             } else if tool == "restart_computer" {
                 tauri::async_runtime::spawn(restart_computer(app, tx, id, args));
             } else {
-                activity(&app, tools::describe(&tool, &args));
+                let desc = tools::describe(&tool, &args);
+                activity(&app, desc.clone());
                 tauri::async_runtime::spawn(async move {
                     let st = app.state::<AgentState>();
+                    let ov = app.state::<overlay::Overlay>();
+                    if moves_mouse(&tool) {
+                        ov.suppress(Duration::from_secs(5));
+                    }
+                    let before = tools::fx_before(&st.ctx, &tool, &args);
+                    let _ = app.emit(
+                        "fx",
+                        json!({ "phase": "start", "id": id, "tool": tool, "desc": desc, "args": fx_args(&args), "geo": before }),
+                    );
                     let out = tools::run(&st.ctx, &tool, &args).await;
+                    if moves_mouse(&tool) {
+                        ov.suppress(Duration::from_millis(1200));
+                    }
+                    let after = tools::fx_after(&st.ctx, &tool, &before);
+                    let _ = app.emit(
+                        "fx",
+                        json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "text": fx_text(&out), "geo": after }),
+                    );
                     reply(&tx, &id, out);
                 });
             }
@@ -405,6 +449,11 @@ fn disconnect(st: State<AgentState>) {
     st.kick.notify_one();
 }
 
+#[tauri::command]
+fn quit(app: AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let fixed = arg("--code")
@@ -416,8 +465,18 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(state)
-        .invoke_handler(tauri::generate_handler![get_status, is_admin, respond, disconnect])
+        .manage(overlay::Overlay::default())
+        .invoke_handler(tauri::generate_handler![
+            get_status,
+            is_admin,
+            respond,
+            disconnect,
+            quit,
+            overlay::overlay_info,
+            overlay::set_hit_regions
+        ])
         .setup(|app| {
+            overlay::setup(app.handle());
             tauri::async_runtime::spawn(relay_loop(app.handle().clone()));
             Ok(())
         })
