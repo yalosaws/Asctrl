@@ -1,5 +1,5 @@
 //! Persistent PowerShell session: the current directory and variables carry over between commands.
-//! Each script is sent to stdin as a single base64 line and run with Invoke-Expression in the same scope;
+//! Each script is sent to stdin as a single base64 line and dot-sourced in the session's scope;
 //! the output ends with a random end marker.
 
 use base64::Engine;
@@ -70,9 +70,12 @@ impl Shell {
                     return Err("The PowerShell session exited unexpectedly".to_string());
                 }
                 let l = String::from_utf8_lossy(&buf);
-                if let Some(rest) = l.trim_end().strip_prefix(&marker) {
+                // The marker is not always at the start of a line: `Write-Host -NoNewline` writes straight
+                // to stdout and leaves the line open, so the marker lands right after that text.
+                if let Some(at) = l.find(&marker) {
+                    out.push_str(&l[..at]);
                     // "<exit code> <True|False>", where the exit code is empty when no native command ran
-                    let mut parts: Vec<&str> = rest.split_whitespace().collect();
+                    let mut parts: Vec<&str> = l[at + marker.len()..].split_whitespace().collect();
                     let had_error = parts.pop() == Some("True");
                     let exit_code = parts.first().and_then(|c| c.parse::<i64>().ok());
                     return Ok(ShellOutput { text: out.trim_end().to_string(), exit_code, had_error });
@@ -86,7 +89,18 @@ impl Shell {
         }
     }
 
-    pub fn kill(mut self) {
-        let _ = self.child.start_kill();
+    pub fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    /// End the session together with anything it started (a hung installer, a child shell).
+    /// The tree is killed first: once PowerShell itself is gone, its children can no longer be found.
+    pub fn kill(self) {
+        tokio::task::spawn_blocking(move || {
+            if let Some(pid) = self.child.id() {
+                crate::jobs::kill_tree(pid);
+            }
+            drop(self); // kill_on_drop covers the case where taskkill could not run
+        });
     }
 }

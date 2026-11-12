@@ -92,13 +92,11 @@ fn layout(win: &WebviewWindow) -> Info {
 }
 
 /// Overlay window handle, for the foreground hook and the topmost poll
-#[cfg(windows)]
 static HWND_RAW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 /// Push the overlay straight to the top of the topmost band.
 /// Not via set_always_on_top: once the window already has the topmost flag it no longer calls SetWindowPos,
 /// so after another topmost window (or a program just clicked to the front) covers it, it never comes back.
-#[cfg(windows)]
 fn raise() {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::*;
@@ -119,12 +117,8 @@ fn raise() {
     }
 }
 
-#[cfg(not(windows))]
-fn raise() {}
-
 /// Re-raise immediately whenever the foreground window changes (the user clicks another app, the Start menu opens, etc.).
 /// The hook callback runs on the installing thread, so it must be installed on the main thread, which has a message loop.
-#[cfg(windows)]
 fn watch_foreground() {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
@@ -139,10 +133,6 @@ fn watch_foreground() {
     }
 }
 
-#[cfg(not(windows))]
-fn watch_foreground() {}
-
-#[cfg(windows)]
 fn harden(win: &WebviewWindow) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::*;
@@ -156,19 +146,6 @@ fn harden(win: &WebviewWindow) {
         // Invisible to screen capture, so the AI always sees the real desktop (Windows 10 2004+)
         let _ = SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE);
     }
-}
-
-#[cfg(not(windows))]
-fn harden(_: &WebviewWindow) {}
-
-#[cfg(windows)]
-fn cursor() -> Option<(i32, i32)> {
-    crate::input::cursor_pos().ok()
-}
-
-#[cfg(not(windows))]
-fn cursor() -> Option<(i32, i32)> {
-    None
 }
 
 pub fn setup(app: &AppHandle) {
@@ -193,7 +170,7 @@ pub fn setup(app: &AppHandle) {
             let ov = app.state::<Overlay>();
             let suppressed = ov.suppress_until.lock().unwrap().is_some_and(|t| t > Instant::now());
             let inside = !suppressed
-                && cursor().is_some_and(|(x, y)| {
+                && crate::input::cursor_pos().is_ok_and(|(x, y)| {
                     ov.regions.lock().unwrap().iter().any(|r| x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h)
                 });
             if inside == passing {

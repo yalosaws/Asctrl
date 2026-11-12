@@ -119,17 +119,24 @@ pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), String> {
     move_to(x1, y1)?;
     std::thread::sleep(Duration::from_millis(40));
     send(&[mouse(MOUSEEVENTF_LEFTDOWN, 0)])?;
-    for i in 1..=10 {
+    let moved = (1..=10).try_for_each(|i| {
         std::thread::sleep(Duration::from_millis(20));
-        move_to(x1 + (x2 - x1) * i / 10, y1 + (y2 - y1) * i / 10)?;
-    }
+        move_to(x1 + (x2 - x1) * i / 10, y1 + (y2 - y1) * i / 10)
+    });
     std::thread::sleep(Duration::from_millis(40));
-    send(&[mouse(MOUSEEVENTF_LEFTUP, 0)])
+    // Always release, even when a move failed: a button left held down would turn the user's
+    // next mouse movement into a drag
+    let released = send(&[mouse(MOUSEEVENTF_LEFTUP, 0)]);
+    moved.and(released)
 }
 
 /// Type any text (including CJK) without depending on the input method
 pub fn type_text(text: &str) -> Result<(), String> {
     for ch in text.chars() {
+        // "\r\n" is one Enter, not two
+        if ch == '\r' {
+            continue;
+        }
         if ch == '\n' {
             send(&[key(VK_RETURN, 0, KEYBD_EVENT_FLAGS(0)), key(VK_RETURN, 0, KEYEVENTF_KEYUP)])?;
         } else {

@@ -8,17 +8,39 @@ use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+/// Output kept per job. A job that prints more keeps its most recent output; the oldest is dropped.
 const MAX_BUF: usize = 2 * 1024 * 1024;
+
+#[derive(Default)]
+struct Buf {
+    text: String,
+    /// Bytes already dropped from the front of `text`
+    dropped: usize,
+}
+
+impl Buf {
+    fn push(&mut self, s: &str) {
+        self.text.push_str(s);
+        if self.text.len() > MAX_BUF {
+            // Trim well below the cap so this does not run again on every chunk
+            let mut cut = self.text.len() - MAX_BUF * 3 / 4;
+            while !self.text.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.text.drain(..cut);
+            self.dropped += cut;
+        }
+    }
+}
 
 struct Job {
     script: String,
     started: Instant,
     pid: Option<u32>,
-    out: Arc<Mutex<String>>,
-    /// Length of output already returned to the technician
+    out: Arc<Mutex<Buf>>,
+    /// How much output (counted from the job's start) was already returned to the technician
     read_pos: usize,
     exit: Arc<Mutex<Option<String>>>,
-    file: std::path::PathBuf,
 }
 
 #[derive(Default)]
@@ -31,7 +53,8 @@ fn fmt_secs(secs: u64) -> String {
     format!("{}m{}s", secs / 60, secs % 60)
 }
 
-fn kill_tree(pid: u32) {
+/// Kill a process and every process it started
+pub fn kill_tree(pid: u32) {
     let mut cmd = std::process::Command::new("taskkill");
     cmd.args(["/T", "/F", "/PID", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(windows)]
@@ -42,7 +65,7 @@ fn kill_tree(pid: u32) {
     let _ = cmd.status();
 }
 
-fn pump(mut r: impl AsyncReadExt + Unpin + Send + 'static, out: Arc<Mutex<String>>) -> tokio::task::JoinHandle<()> {
+fn pump(mut r: impl AsyncReadExt + Unpin + Send + 'static, out: Arc<Mutex<Buf>>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = [0u8; 8192];
         let mut pending: Vec<u8> = vec![];
@@ -56,15 +79,17 @@ fn pump(mut r: impl AsyncReadExt + Unpin + Send + 'static, out: Arc<Mutex<String
                 Ok(_) => pending.len(),
                 Err(e) => e.valid_up_to(),
             };
-            let s = String::from_utf8_lossy(&pending[..valid]).into_owned();
+            out.lock().unwrap().push(&String::from_utf8_lossy(&pending[..valid]));
             pending.drain(..valid);
-            let mut o = out.lock().unwrap();
-            if o.len() < MAX_BUF {
-                o.push_str(&s);
+            // Bytes that can never become valid UTF-8 (a native program writing in the ANSI code page)
+            // must not pile up and hold back everything after them
+            if pending.len() >= 4 {
+                out.lock().unwrap().push(&String::from_utf8_lossy(&pending));
+                pending.clear();
             }
         }
         if !pending.is_empty() {
-            out.lock().unwrap().push_str(&String::from_utf8_lossy(&pending));
+            out.lock().unwrap().push(&String::from_utf8_lossy(&pending));
         }
     })
 }
@@ -90,9 +115,12 @@ impl Jobs {
             .kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000);
-        let mut child = cmd.spawn().map_err(|e| format!("Failed to start PowerShell: {e}"))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            let _ = std::fs::remove_file(&file);
+            format!("Failed to start PowerShell: {e}")
+        })?;
 
-        let out = Arc::new(Mutex::new(String::new()));
+        let out = Arc::new(Mutex::new(Buf::default()));
         let exit = Arc::new(Mutex::new(None));
         let a = pump(child.stdout.take().unwrap(), out.clone());
         let b = pump(child.stderr.take().unwrap(), out.clone());
@@ -103,6 +131,7 @@ impl Jobs {
             let status = child.wait().await;
             let _ = a.await;
             let _ = b.await;
+            let _ = std::fs::remove_file(&file);
             let took = fmt_secs(started.elapsed().as_secs());
             *exit2.lock().unwrap() = Some(match status {
                 Ok(s) => match s.code() {
@@ -112,7 +141,7 @@ impl Jobs {
                 Err(e) => format!("Error: {e}"),
             });
         });
-        self.map.insert(id, Job { script: script.into(), started, pid, out, read_pos: 0, exit, file });
+        self.map.insert(id, Job { script: script.into(), started, pid, out, read_pos: 0, exit });
         Ok(id)
     }
 
@@ -126,18 +155,25 @@ impl Jobs {
     /// Return output since the last read; all output when `all` is true
     pub fn output(&mut self, id: u32, all: bool) -> Result<String, String> {
         let j = self.map.get_mut(&id).ok_or(format!("No background job {id}"))?;
-        let out = j.out.lock().unwrap().clone();
-        let from = if all { 0 } else { j.read_pos.min(out.len()) };
-        j.read_pos = out.len();
-        let mut new = out[from..].trim_end().to_string();
         const TAIL: usize = 50_000;
-        if new.len() > TAIL {
-            let mut cut = new.len() - TAIL;
-            while !new.is_char_boundary(cut) {
-                cut += 1;
+        let (new, omitted) = {
+            let buf = j.out.lock().unwrap();
+            // Positions count from the job's start; whatever was dropped from the front is gone either way
+            let mut from = if all { 0 } else { j.read_pos.saturating_sub(buf.dropped).min(buf.text.len()) };
+            let mut omitted = if all { buf.dropped } else { buf.dropped.saturating_sub(j.read_pos) };
+            j.read_pos = buf.dropped + buf.text.len();
+            let rest = buf.text[from..].trim_end();
+            if rest.len() > TAIL {
+                let mut skip = rest.len() - TAIL;
+                while !rest.is_char_boundary(skip) {
+                    skip += 1;
+                }
+                from += skip;
+                omitted += skip;
             }
-            new = format!("… (first {} bytes omitted)\n{}", cut, &new[cut..]);
-        }
+            (buf.text[from..].trim_end().to_string(), omitted)
+        };
+        let new = if omitted > 0 { format!("… (first {omitted} bytes omitted)\n{new}") } else { new };
         let label = if all { "all output" } else { "new output" };
         Ok(format!(
             "Job {id}: {}\n---- {label} ----\n{}",
@@ -180,7 +216,6 @@ impl Jobs {
                     kill_tree(pid);
                 }
             }
-            let _ = std::fs::remove_file(&j.file);
         }
     }
 }

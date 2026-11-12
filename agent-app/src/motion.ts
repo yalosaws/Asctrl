@@ -3,7 +3,6 @@
 // per frame (the orb's flight) shares one frame loop, which stops itself when nobody needs it.
 
 export const clamp = (v: number, a = 0, b = 1) => Math.min(b, Math.max(a, v));
-export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 export const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 

@@ -58,16 +58,22 @@ fn ansi_decode(b: &[u8]) -> String {
     }
 }
 
-fn ansi_encode(s: &str) -> Vec<u8> {
+/// Fails when the text has characters the system code page can't represent: writing them would
+/// silently turn them into "?" and lose the user's data.
+fn ansi_encode(s: &str) -> Result<Vec<u8>, String> {
     let w: Vec<u16> = s.encode_utf16().collect();
     if w.is_empty() {
-        return vec![];
+        return Ok(vec![]);
     }
     unsafe {
+        let mut lossy = windows::core::BOOL(0);
         let n = WideCharToMultiByte(CP_ACP, 0, &w, None, windows::core::PCSTR::null(), None);
         let mut b = vec![0u8; n.max(0) as usize];
-        WideCharToMultiByte(CP_ACP, 0, &w, Some(&mut b), windows::core::PCSTR::null(), None);
-        b
+        WideCharToMultiByte(CP_ACP, 0, &w, Some(&mut b), windows::core::PCSTR::null(), Some(&mut lossy));
+        if lossy.as_bool() {
+            return Err("The text has characters the system ANSI code page can't represent; write the file with encoding utf8 instead".into());
+        }
+        Ok(b)
     }
 }
 
@@ -95,13 +101,42 @@ pub fn decode(b: &[u8]) -> Result<(String, Enc), String> {
     }
 }
 
-pub fn encode(s: &str, enc: Enc) -> Vec<u8> {
-    match enc {
+pub fn encode(s: &str, enc: Enc) -> Result<Vec<u8>, String> {
+    Ok(match enc {
         Enc::Utf8 => s.as_bytes().to_vec(),
         Enc::Utf8Bom => [&[0xEF, 0xBB, 0xBF][..], s.as_bytes()].concat(),
         Enc::Utf16Le => [0xFF, 0xFE].into_iter().chain(s.encode_utf16().flat_map(|u| u.to_le_bytes())).collect(),
         Enc::Utf16Be => [0xFE, 0xFF].into_iter().chain(s.encode_utf16().flat_map(|u| u.to_be_bytes())).collect(),
-        Enc::Ansi => ansi_encode(s),
+        Enc::Ansi => ansi_encode(s)?,
+    })
+}
+
+/// Encoding of an existing file, judged from its first 64 KB (enough to tell, and a multi-gigabyte
+/// log is not read into memory just to be overwritten). None when it is missing, empty or binary.
+fn sniff_enc(path: &Path) -> Option<Enc> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    std::fs::File::open(path).ok()?.take(64 * 1024).read_to_end(&mut head).ok()?;
+    if head.is_empty() {
+        return None;
+    }
+    if head.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Some(Enc::Utf8Bom);
+    }
+    if head.starts_with(&[0xFF, 0xFE]) {
+        return Some(Enc::Utf16Le);
+    }
+    if head.starts_with(&[0xFE, 0xFF]) {
+        return Some(Enc::Utf16Be);
+    }
+    if looks_binary(&head) {
+        return None;
+    }
+    match std::str::from_utf8(&head) {
+        Ok(_) => Some(Enc::Utf8),
+        // A multi-byte character cut off by the 64 KB boundary is not an encoding error
+        Err(e) if e.error_len().is_none() => Some(Enc::Utf8),
+        Err(_) => Some(Enc::Ansi),
     }
 }
 
@@ -147,12 +182,12 @@ pub fn write(path: &Path, content: &str, enc: Option<Enc>) -> Result<String, Str
     // No encoding given: existing files keep theirs, new files use UTF-8
     let enc = match enc {
         Some(e) => e,
-        None => std::fs::read(path).ok().and_then(|b| decode(&b).ok()).map(|(_, e)| e).unwrap_or(Enc::Utf8),
+        None => sniff_enc(path).unwrap_or(Enc::Utf8),
     };
+    let bytes = encode(content, enc)?;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let bytes = encode(content, enc);
     std::fs::write(path, &bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
     Ok(format!("Wrote {} ({}, {} bytes)", path.display(), enc.name(), bytes.len()))
 }
@@ -177,7 +212,7 @@ pub fn edit(path: &Path, old: &str, new: &str, replace_all: bool) -> Result<Stri
         return Err(format!("oldText appears {n} times in the file. Include more context to make it unique, or pass replaceAll: true"));
     }
     let out = if replace_all { text.replace(&old, &new) } else { text.replacen(&old, &new, 1) };
-    std::fs::write(path, encode(&out, enc)).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    std::fs::write(path, encode(&out, enc)?).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
     Ok(format!("Edited {}: {} replacement(s) ({})", path.display(), if replace_all { n } else { 1 }, enc.name()))
 }
 
@@ -275,9 +310,12 @@ impl Matcher {
     }
 }
 
-/// Walk files recursively (skipping symlinks / junctions to avoid loops)
-fn walk(root: &Path, depth: usize, f: &mut dyn FnMut(&Path, &std::fs::Metadata) -> bool) {
-    let Ok(rd) = std::fs::read_dir(root) else { return };
+/// Walk files recursively (skipping symlinks / junctions to avoid loops).
+/// Returns false once the callback asked to stop, so the stop unwinds through every level:
+/// otherwise each parent folder would carry on with its remaining entries and the whole tree
+/// would still be walked after the result limit was reached.
+fn walk(root: &Path, depth: usize, f: &mut dyn FnMut(&Path, &std::fs::Metadata) -> bool) -> bool {
+    let Ok(rd) = std::fs::read_dir(root) else { return true };
     for e in rd.filter_map(Result::ok) {
         let Ok(ft) = e.file_type() else { continue };
         if ft.is_symlink() {
@@ -285,15 +323,16 @@ fn walk(root: &Path, depth: usize, f: &mut dyn FnMut(&Path, &std::fs::Metadata) 
         }
         let p = e.path();
         if ft.is_dir() {
-            if depth > 0 {
-                walk(&p, depth - 1, f);
+            if depth > 0 && !walk(&p, depth - 1, f) {
+                return false;
             }
         } else if let Ok(m) = e.metadata() {
             if !f(&p, &m) {
-                return;
+                return false;
             }
         }
     }
+    true
 }
 
 pub fn find(root: &Path, pattern: &str, max: usize) -> Result<String, String> {
@@ -366,7 +405,9 @@ pub fn search(root: &Path, pattern: &str, glob: &str, ignore_case: bool, max: us
         Ok(meta) if meta.is_file() => {
             scan(root, &meta);
         }
-        Ok(_) => walk(root, 40, &mut scan),
+        Ok(_) => {
+            walk(root, 40, &mut scan);
+        }
         Err(e) => return Err(format!("Failed to open {}: {e}", root.display())),
     }
     if hits == 0 {
@@ -390,9 +431,45 @@ mod tests {
     }
 
     #[test]
+    fn walk_stops_everywhere_once_asked() {
+        let root = std::env::temp_dir().join(format!("asctrl-walk-{}", std::process::id()));
+        for d in ["a", "b", "c"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+            for f in ["1.txt", "2.txt"] {
+                std::fs::write(root.join(d).join(f), "x").unwrap();
+            }
+        }
+        let mut seen = 0;
+        let finished = walk(&root, 40, &mut |_, _| {
+            seen += 1;
+            seen < 2
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!finished);
+        assert_eq!(seen, 2, "the callback must not run again after it asked to stop");
+    }
+
+    #[test]
+    fn sniff_matches_decode() {
+        let dir = std::env::temp_dir().join(format!("asctrl-sniff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("f.txt");
+        for enc in [Enc::Utf8, Enc::Utf8Bom, Enc::Utf16Le, Enc::Utf16Be] {
+            std::fs::write(&p, encode("你好\r\nabc", enc).unwrap()).unwrap();
+            assert_eq!(sniff_enc(&p), Some(enc));
+        }
+        // A 3-byte character straddling the 64 KB boundary must still read as UTF-8
+        std::fs::write(&p, format!("{}你好", "a".repeat(64 * 1024 - 1))).unwrap();
+        assert_eq!(sniff_enc(&p), Some(Enc::Utf8));
+        std::fs::write(&p, [0x61, 0xD6, 0xD0, 0xCE, 0xC4]).unwrap(); // GBK bytes, invalid as UTF-8
+        assert_eq!(sniff_enc(&p), Some(Enc::Ansi));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn encodings_roundtrip() {
         for enc in [Enc::Utf8, Enc::Utf8Bom, Enc::Utf16Le, Enc::Utf16Be] {
-            let (s, e) = decode(&encode("你好\r\nabc", enc)).unwrap();
+            let (s, e) = decode(&encode("你好\r\nabc", enc).unwrap()).unwrap();
             assert_eq!((s.as_str(), e), ("你好\r\nabc", enc));
         }
     }

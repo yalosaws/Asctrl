@@ -46,7 +46,7 @@ const client = new TechClient(
   resolveRelayToken(),
 );
 
-const server = new McpServer({ name: "asctrl", version: "0.3.0" });
+const server = new McpServer({ name: "asctrl", version: "0.1.0" });
 
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 type Reply = { content: Content[]; isError?: boolean };
@@ -83,7 +83,10 @@ async function act(tool: ToolName, args: Record<string, unknown> & { screenshot?
   const r = await forward(tool, rest);
   if (r.isError || !screenshot) return r;
   const shot = await forward("screenshot", { maxWidth: lastMaxWidth, display: lastDisplay });
-  return { content: [...r.content, ...shot.content], isError: shot.isError };
+  // The action itself succeeded. Reporting the whole call as failed because the follow-up screenshot
+  // didn't work would invite a retry, and the click or keystroke would happen twice.
+  if (shot.isError) return { content: [...r.content, { type: "text", text: "(the action succeeded, but the screenshot after it failed; call screenshot to see the result)" }] };
+  return { content: [...r.content, ...shot.content] };
 }
 
 const screenshotFlag = z.boolean().optional().describe("Take a screenshot after the action; default true");

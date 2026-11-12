@@ -1,6 +1,6 @@
-//! Tools the agent can run. The base scripts match the Node version in src/agent/tools.ts.
+//! Tools the agent can run. The system_info / list_processes / event_log scripts match the Node version in src/agent/tools.ts.
 
-use crate::{files, input, jobs::Jobs, powershell, shell::Shell, winmgr};
+use crate::{capture, files, input, jobs, jobs::Jobs, powershell, shell::Shell, winmgr};
 use base64::Engine;
 use serde::Serialize;
 use serde_json::Value;
@@ -62,17 +62,28 @@ impl Geom {
 pub struct Ctx {
     geom: Mutex<Option<Geom>>,
     shell: tokio::sync::Mutex<Option<Shell>>,
+    /// Pid of the session's PowerShell, kept outside `shell` so a reset can kill it while a command holds that lock
+    shell_pid: Mutex<Option<u32>>,
     jobs: Mutex<Jobs>,
 }
 
 impl Ctx {
     /// Called when the technician disconnects: ends the PowerShell session and all background jobs
     pub async fn reset(&self) {
+        // Kill by pid first: a command still running holds the `shell` lock until it ends, and the whole
+        // point of a reset (the technician left, the user ended the session) is to stop it now.
+        let pid = self.shell_pid.lock().unwrap().take();
+        let mut jobs = std::mem::take(&mut *self.jobs.lock().unwrap());
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(pid) = pid {
+                jobs::kill_tree(pid);
+            }
+            jobs.stop_all();
+        })
+        .await;
         if let Some(s) = self.shell.lock().await.take() {
             s.kill();
         }
-        let mut jobs = std::mem::take(&mut *self.jobs.lock().unwrap());
-        let _ = tokio::task::spawn_blocking(move || jobs.stop_all()).await;
     }
 }
 
@@ -111,32 +122,6 @@ async fn ps_text(script: &str, timeout_secs: u64) -> Output {
 fn int_arg(args: &Value, key: &str, def: i64, min: i64, max: i64) -> i64 {
     args.get(key).and_then(Value::as_f64).map(|f| (f.round() as i64).clamp(min, max)).unwrap_or(def)
 }
-
-const SCREENSHOT_PS: &str = r#"
-Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-Add-Type -Namespace W -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
-[W.U]::SetProcessDPIAware() | Out-Null
-$screens = [System.Windows.Forms.Screen]::AllScreens
-"SCREENS " + (($screens | ForEach-Object { $i = [array]::IndexOf($screens, $_) + 1; "$i=$($_.Bounds.Width)x$($_.Bounds.Height)@$($_.Bounds.X),$($_.Bounds.Y)$(if ($_.Primary) { '*' })" }) -join ' ')
-$b = __RECT__
-if ($null -eq $b -or $b.Width -le 0 -or $b.Height -le 0) { "NO_DISPLAY"; exit 1 }
-$src = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-$g = [System.Drawing.Graphics]::FromImage($src)
-$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $src.Size)
-$scale = [Math]::Min(1.0, __MAXW__ / $b.Width)
-$w = [int]($b.Width * $scale); $h = [int]($b.Height * $scale)
-$dst = New-Object System.Drawing.Bitmap $w, $h
-$g2 = [System.Drawing.Graphics]::FromImage($dst)
-$g2.InterpolationMode = 'HighQualityBicubic'
-$g2.DrawImage($src, 0, 0, $w, $h)
-$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
-$ep = New-Object System.Drawing.Imaging.EncoderParameters 1
-$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality), 80L
-$ms = New-Object System.IO.MemoryStream
-$dst.Save($ms, $codec, $ep)
-"GEOM $($b.Left) $($b.Top) $scale $w $h"
-[Convert]::ToBase64String($ms.ToArray())
-"#;
 
 const SYSTEM_INFO_PS: &str = r#"
 $os = Get-CimInstance Win32_OperatingSystem
@@ -187,65 +172,6 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// One-line description shown in the UI
-pub fn describe(tool: &str, args: &Value) -> String {
-    match tool {
-        "screenshot" => "Looked at your screen".into(),
-        "system_info" => "Checked basic computer info".into(),
-        "list_processes" => "Checked running programs".into(),
-        "event_log" => "Checked the system error log".into(),
-        "run_powershell" if args.get("background").and_then(Value::as_bool) == Some(true) => {
-            format!("Ran in background: {}", str_arg(args, "script").trim())
-        }
-        "run_powershell" => format!("Ran: {}", str_arg(args, "script").trim()),
-        "reset_shell" => "Reset the command shell".into(),
-        "click" => {
-            let what = match (str_arg(args, "button"), int_arg(args, "count", 1, 1, 3)) {
-                ("right", _) => "Right-clicked",
-                (_, 2) => "Double-clicked",
-                _ => "Clicked",
-            };
-            format!("{what} the screen")
-        }
-        "scroll" => "Scrolled the page".into(),
-        "zoom" => "Zoomed into part of the screen".into(),
-        "mouse_move" => "Moved the mouse".into(),
-        "mouse_down" => "Pressed the mouse button".into(),
-        "mouse_up" => "Released the mouse button".into(),
-        "cursor_position" => "Checked the mouse position".into(),
-        "hold_key" => format!("Held {}", str_arg(args, "keys")),
-        "read_clipboard" => "Read the clipboard".into(),
-        "write_clipboard" => "Put something on the clipboard".into(),
-        "list_windows" => "Listed open windows".into(),
-        "focus_window" => match str_arg(args, "action") {
-            "minimize" => "Minimized a window".into(),
-            "maximize" => "Maximized a window".into(),
-            "restore" => "Restored a window".into(),
-            "close" => "Closed a window".into(),
-            _ => "Switched windows".into(),
-        },
-        "open_app" => format!("Opened {} {}", str_arg(args, "target"), str_arg(args, "args")).trim_end().to_string(),
-        "read_file" => format!("Read file {}", str_arg(args, "path")),
-        "write_file" => format!("Wrote file {}", str_arg(args, "path")),
-        "edit_file" => format!("Edited file {}", str_arg(args, "path")),
-        "list_dir" => format!("Listed folder {}", str_arg(args, "path")),
-        "find_files" => format!("Looked for files {1} in {0}", str_arg(args, "path"), str_arg(args, "pattern")),
-        "search_files" => format!("Searched {0} for {1}", str_arg(args, "path"), str_arg(args, "pattern")),
-        "job_output" => "Checked background job progress".into(),
-        "stop_job" => "Stopped a background job".into(),
-        "drag" => "Dragged the mouse".into(),
-        "type_text" => {
-            let t = str_arg(args, "text");
-            let short: String = t.chars().take(40).collect();
-            format!("Typed: {short}{}", if t.chars().count() > 40 { "…" } else { "" })
-        }
-        "press_keys" => format!("Pressed {}", str_arg(args, "keys")),
-        "upload_file" => format!("Uploaded a file to {}", str_arg(args, "path")),
-        "download_file" => format!("Downloaded file {}", str_arg(args, "path")),
-        other => format!("Unknown action: {other}"),
-    }
-}
-
 fn geom(ctx: &Ctx) -> Result<Geom, String> {
     ctx.geom.lock().unwrap().ok_or_else(|| "Call screenshot first; coordinates are relative to the screenshot".to_string())
 }
@@ -269,66 +195,25 @@ fn opt_screen(ctx: &Ctx, args: &Value) -> Result<Option<(i32, i32)>, String> {
     to_screen(ctx, args, "x", "y").map(Some)
 }
 
-struct Capture {
-    geom: Geom,
-    data: String,
-    screens: String,
+/// Capture on a blocking thread and wrap the result as a tool image
+async fn shoot(area: capture::Area, max_width: i64) -> Result<(capture::Shot, Image), String> {
+    let shot = tokio::task::spawn_blocking(move || capture::grab(area, max_width as i32)).await.map_err(|e| e.to_string())??;
+    let image = Image { data: base64::engine::general_purpose::STANDARD.encode(&shot.jpeg), mime_type: "image/jpeg".into() };
+    Ok((shot, image))
 }
 
-/// Capture a region of the screen. `rect` is a PowerShell expression that yields a System.Drawing.Rectangle
-async fn capture(rect: &str, maxw: i64) -> Result<Capture, String> {
-    let script = SCREENSHOT_PS.replace("__RECT__", rect).replace("__MAXW__", &maxw.to_string());
-    let r = powershell::run(&script, Duration::from_secs(20)).await;
-    let mut screens = String::new();
-    let mut geom = None;
-    let mut data = String::new();
-    for l in r.stdout.lines() {
-        if let Some(v) = l.strip_prefix("SCREENS ") {
-            screens = v.trim().to_string();
-        } else if let Some(v) = l.strip_prefix("GEOM ") {
-            let v: Vec<&str> = v.split(' ').collect();
-            geom = (|| {
-                Some(Geom {
-                    left: v.first()?.parse().ok()?,
-                    top: v.get(1)?.parse().ok()?,
-                    scale: v.get(2)?.parse().ok()?,
-                    width: v.get(3)?.parse().ok()?,
-                    height: v.get(4)?.parse().ok()?,
-                })
-            })();
-        } else {
-            data.push_str(l.trim());
-        }
-    }
-    if data == "NO_DISPLAY" {
-        return Err("No such display".into());
-    }
-    match geom.filter(|_| !data.is_empty() && r.exit_code == Some(0)) {
-        Some(geom) => Ok(Capture { geom, data, screens }),
-        None => {
-            let err = r.stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("no output").to_string();
-            Err(format!("Screenshot failed: {err}"))
-        }
-    }
-}
-
-/// "1=1920x1080@0,0* 2=..." -> human-readable description
-fn describe_screens(s: &str) -> String {
-    let parts: Vec<&str> = s.split(' ').filter(|p| !p.is_empty()).collect();
-    if parts.len() <= 1 {
+/// Tell the AI about the other displays when there are several
+fn describe_displays(ds: &[capture::Display]) -> String {
+    if ds.len() <= 1 {
         return String::new();
     }
-    let list = parts
+    let list = ds
         .iter()
-        .map(|p| {
-            let (n, rest) = p.split_once('=').unwrap_or((p, ""));
-            let primary = rest.ends_with('*');
-            let size = rest.trim_end_matches('*').split('@').next().unwrap_or("");
-            format!("#{n} {size}{}", if primary { " (primary)" } else { "" })
-        })
+        .enumerate()
+        .map(|(i, d)| format!("#{} {}x{}{}", i + 1, d.area.width, d.area.height, if d.primary { " (primary)" } else { "" }))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("\n{} displays: {list}. Pass `display` to capture just one, for a clearer image.", parts.len())
+    format!("\n{} displays: {list}. Pass `display` to capture just one, for a clearer image.", ds.len())
 }
 
 fn win_line(g: Option<Geom>, w: &winmgr::Win) -> String {
@@ -387,10 +272,13 @@ fn resolve_path(p: &str) -> Result<PathBuf, String> {
     }
     let home = std::env::var("USERPROFILE").unwrap_or_default();
     let mut s = p.replacen('~', &home, if p.starts_with('~') { 1 } else { 0 });
-    while let Some(a) = s.find('%') {
+    // Expand left to right and continue after each value, so a value that itself contains % is never expanded again
+    let mut from = 0;
+    while let Some(a) = s[from..].find('%').map(|i| from + i) {
         let Some(b) = s[a + 1..].find('%').map(|i| a + 1 + i) else { break };
         let val = std::env::var(&s[a + 1..b]).map_err(|_| format!("Environment variable {} does not exist", &s[a + 1..b]))?;
         s.replace_range(a..=b, &val);
+        from = a + val.len();
     }
     let path = PathBuf::from(s);
     Ok(if path.is_absolute() { path } else { PathBuf::from(home).join(path) })
@@ -400,7 +288,10 @@ async fn shell_run(ctx: &Ctx, script: &str, timeout_secs: u64) -> Output {
     let mut guard = ctx.shell.lock().await;
     if guard.is_none() {
         match Shell::start().await {
-            Ok(s) => *guard = Some(s),
+            Ok(s) => {
+                *ctx.shell_pid.lock().unwrap() = s.pid();
+                *guard = Some(s);
+            }
             Err(e) => return fail(e),
         }
     }
@@ -422,6 +313,8 @@ async fn shell_run(ctx: &Ctx, script: &str, timeout_secs: u64) -> Output {
             o
         }
         Err(e) => {
+            // Timed out or the session died: drop it (and whatever it started) so the next command gets a fresh one
+            *ctx.shell_pid.lock().unwrap() = None;
             if let Some(s) = guard.take() {
                 s.kill();
             }
@@ -434,29 +327,31 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
     match tool {
         "screenshot" => {
             let maxw = int_arg(args, "maxWidth", 1600, 320, 3840);
-            let display = int_arg(args, "display", 0, 0, 16);
-            let rect = if display == 0 {
-                "[System.Windows.Forms.SystemInformation]::VirtualScreen".to_string()
-            } else {
-                format!("$(if ($screens.Count -ge {display}) {{ $screens[{}].Bounds }})", display - 1)
+            let display = int_arg(args, "display", 0, 0, 16) as usize;
+            let displays = capture::displays();
+            let area = match display {
+                0 => capture::virtual_screen(),
+                n => match displays.get(n - 1) {
+                    Some(d) => d.area,
+                    None => return fail(format!("There is no display #{display}")),
+                },
             };
-            match capture(&rect, maxw).await {
-                Ok(c) => {
-                    let g = c.geom;
-                    *ctx.geom.lock().unwrap() = Some(g);
+            match shoot(area, maxw).await {
+                Ok((shot, image)) => {
+                    *ctx.geom.lock().unwrap() =
+                        Some(Geom { left: area.left, top: area.top, scale: shot.scale, width: shot.width, height: shot.height });
                     let which = if display == 0 { String::new() } else { format!("display #{display}, ") };
-                    let screens = if display == 0 { describe_screens(&c.screens) } else { String::new() };
+                    let others = if display == 0 { describe_displays(&displays) } else { String::new() };
                     Output {
                         ok: true,
-                        image: Some(Image { data: c.data, mime_type: "image/jpeg".into() }),
+                        image: Some(image),
                         text: Some(format!(
-                            "Screenshot {which}{}x{}. Use pixel coordinates on this image for click/scroll/drag etc.{screens}",
-                            g.width, g.height
+                            "Screenshot {which}{}x{}. Use pixel coordinates on this image for click/scroll/drag etc.{others}",
+                            shot.width, shot.height
                         )),
                         ..Default::default()
                     }
                 }
-                Err(e) if e.contains("No such display") => fail(format!("There is no display #{display}")),
                 Err(e) => fail(e),
             }
         }
@@ -474,15 +369,15 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 return fail("Region is too small");
             }
             let maxw = int_arg(args, "maxWidth", 1600, 320, 3840);
-            match capture(&format!("New-Object System.Drawing.Rectangle {l}, {t}, {}, {}", r - l, btm - t), maxw).await {
-                Ok(c) => Output {
+            match shoot(capture::Area { left: l, top: t, width: r - l, height: btm - t }, maxw).await {
+                Ok((shot, image)) => Output {
                     ok: true,
-                    image: Some(Image { data: c.data, mime_type: "image/jpeg".into() }),
+                    image: Some(image),
                     text: Some(format!(
                         "Zoomed image {}x{} ({:.1}x the last screenshot). This image is for viewing only; click coordinates still refer to the last screenshot.",
-                        c.geom.width,
-                        c.geom.height,
-                        c.geom.scale / g.scale
+                        shot.width,
+                        shot.height,
+                        shot.scale / g.scale
                     )),
                     ..Default::default()
                 },
@@ -524,10 +419,9 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         }
         "read_clipboard" => ps_text(CLIPBOARD_READ_PS, 15).await,
         "write_clipboard" => {
-            let t = str_arg(args, "text");
-            let b64 = base64::engine::general_purpose::STANDARD.encode(t.as_bytes());
-            let n = t.chars().count();
-            ps_text(&format!("Set-Clipboard -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64}'))); 'Copied to clipboard ({n} chars)'"), 15).await
+            // Native rather than PowerShell: the text would travel on the command line, which Windows caps at 32K characters
+            let t = str_arg(args, "text").to_string();
+            blocking(move || winmgr::set_clipboard_text(&t).map(|_| format!("Copied to clipboard ({} chars)", t.chars().count()))).await
         }
         "list_windows" => {
             let g = *ctx.geom.lock().unwrap();
@@ -691,7 +585,7 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
             input_op(move || input::press_keys(&k), "Keys pressed".into()).await
         }
         "upload_file" => {
-            let path = match resolve_path(str_arg(args, "path")) {
+            let path = match path_arg(args, "path") {
                 Ok(p) => p,
                 Err(e) => return fail(e),
             };
@@ -699,36 +593,40 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 Ok(b) => b,
                 Err(e) => return fail(format!("data is not valid base64: {e}")),
             };
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
+            if bytes.len() > MAX_FILE {
+                return fail("File is too large; the limit is 20 MB");
             }
-            match std::fs::write(&path, &bytes) {
-                Ok(()) => text(format!("Saved to {} ({} bytes)", path.display(), bytes.len())),
-                Err(e) => fail(format!("Failed to write {}: {e}", path.display())),
-            }
+            blocking(move || {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                std::fs::write(&path, &bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+                Ok(format!("Saved to {} ({} bytes)", path.display(), bytes.len()))
+            })
+            .await
         }
         "download_file" => {
-            let path = match resolve_path(str_arg(args, "path")) {
+            let path = match path_arg(args, "path") {
                 Ok(p) => p,
                 Err(e) => return fail(e),
             };
-            match std::fs::metadata(&path) {
-                Ok(m) if m.is_dir() => return fail("This is a folder; only single files can be downloaded"),
-                Ok(m) if m.len() as usize > MAX_FILE => return fail(format!("File is too large ({} MB); the limit is 20 MB", m.len() / 1024 / 1024)),
-                Err(e) => return fail(format!("Failed to read {}: {e}", path.display())),
-                _ => {}
-            }
-            match std::fs::read(&path) {
-                Ok(bytes) => Output {
-                    ok: true,
-                    text: Some(format!("{} ({} bytes)", path.display(), bytes.len())),
-                    file: Some(FileData {
-                        name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                        data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                    }),
-                    ..Default::default()
-                },
-                Err(e) => fail(format!("Failed to read {}: {e}", path.display())),
+            let read = tokio::task::spawn_blocking(move || {
+                let m = std::fs::metadata(&path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+                if m.is_dir() {
+                    return Err("This is a folder; only single files can be downloaded".to_string());
+                }
+                if m.len() > MAX_FILE as u64 {
+                    return Err(format!("File is too large ({} MB); the limit is 20 MB", m.len() / 1024 / 1024));
+                }
+                let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                Ok((format!("{} ({} bytes)", path.display(), bytes.len()), name, base64::engine::general_purpose::STANDARD.encode(bytes)))
+            })
+            .await;
+            match read {
+                Ok(Ok((text, name, data))) => Output { ok: true, text: Some(text), file: Some(FileData { name, data }), ..Default::default() },
+                Ok(Err(e)) => fail(e),
+                Err(e) => fail(e.to_string()),
             }
         }
         "reset_shell" => {

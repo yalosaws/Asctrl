@@ -48,6 +48,7 @@ export class TechClient {
         } else if (msg.type === "error") {
           clearTimeout(timer);
           reject(new Error(msg.message));
+          ws.close();
         } else if (msg.type === "peer_left") {
           this.failAll("The remote computer disconnected");
           ws.close();
@@ -82,9 +83,11 @@ export class TechClient {
       }, timeoutMs);
       this.pending.set(id, {
         resolve: (r) => (clearTimeout(timer), resolve(r)),
-        reject: (e) => (clearTimeout(timer), reject(e)),
+        reject: (e) => (clearTimeout(timer), this.pending.delete(id), reject(e)),
       });
-      ws.send(JSON.stringify({ type: "call", id, tool, args } satisfies Message));
+      ws.send(JSON.stringify({ type: "call", id, tool, args } satisfies Message), (err) => {
+        if (err) this.pending.get(id)?.reject(err);
+      });
     });
   }
 
@@ -92,10 +95,13 @@ export class TechClient {
     this.ws?.close();
     this.ws = undefined;
     this.hostname = "";
+    // The old socket's close handler ignores itself once replaced, so calls still waiting must be failed here;
+    // otherwise they hang until their own timeout (11 minutes)
+    this.failAll("Disconnected");
   }
 
   private failAll(reason: string) {
-    for (const p of this.pending.values()) p.reject(new Error(reason));
+    for (const p of [...this.pending.values()]) p.reject(new Error(reason));
     this.pending.clear();
   }
 }

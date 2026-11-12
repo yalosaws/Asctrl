@@ -54,10 +54,6 @@ class Orb {
     }
   }
 
-  getMood() {
-    return this.mood;
-  }
-
   show(on = true) {
     if (on === this.shown) return;
     this.shown = on;

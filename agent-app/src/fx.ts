@@ -14,7 +14,6 @@ export interface FxEvent {
   phase: "start" | "end";
   id: string;
   tool: string;
-  desc?: string;
   args?: Record<string, unknown>;
   geo?: Record<string, unknown>;
   ok?: boolean;
@@ -471,7 +470,6 @@ export function fxStart(e: FxEvent) {
       return winStart(e);
     case "open_app":
       return openAppStart();
-    case "wait":
     case "cursor_position":
       orb.setBusy(true);
       return;
@@ -503,7 +501,6 @@ export function fxEnd(ev: FxEvent) {
     case "open_app":
       openAppEnd(e);
       break;
-    case "wait":
     case "cursor_position":
       orb.setBusy(false);
       break;

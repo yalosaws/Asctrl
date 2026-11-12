@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { center, dock, hit, home, initGeo, isTauri, primary, setHome, snap, syncHits, type OverlayInfo } from "./geo";
+import { center, hit, home, initGeo, isTauri, primary, setHome, snap, syncHits, type OverlayInfo } from "./geo";
 import { orb } from "./orb";
 import { bloom, ripple } from "./light";
 import { collapse, expand, isShown, relayout as relayoutEdge } from "./edge";
@@ -325,7 +325,7 @@ async function boot() {
   } else {
     document.body.classList.add("demo");
     void entrance();
-    runDemo({ render, dock });
+    runDemo({ render });
   }
 }
 

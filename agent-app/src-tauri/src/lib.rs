@@ -1,6 +1,7 @@
 //! Agent backend: connects to the relay, handles user consent, runs tools, and pushes state to the UI.
 //! The protocol matches ../../src/shared/protocol.ts.
 
+mod capture;
 mod files;
 mod input;
 mod jobs;
@@ -20,6 +21,10 @@ use tokio_tungstenite::tungstenite::Message as WsMsg;
 
 /// How long to wait for the user to click "Allow"
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(120);
+/// The agent can sit idle for a long time while the person reads the code out. Without traffic a home
+/// router forgets the connection and the code silently stops working, so ping the relay regularly;
+/// a ping that can't be delivered also makes a dead connection surface as an error.
+const PING_EVERY: Duration = Duration::from_secs(25);
 
 #[derive(Default)]
 struct AgentState {
@@ -91,10 +96,6 @@ fn set_status(app: &AppHandle, status: Value) {
     let _ = app.emit("status", status);
 }
 
-fn activity(app: &AppHandle, text: String) {
-    let _ = app.emit("activity", json!({ "text": text }));
-}
-
 /// The overlay is always on top; this just makes sure it is visible
 fn bring_to_front(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -138,10 +139,14 @@ async fn ask_user(app: &AppHandle, status: Value) -> bool {
     matches!(tokio::time::timeout(CONSENT_TIMEOUT, orx).await, Ok(Ok(true)))
 }
 
-fn connected_status(app: &AppHandle) -> Value {
+/// The status when no question is on screen: connected while a technician is paired, otherwise ready
+fn idle_status(app: &AppHandle) -> Value {
     let st = app.state::<AgentState>();
-    let tech = st.tech_name.lock().unwrap().clone().unwrap_or_default();
-    json!({ "state": "connected", "techName": tech, "code": *st.code.lock().unwrap() })
+    let code = st.code.lock().unwrap().clone();
+    match st.tech_name.lock().unwrap().clone() {
+        Some(tech) => json!({ "state": "connected", "techName": tech, "code": code }),
+        None => json!({ "state": "ready", "code": code }),
+    }
 }
 
 fn reply(tx: &mpsc::UnboundedSender<String>, id: &str, out: tools::Output) {
@@ -168,6 +173,8 @@ async fn relay_loop(app: AppHandle) {
         }
         let st = app.state::<AgentState>();
         *st.tech_name.lock().unwrap() = None;
+        // A question from the connection that just ended can no longer be answered
+        st.answer.lock().unwrap().take();
         st.ctx.reset().await;
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
@@ -178,11 +185,25 @@ async fn connect_once(app: &AppHandle) -> Result<(), String> {
     let (ws, _) = tokio_tungstenite::connect_async(relay_url()).await.map_err(|e| e.to_string())?;
     let (mut sink, mut stream) = ws.split();
 
-    // Every outgoing message goes through this channel so reads and writes never block each other
+    // Every outgoing message goes through this channel so reads and writes never block each other.
+    // The writer stops on `stop`, not when the last sender is dropped: tool calls still running hold
+    // senders for as long as they run (up to 10 minutes), and "End session" must close the connection now.
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (stop, mut stopped) = oneshot::channel::<()>();
     let writer = tokio::spawn(async move {
-        while let Some(s) = rx.recv().await {
-            if sink.send(WsMsg::text(s)).await.is_err() {
+        let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
+        loop {
+            // Biased: results already queued are sent before the stop is honoured
+            let sent = tokio::select! {
+                biased;
+                msg = rx.recv() => match msg {
+                    Some(s) => sink.send(WsMsg::text(s)).await,
+                    None => break,
+                },
+                _ = &mut stopped => break,
+                _ = ping.tick() => sink.send(WsMsg::Ping(Default::default())).await,
+            };
+            if sent.is_err() {
                 break;
             }
         }
@@ -197,7 +218,6 @@ async fn connect_once(app: &AppHandle) -> Result<(), String> {
     let result = loop {
         tokio::select! {
             _ = st.kick.notified() => {
-                activity(app, "You ended the session".into());
                 break Ok(());
             }
             msg = stream.next() => match msg {
@@ -215,7 +235,7 @@ async fn connect_once(app: &AppHandle) -> Result<(), String> {
         }
     };
 
-    drop(tx);
+    let _ = stop.send(());
     let _ = writer.await;
     result
 }
@@ -231,16 +251,14 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
             tauri::async_runtime::spawn(async move {
                 let allow = auto_accept()
                     || ask_user(&app, json!({ "state": "consent", "techName": tech, "timeoutSec": CONSENT_TIMEOUT.as_secs() })).await;
-                let _ = tx.send(json!({ "type": "consent_reply", "allow": allow }).to_string());
-                let st = app.state::<AgentState>();
-                if allow {
-                    *st.tech_name.lock().unwrap() = Some(tech.clone());
-                    set_status(&app, connected_status(&app));
-                    activity(&app, format!("You allowed {tech} to connect"));
-                } else {
-                    let code = st.code.lock().unwrap().clone();
-                    set_status(&app, json!({ "state": "ready", "code": code }));
+                // The connection this request came from is gone: its status is no longer ours to set
+                if tx.send(json!({ "type": "consent_reply", "allow": allow }).to_string()).is_err() {
+                    return;
                 }
+                if allow {
+                    *app.state::<AgentState>().tech_name.lock().unwrap() = Some(tech);
+                }
+                set_status(&app, idle_status(&app));
             });
         }
         Some("call") => {
@@ -253,8 +271,6 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
             } else if tool == "restart_computer" {
                 tauri::async_runtime::spawn(restart_computer(app, tx, id, args));
             } else {
-                let desc = tools::describe(&tool, &args);
-                activity(&app, desc.clone());
                 tauri::async_runtime::spawn(async move {
                     let st = app.state::<AgentState>();
                     let ov = app.state::<overlay::Overlay>();
@@ -264,7 +280,7 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
                     let before = tools::fx_before(&st.ctx, &tool, &args);
                     let _ = app.emit(
                         "fx",
-                        json!({ "phase": "start", "id": id, "tool": tool, "desc": desc, "args": fx_args(&args), "geo": before }),
+                        json!({ "phase": "start", "id": id, "tool": tool, "args": fx_args(&args), "geo": before }),
                     );
                     let out = tools::run(&st.ctx, &tool, &args).await;
                     if moves_mouse(&tool) {
@@ -281,12 +297,8 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
         }
         Some("peer_left") => {
             st.answer.lock().unwrap().take();
-            let who = st.tech_name.lock().unwrap().take();
-            if let Some(who) = who {
-                activity(app, format!("{who} disconnected"));
-            }
-            let code = st.code.lock().unwrap().clone();
-            set_status(app, json!({ "state": "ready", "code": code }));
+            st.tech_name.lock().unwrap().take();
+            set_status(app, idle_status(app));
             let app = app.clone();
             tauri::async_runtime::spawn(async move { app.state::<AgentState>().ctx.reset().await });
         }
@@ -302,23 +314,30 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
     Ok(())
 }
 
+/// False once the technician who asked has left or the relay connection ended while the question was
+/// on screen. The status was already updated by whoever noticed, and nobody is waiting for the result;
+/// carrying on would show "connected" with nobody connected, or restart the computer for no one.
+fn still_paired(app: &AppHandle, tx: &mpsc::UnboundedSender<String>) -> bool {
+    !tx.is_closed() && app.state::<AgentState>().tech_name.lock().unwrap().is_some()
+}
+
 async fn request_admin(app: AppHandle, tx: mpsc::UnboundedSender<String>, id: String) {
     if is_elevated() {
         return reply_text(&tx, &id, true, "Already running as administrator");
     }
     let tech = app.state::<AgentState>().tech_name.lock().unwrap().clone().unwrap_or_default();
-    activity(&app, "Requested administrator access".into());
     let allow = ask_user(&app, json!({ "state": "admin", "techName": tech, "timeoutSec": CONSENT_TIMEOUT.as_secs() })).await;
-    set_status(&app, connected_status(&app));
+    if !still_paired(&app, &tx) {
+        return;
+    }
+    set_status(&app, idle_status(&app));
     if !allow {
-        activity(&app, "You declined administrator access".into());
         return reply_text(&tx, &id, false, "The user declined administrator access");
     }
 
     let code = app.state::<AgentState>().code.lock().unwrap().clone();
     let ok = tokio::task::spawn_blocking(move || relaunch_elevated(&code)).await.unwrap_or(false);
     if !ok {
-        activity(&app, "The Windows confirmation was cancelled".into());
         return reply_text(&tx, &id, false, "The user clicked \"No\" in the Windows confirmation; still running without admin rights");
     }
     reply_text(
@@ -365,8 +384,7 @@ fn disarm_resume() {
 async fn shutdown_exe(args: &[&str]) -> Result<(), String> {
     let mut cmd = tokio::process::Command::new("shutdown.exe");
     cmd.args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000);
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let out = cmd.output().await.map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(())
@@ -381,14 +399,12 @@ async fn restart_computer(app: AppHandle, tx: mpsc::UnboundedSender<String>, id:
     let code = app.state::<AgentState>().code.lock().unwrap().clone();
 
     if flag("cancel") {
-        activity(&app, "Restart cancelled".into());
         disarm_resume();
         let r = shutdown_exe(&["/a"]).await;
         return reply_text(&tx, &id, true, if r.is_ok() { "Restart cancelled" } else { "No restart was pending; the auto-open entry has been cleared" });
     }
 
     if flag("prepareOnly") {
-        activity(&app, "Set the assist app to open after restart".into());
         return match arm_resume(&code) {
             Ok(()) => reply_text(
                 &tx,
@@ -401,11 +417,12 @@ async fn restart_computer(app: AppHandle, tx: mpsc::UnboundedSender<String>, id:
     }
 
     let tech = app.state::<AgentState>().tech_name.lock().unwrap().clone().unwrap_or_default();
-    activity(&app, "Requested a restart".into());
     let allow = ask_user(&app, json!({ "state": "reboot", "techName": tech, "timeoutSec": CONSENT_TIMEOUT.as_secs() })).await;
-    set_status(&app, connected_status(&app));
+    if !still_paired(&app, &tx) {
+        return;
+    }
+    set_status(&app, idle_status(&app));
     if !allow {
-        activity(&app, "You declined the restart".into());
         return reply_text(&tx, &id, false, "The user declined the restart (they may have unsaved work)");
     }
     if let Err(e) = arm_resume(&code) {
@@ -418,7 +435,6 @@ async fn restart_computer(app: AppHandle, tx: mpsc::UnboundedSender<String>, id:
         disarm_resume();
         return reply_text(&tx, &id, false, &e);
     }
-    activity(&app, format!("Restarting in {delay} seconds"));
     reply_text(
         &tx,
         &id,
@@ -458,7 +474,6 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let fixed = arg("--code")
         .filter(|c| c.len() == 6 && c.bytes().all(|b| b.is_ascii_digit()))

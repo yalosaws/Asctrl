@@ -1,4 +1,4 @@
-//! Window listing, window switching, launching programs. Coordinates are physical screen pixels.
+//! Window listing, window switching, launching programs, clipboard text. Coordinates are physical screen pixels.
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
@@ -104,12 +104,11 @@ pub fn find(handle: Option<isize>, query: &str) -> Result<HWND, String> {
     if q.is_empty() {
         return Err("handle or title is required".into());
     }
-    let hits: Vec<&Win> =
-        wins.iter().filter(|w| w.title.to_lowercase().contains(&q) || w.process.to_lowercase().contains(&q)).collect();
-    match hits.len() {
-        0 => Err(format!("No window whose title or program name contains \"{query}\"; try list_windows first")),
-        _ => Ok(HWND(hits[0].handle as *mut _)),
-    }
+    // Front-most match wins
+    wins.iter()
+        .find(|w| w.title.to_lowercase().contains(&q) || w.process.to_lowercase().contains(&q))
+        .map(|w| HWND(w.handle as *mut _))
+        .ok_or(format!("No window whose title or program name contains \"{query}\"; try list_windows first"))
 }
 
 pub fn act(h: HWND, action: &str) -> Result<String, String> {
@@ -201,4 +200,46 @@ unsafe fn visible_rect(h: HWND) -> Option<RECT> {
     }
     unsafe { GetWindowRect(h, &mut r) }.ok()?;
     Some(r)
+}
+
+/// Put text on the clipboard
+pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
+    unsafe {
+        // Another program (a clipboard manager, a remote-desktop client) may hold the clipboard for a moment
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        if !opened {
+            return Err("The clipboard is in use by another program; try again".into());
+        }
+        let result = (|| {
+            EmptyClipboard().map_err(|e| e.to_string())?;
+            let mem = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).map_err(|e| e.to_string())?;
+            let p = GlobalLock(mem) as *mut u16;
+            if p.is_null() {
+                let _ = GlobalFree(Some(mem));
+                return Err("Out of memory".to_string());
+            }
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+            let _ = GlobalUnlock(mem);
+            // On success the clipboard owns the memory; on failure it is still ours to free
+            if let Err(e) = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(mem.0))) {
+                let _ = GlobalFree(Some(mem));
+                return Err(e.to_string());
+            }
+            Ok(())
+        })();
+        let _ = CloseClipboard();
+        result.map_err(|e| format!("Failed to write the clipboard: {e}"))
+    }
 }

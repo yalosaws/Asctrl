@@ -16,6 +16,7 @@ Helps people who aren't comfortable with computers get them fixed: they run a sm
 - Both sides only **connect out** to the relay, so the other computer can be behind a router/NAT.
 - Every connection needs the person to click **Allow** on the agent; actions are shown on their screen.
 - The console is an **MCP server**, so Claude Code / Claude desktop can use the remote computer as a set of tools.
+- The agent pings the relay every 25 s and the relay pings every connection every 30 s, so a code stays valid while the person is reading it out (idle connections are otherwise forgotten by home routers), and a computer that went to sleep or lost Wi-Fi frees its code after 90 s.
 
 | Path | Description |
 |---|---|
@@ -74,7 +75,7 @@ The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-rel
 
 - Agent: build with `ASCTRL_RELAY_URL=ws://124.222.182.40:8787` so the address is compiled into the exe.
 - Console: `.mcp.json` already points at this address. The relay requires a token, read from the `ASCTRL_RELAY_TOKEN` environment variable (not in the repo; ask the maintainer). If the MCP client was started before the variable was set, the server falls back to `ASCTRL_RELAY_TOKEN=...` in a gitignored `.env` at the repo root, then (on Windows) to the user environment in the registry.
-- Updating the relay: copy `src/relay/server.ts` and `src/shared/protocol.ts` to the matching paths under `~/asctrl-relay/src/` on the server, then `sudo systemctl restart asctrl-relay`.
+- Updating the relay: copy `src/relay/server.ts` and `src/shared/protocol.ts` to the matching paths under `~/asctrl-relay/src/` on the server, then `sudo systemctl restart asctrl-relay`. Old and new agents work with old and new relays; the dead-connection cleanup only exists on a relay that has been updated.
 
 ## Tools
 
@@ -83,7 +84,7 @@ The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-rel
 | Category | Tool | Purpose |
 |---|---|---|
 | Connection | `connect` ✅ / `disconnect` ✅ | Connect with an assist code / disconnect. `waitSec` keeps retrying until the agent is back online (after elevation or a restart) |
-| Viewing | `screenshot` ✅ | Screenshot (JPEG, scaled to 1600 wide by default). With several displays, `display` captures one |
+| Viewing | `screenshot` ✅ | Screenshot (JPEG, scaled to 1600 wide by default; captured in-process by the GUI agent, without starting PowerShell). With several displays, `display` captures one |
 | | `zoom` | Re-capture part of the screenshot at native resolution to read small text and icons |
 | | `cursor_position` | Current mouse position on the screenshot |
 | | `wait` | Wait a few seconds, then screenshot (console-side only) |
@@ -110,7 +111,7 @@ After mouse, keyboard and window actions, the MCP console automatically returns 
 
 **Resuming after a restart**: `restart_computer` → the person clicks Allow → countdown and restart → after sign-in the app opens once via the `RunOnce` registry key (same code) → the AI reconnects with `connect` (`waitSec: 300`) and the person clicks Allow again.
 
-**Background jobs** run in a separate PowerShell process and do not share the persistent session's directory or variables; all of them stop when the technician disconnects.
+**Background jobs** run in a separate PowerShell process and do not share the persistent session's directory or variables. Each keeps its most recent 2 MB of output. When the technician disconnects or the person clicks End session, all of them stop, and so does a command still running in the session (with the programs it started).
 
 **Limitations**: without admin rights, windows running as administrator can't be controlled; the UAC prompt and the lock screen can't be clicked with any rights, so the person has to do that themselves.
 
@@ -152,7 +153,7 @@ To test the GUI agent (first run `npm run tauri build -- --debug --no-bundle` in
 node test/e2e.ts --app agent-app/src-tauri/target/debug/asctrl-agent.exe
 ```
 
-Extra GUI-agent checks: session keeps directory and variables, `reset_shell`, upload/download round trip, out-of-range coordinates and unknown keys rejected, `zoom` and per-display screenshots, window listing, file read/write/edit/search (UTF-8 / ANSI / UTF-16), clipboard round trip (restored afterwards), background jobs and stopping them, restart-resume registration and cancel (no real restart). Mouse clicks and typing touch the real desktop, so they are not in the automated test; demo them by hand with `test/demo-step.ts`:
+Extra GUI-agent checks: session keeps directory and variables, `reset_shell` (also while a command is running), upload/download round trip, out-of-range coordinates and unknown keys rejected, `zoom` and per-display screenshots, window listing, file read/write/edit/search (UTF-8 / ANSI / UTF-16), clipboard round trip including long text (restored afterwards), background jobs and stopping them, restart-resume registration and cancel (no real restart). Mouse clicks and typing touch the real desktop, so they are not in the automated test; demo them by hand with `test/demo-step.ts`:
 
 ```bash
 node test/demo-step.ts ws://localhost:8787 <code> @steps.json

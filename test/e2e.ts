@@ -54,6 +54,15 @@ try {
   const host = await tech.connect(CODE);
   check("paired", !!host, host);
 
+  // A second technician is turned away, and its leaving must not end the first one's session
+  await new TechClient(`ws://localhost:${PORT}`, "Intruder").connect(CODE).then(
+    () => check("second technician is rejected", false),
+    (e) => check("second technician is rejected", /already connected/.test(e.message), e.message),
+  );
+  await new Promise((r) => setTimeout(r, 300));
+  const still = await tech.call("run_powershell", { script: "'still here'" });
+  check("first session survives the rejected one", still.ok && !!still.text?.includes("still here"), still.text ?? still.error);
+
   const info = await tech.call("system_info");
   check("system_info", info.ok && !!info.text?.includes("OS"), info.text?.slice(0, 80).replace(/\s+/g, " "));
 
@@ -76,7 +85,9 @@ try {
 
   if (appExe) {
     // ---- Only the GUI agent supports these ----
-    check("screenshot reports its size", /\d+x\d+/.test(shot.text ?? ""), shot.text);
+    check("screenshot reports its size", /Screenshot \d+x\d+/.test(shot.text ?? ""), shot.text);
+    const jpg = Buffer.from(shot.image!.data, "base64");
+    check("screenshot is a JPEG", jpg[0] === 0xff && jpg[1] === 0xd8 && jpg.length > 2000, `${jpg.length} bytes`);
 
     await tech.call("run_powershell", { script: "Set-Location $env:TEMP; $asctrlVar = 'kept'" });
     const keep = await tech.call("run_powershell", { script: "\"$((Get-Location).Path)|$asctrlVar\"" });
@@ -85,6 +96,20 @@ try {
     await tech.call("reset_shell");
     const fresh = await tech.call("run_powershell", { script: "\"[$asctrlVar]\"" });
     check("reset_shell clears the session", fresh.ok && fresh.text?.trim() === "[]", fresh.text);
+
+    // Write-Host -NoNewline leaves the line open, so the end marker follows it on the same line
+    const noNl = await tech.call("run_powershell", { script: "Write-Host -NoNewline 'no newline'", timeoutSec: 15 });
+    check("output without a trailing newline", noNl.ok && noNl.text?.trim() === "no newline", noNl.text ?? noNl.error);
+
+    // A reset must stop a command that is still running, not wait behind it
+    const slow = tech.call("run_powershell", { script: "Start-Sleep -Seconds 60; 'finished'", timeoutSec: 90 });
+    await new Promise((r) => setTimeout(r, 1500));
+    const t0 = Date.now();
+    await tech.call("reset_shell");
+    const cut = await slow;
+    check("reset_shell interrupts a running command", !cut.ok && Date.now() - t0 < 10_000, `${Date.now() - t0} ms, ${cut.error}`);
+    const after = await tech.call("run_powershell", { script: "'ok again'" });
+    check("session works again after the interrupt", after.ok && !!after.text?.includes("ok again"), after.text ?? after.error);
 
     const content = `asctrl file test ${HELLO} ${Date.now()}`;
     const up = await tech.call("upload_file", {
@@ -149,6 +174,10 @@ try {
     check("find_files recursive + multiple patterns", ff.ok && !!ff.text?.includes("u16.log") && !!ff.text?.includes("gbk.bat"), ff.text ?? ff.error);
     const sf = await tech.call("search_files", { path: dir, pattern: `${DISK_FULL.slice(0, 2)}|${ANSI_TEXT.slice(0, 2)}`, context: 0 });
     check("search_files across encodings", sf.ok && !!sf.text?.startsWith("2 matches"), sf.text ?? sf.error);
+    const lossy = await tech.call("write_file", { path: `${dir}\\lossy.txt`, content: "emoji \u{1F600}", encoding: "ansi" });
+    check("ANSI write refuses characters it would lose", !lossy.ok && !!lossy.error?.includes("code page"), lossy.error ?? lossy.text);
+    const few = await tech.call("find_files", { path: dir, pattern: "*", maxResults: 1 });
+    check("find_files stops at maxResults", few.ok && !!few.text?.startsWith("Found 1+"), few.text?.split("\n")[0] ?? few.error);
     const bin = await tech.call("read_file", { path: "%WINDIR%\\notepad.exe" });
     check("binary file is not read as text", !bin.ok && !!bin.error?.includes("binary"), bin.error);
 
@@ -158,6 +187,11 @@ try {
     await tech.call("write_clipboard", { text: mark });
     const clip = await tech.call("read_clipboard");
     check("clipboard read/write", clip.ok && clip.text?.trim() === mark, clip.text ?? clip.error);
+    // Longer than a Windows command line can carry
+    const big = `${HELLO} `.repeat(15_000).trim();
+    const wBig = await tech.call("write_clipboard", { text: big });
+    const rBig = await tech.call("read_clipboard");
+    check("clipboard takes long text", wBig.ok && rBig.text?.trim() === big, wBig.error ?? `${rBig.text?.length} chars back`);
     if (before.ok && before.text && !before.text.startsWith("[") && !before.text.startsWith("(")) {
       await tech.call("write_clipboard", { text: before.text });
     }
@@ -197,7 +231,12 @@ try {
     await tech.call("run_powershell", { script: "Remove-Item -Recurse -Force $env:TEMP\\asctrl-e2e-files" });
   }
 
+  const hanging = tech.call("run_powershell", { script: "Start-Sleep -Seconds 20" });
   tech.disconnect();
+  await Promise.race([hanging, new Promise((r) => setTimeout(() => r("hung"), 3000))]).then(
+    (v) => check("disconnect fails calls still waiting", false, v === "hung" ? "still pending after 3 s" : "resolved"),
+    (e) => check("disconnect fails calls still waiting", true, e.message),
+  );
 } catch (e) {
   check("unexpected exception", false, String(e));
 } finally {

@@ -7,8 +7,8 @@ export type ToolName =
   | "list_processes"
   | "event_log"
   | "run_powershell"
-  | "reset_shell"
   // The following are supported only by the GUI agent (agent-app)
+  | "reset_shell"
   | "click"
   | "scroll"
   | "drag"

@@ -17,7 +17,9 @@ const flag = (name: string) => {
 const RELAY_URL = flag("--relay") ?? process.env.RELAY_URL ?? DEFAULT_RELAY_URL;
 /** For automated tests only: skip the user's confirmation */
 const AUTO_ACCEPT = args.includes("--auto-accept");
-const CODE = flag("--code") ?? String(randomInt(0, 1_000_000)).padStart(6, "0");
+const FIXED_CODE = flag("--code");
+const randomCode = () => String(randomInt(0, 1_000_000)).padStart(6, "0");
+let CODE = FIXED_CODE ?? randomCode();
 
 function send(ws: WebSocket, msg: Message) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
@@ -72,6 +74,8 @@ function connect() {
         break;
       case "error":
         console.error(`Error: ${msg.message}`);
+        // The only error the relay sends an agent is a code collision: try another code next time
+        if (!FIXED_CODE) CODE = randomCode();
         break;
     }
   });
