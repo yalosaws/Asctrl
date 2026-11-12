@@ -169,13 +169,16 @@ export function termEnd(id: string, ok: boolean, text: string) {
     const MAX = 80;
     const shown = all.length > MAX ? all.slice(0, MAX - 1) : all;
     const per = Math.max(2, Math.min(14, 350 / Math.max(1, shown.length)));
+    // Error lines are red; normal output stays normal even when the command failed overall.
+    // If a failure has no marked lines (e.g. a timeout message), the whole text is red.
+    // No check or cross is printed after the output either way.
+    const isErr = (s: string) => /^\[(error|exit code)/.test(s);
+    const allRed = !ok && !shown.some(isErr);
     for (const s of shown) {
-      line(ok ? "out" : "err").textContent = s || " ";
+      line(allRed || isErr(s) ? "err" : "out").textContent = s || " ";
       await sleep(per);
     }
     if (all.length > MAX) line("more").textContent = `… ${all.length - MAX + 1}`;
-    // Success prints nothing extra; only failures get a cross
-    if (!ok) mark(line("status"), false);
     if (pending.size === 0) orb.setBusy(false);
     holds = Math.max(0, holds - 1);
     scheduleClose(4200);

@@ -408,10 +408,18 @@ async fn shell_run(ctx: &Ctx, script: &str, timeout_secs: u64) -> Output {
     match result {
         Ok(out) => {
             let mut s = if out.text.is_empty() { "(no output)".to_string() } else { out.text };
-            if let Some(code) = out.exit_code.filter(|c| *c != 0) {
+            let bad_exit = out.exit_code.filter(|c| *c != 0);
+            if let Some(code) = bad_exit {
                 s.push_str(&format!("\n\n[exit code {code}]"));
             }
-            text(s)
+            // An error record, an exception or a non-zero exit code means the command failed;
+            // the full output (including what did succeed) is still returned
+            let mut o = text(s);
+            if out.had_error || bad_exit.is_some() {
+                o.ok = false;
+                o.error = o.text.take();
+            }
+            o
         }
         Err(e) => {
             if let Some(s) = guard.take() {

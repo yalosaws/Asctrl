@@ -972,9 +972,6 @@ body:not([data-state="connected"]) #btn-end {
 .term-line.err {
   color: #ff8f9c;
 }
-.term-line.status {
-  margin: 4px 0 6px;
-}
 .term-line.more {
   color: var(--ink-3);
 }
