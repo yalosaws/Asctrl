@@ -1,6 +1,6 @@
 # Asctrl — AI 辅助远程修电脑
 
-帮不懂电脑的人修电脑：对方运行一个小程序、报给你一个 6 位连接码，你（和 AI）就能远程截图、查系统信息、看进程和错误日志、执行命令，对方屏幕上能看到你的每一步操作。
+帮不懂电脑的人修电脑：对方运行一个小程序、报给你一个 6 位协助码，你（和 AI）就能远程看屏幕、点鼠标、打字、执行命令、传文件，必要时申请管理员权限，对方屏幕上能看到你的每一步操作。
 
 ## 架构
 
@@ -38,7 +38,7 @@ cd agent-app
 npm install
 ```
 
-界面调试（浏览器里用演示数据，地址加 `?state=ready|consent|connected|offline|connecting` 切换状态）：
+界面调试（浏览器里用演示数据，地址加 `?state=ready|consent|admin|reboot|connected|offline|connecting` 切换状态）：
 
 ```bash
 npm run dev
@@ -58,23 +58,53 @@ npm run tauri build
 
 **中继地址**按以下顺序决定：
 
-1. 环境变量 `ASCTRL_RELAY_URL`
-2. exe 同目录下的 `relay.txt`（里面写一行地址）
-3. 编译时的环境变量 `ASCTRL_RELAY_URL`（推荐：编译前设好，发给对方的 exe 就不用配置）
-4. 默认 `ws://localhost:8787`
+1. 启动参数 `--relay <地址>`
+2. 环境变量 `ASCTRL_RELAY_URL`
+3. exe 同目录下的 `relay.txt`（里面写一行地址）
+4. 编译时的环境变量 `ASCTRL_RELAY_URL`（推荐：编译前设好，发给对方的 exe 就不用配置）
+5. 默认 `ws://localhost:8787`
 
-`ASCTRL_CODE`（固定协助码）和 `ASCTRL_AUTO_ACCEPT`（自动同意）只在 debug 编译里生效，用于自动化测试，正式版里无效。
+启动参数 `--code <6位数字>` 可以指定协助码（管理员重启时用它保持同一个码）。`ASCTRL_CODE`（固定协助码）和 `ASCTRL_AUTO_ACCEPT`（自动同意）环境变量只在 debug 编译里生效，用于自动化测试。
+
+**管理员模式**：AI 调用 `request_admin` → 程序里弹出说明，对方点允许 → Windows 弹出 UAC，对方点"是" → 程序以管理员身份重启，协助码不变 → AI 重新 `connect`，对方再点一次允许。顶部会显示"管理员"标记。
 
 ## 现有工具
 
-| 工具 | 作用 |
-|---|---|
-| `connect` / `disconnect` | 用连接码连接 / 断开 |
-| `screenshot` | 全屏截图（JPEG，默认缩到 1600 宽） |
-| `system_info` | 系统版本、开机时长、CPU、内存、硬盘剩余 |
-| `list_processes` | 按内存排序的进程列表 |
-| `event_log` | System / Application 日志里的错误和警告 |
-| `run_powershell` | 执行任意 PowerShell 脚本 |
+共 37 个，对标 Claude 直接控制本机时的工具（命令行、文件读写搜索、屏幕鼠标键盘、剪贴板、窗口、后台任务）。✅ 表示命令行被控端（Node 版）也支持，其余只有图形界面版支持。
+
+| 类别 | 工具 | 作用 |
+|---|---|---|
+| 连接 | `connect` ✅ / `disconnect` ✅ | 用协助码连接 / 断开。`waitSec` 会一直重试到对方程序重新上线（提权、重启后用） |
+| 看 | `screenshot` ✅ | 截图（JPEG，默认缩到 1600 宽）。多显示器时 `display` 只截某一个 |
+| | `zoom` | 按原始分辨率放大截图里的一块，看清小字和图标 |
+| | `cursor_position` | 鼠标当前在截图上的坐标 |
+| | `wait` | 等几秒后自动截图（只在控制端实现） |
+| 系统 | `system_info` ✅ / `list_processes` ✅ / `event_log` ✅ | 系统概况、进程、错误日志 |
+| 命令 | `run_powershell` ✅ | 在常驻会话里执行（目录和变量保留）；`background: true` 后台运行，不受超时限制 |
+| | `job_output` / `stop_job` | 查看后台任务进度和新输出 / 停止（连子进程一起） |
+| | `reset_shell` | 重置 PowerShell 会话 |
+| 鼠标 | `click` | 单击 / 双击 / 三击，左中右键，可按住 ctrl、shift 等 |
+| | `mouse_move` / `mouse_down` / `mouse_up` | 悬停；分步按下、移动、松开做精细拖动 |
+| | `drag` / `scroll` | 拖动；纵向或横向滚动 |
+| 键盘 | `type_text` | 输入文字，支持中文，不受输入法影响 |
+| | `press_keys` / `hold_key` | 按键 / 组合键（含符号键、音量键），或按住一段时间 |
+| 窗口 | `list_windows` | 打开的窗口：标题、程序、状态、在截图上的位置 |
+| | `focus_window` | 切换到 / 最小化 / 最大化 / 还原 / 关闭某个窗口 |
+| | `open_app` | 打开程序、文件、文件夹、网址或 `ms-settings:` 页面 |
+| 剪贴板 | `read_clipboard` / `write_clipboard` | 读写剪贴板（长文本比 `type_text` 快） |
+| 文件 | `read_file` / `write_file` / `edit_file` | 读（带行号、分段）、写、精确替换。自动识别 UTF-8 / UTF-16 / GBK，写回保持原编码和换行 |
+| | `list_dir` / `find_files` / `search_files` | 列目录；按文件名通配符递归找；按内容正则搜索 |
+| | `upload_file` / `download_file` | 在两台电脑之间传文件（≤ 20 MB） |
+| 权限 | `request_admin` | 申请管理员权限（见上） |
+| | `restart_computer` | 经对方同意后重启电脑，重启登录后程序自动打开、协助码不变；`prepareOnly` 只登记自动打开，`cancel` 取消 |
+
+鼠标、键盘、窗口操作完成后，MCP 控制端会自动再截一张图返回，AI 能马上看到操作结果（传 `screenshot: false` 可以关掉）。
+
+**重启续连**：`restart_computer` → 对方在程序里点允许 → 倒计时重启 → 登录后程序通过注册表 `RunOnce` 自动打开一次（同一个协助码）→ AI 用 `connect`（`waitSec: 300`）重新连接，对方再点一次允许。
+
+**后台任务**在独立的 PowerShell 进程里运行，不共享常驻会话的目录和变量；技术员断开时全部停止。
+
+**限制**：普通权限下无法操作以管理员身份运行的窗口；UAC 确认窗口和锁屏界面任何权限都点不了，只能请对方自己点。
 
 ## 快速开始（需要 Node.js 24+）
 
@@ -114,6 +144,12 @@ npm test
 node test/e2e.ts --app agent-app/src-tauri/target/debug/asctrl-agent.exe
 ```
 
+图形界面版额外测试：会话保留目录和变量、`reset_shell`、文件上传下载往返、超范围坐标和未知按键被拒绝、`zoom` 和指定显示器截图、窗口列表、文件读写改搜（UTF-8 / GBK / UTF-16）、剪贴板往返（测完还原）、后台任务和停止、重启续连的登记与取消（不会真的重启）。鼠标点击和打字会动到真实桌面，不放在自动测试里，用 `test/demo-step.ts` 手动演示：
+
+```bash
+node test/demo-step.ts ws://localhost:8787 <协助码> @steps.json
+```
+
 ```bash
 npm run typecheck
 ```
@@ -139,7 +175,9 @@ npm run typecheck
 - [x] 被控端图形界面（大字协助码 + 同意弹窗 + 操作记录）
 - [ ] 代码签名，减少 SmartScreen / 杀毒软件拦截
 - [ ] 托盘图标、开机不自启（只在需要时打开）
-- [ ] 鼠标点击、键盘输入工具（让 AI 能直接操作界面）
+- [x] 鼠标点击、键盘输入工具（让 AI 能直接操作界面）
+- [x] 文件上传下载
+- [x] 常驻 PowerShell 会话
+- [x] 管理员模式（对方同意 + UAC 后提权重启）
 - [ ] 实时画面（或接入 RustDesk / MeshCentral 做远程桌面）
-- [ ] 文件上传下载
 - [ ] 网页版控制台：不用 Claude 时自己也能看屏幕、点按钮

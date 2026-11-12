@@ -54,12 +54,14 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "rand",
+ "regex",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
  "tokio-tungstenite",
+ "windows",
 ]
 
 [[package]]

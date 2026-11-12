@@ -16,6 +16,7 @@
           <path d="M9 20h6M12 16v4" />
         </svg>
         <span>远程协助</span>
+        <span class="admin-tag" id="admin-tag" hidden>管理员</span>
       </div>
       <div class="pill" id="pill"><i></i><span id="pill-text">连接中</span></div>
     </header>
@@ -78,13 +79,25 @@
     <div class="overlay" id="consent" role="dialog" aria-modal="true" aria-labelledby="consent-title" hidden>
       <div class="sheet">
         <div class="avatar lg" id="consent-avatar">?</div>
-        <h2 id="consent-title"><span id="consent-name"></span> 想远程协助你的电脑</h2>
-        <p class="sheet-sub">允许后，对方可以：</p>
-        <ul class="perm">
+        <h2 id="consent-title"><span id="consent-name"></span> <span id="consent-ask">想远程协助你的电脑</span></h2>
+        <p class="sheet-sub" id="consent-sub">允许后，对方可以：</p>
+        <ul class="perm" id="perm-consent">
           <li>看到你的屏幕</li>
-          <li>查看电脑的配置和运行情况</li>
-          <li>运行命令来修复问题</li>
+          <li>操作鼠标和键盘</li>
+          <li>运行命令、传输文件来修复问题</li>
         </ul>
+        <ul class="perm" id="perm-admin" hidden>
+          <li>修复系统文件、管理系统服务</li>
+          <li>安装或卸载软件</li>
+          <li>修改系统设置</li>
+        </ul>
+        <ul class="perm" id="perm-reboot" hidden>
+          <li>先保存好正在写的文档、关掉要用的网页</li>
+          <li>电脑会在十几秒后重启</li>
+          <li>重启后这个程序会自动打开，协助码不变</li>
+        </ul>
+        <p class="sheet-note" id="admin-note" hidden>点允许后会弹出 Windows 的确认窗口，请点「是」，程序会自动重新打开</p>
+        <p class="sheet-note" id="reboot-note" hidden>重启后如果要输入开机密码，请照常登录，登录后对方会重新连接</p>
         <div class="timer"><div class="timer-bar" id="timer-bar"></div></div>
         <p class="timer-text"><span id="timer-sec">120</span> 秒后自动拒绝</p>
         <div class="actions">

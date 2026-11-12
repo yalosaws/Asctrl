@@ -6,6 +6,8 @@ type Status =
   | { state: "offline"; message?: string }
   | { state: "ready"; code: string }
   | { state: "consent"; techName: string; timeoutSec: number }
+  | { state: "admin"; techName: string; timeoutSec: number }
+  | { state: "reboot"; techName: string; timeoutSec: number }
   | { state: "connected"; techName: string; code: string };
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -15,6 +17,8 @@ const PILL: Record<Status["state"], string> = {
   offline: "离线",
   ready: "等待连接",
   consent: "有人请求连接",
+  admin: "协助中",
+  reboot: "协助中",
   connected: "协助中",
 };
 
@@ -42,8 +46,22 @@ function renderCode(code: string) {
   });
 }
 
-function showConsent(techName: string, timeoutSec: number) {
+type Ask = "consent" | "admin" | "reboot";
+
+const ASK_TEXT: Record<Ask, [string, string]> = {
+  consent: ["想远程协助你的电脑", "允许后，对方可以："],
+  admin: ["需要管理员权限", "允许后，对方还可以："],
+  reboot: ["需要重启你的电脑", "点允许之前请注意："],
+};
+
+function showConsent(techName: string, timeoutSec: number, kind: Ask) {
   $("consent-name").textContent = techName;
+  [$("consent-ask").textContent, $("consent-sub").textContent] = ASK_TEXT[kind];
+  $("perm-consent").hidden = kind !== "consent";
+  $("perm-admin").hidden = kind !== "admin";
+  $("admin-note").hidden = kind !== "admin";
+  $("perm-reboot").hidden = kind !== "reboot";
+  $("reboot-note").hidden = kind !== "reboot";
   $("consent-avatar").textContent = initial(techName);
   $("consent").hidden = false;
   $("btn-allow").focus();
@@ -70,7 +88,7 @@ function render(s: Status) {
   document.body.dataset.state = s.state;
   $("pill-text").textContent = PILL[s.state];
 
-  if (s.state === "consent") showConsent(s.techName, s.timeoutSec);
+  if (s.state === "consent" || s.state === "admin" || s.state === "reboot") showConsent(s.techName, s.timeoutSec, s.state);
   else hideConsent();
 
   if (s.state === "ready") renderCode(s.code);
@@ -106,9 +124,11 @@ function addActivity(text: string) {
 }
 
 async function respond(allow: boolean) {
+  const wasAdmin = document.body.dataset.state === "admin" || document.body.dataset.state === "reboot";
   hideConsent();
-  if (isTauri) await invoke("respond_consent", { allow });
-  else render(allow ? { state: "connected", techName: $("consent-name").textContent ?? "", code: lastCode } : { state: "ready", code: lastCode });
+  if (isTauri) await invoke("respond", { allow });
+  else if (allow || wasAdmin) render({ state: "connected", techName: $("consent-name").textContent ?? "", code: lastCode });
+  else render({ state: "ready", code: lastCode });
 }
 
 $("btn-allow").addEventListener("click", () => respond(true));
@@ -125,21 +145,24 @@ document.addEventListener("keydown", (e) => {
 if (isTauri) {
   await listen<Status>("status", (e) => render(e.payload));
   await listen<{ text: string }>("activity", (e) => addActivity(e.payload.text));
+  $("admin-tag").hidden = !(await invoke<boolean>("is_admin"));
   render(await invoke<Status>("get_status"));
 } else {
-  // 浏览器预览：?state=ready|consent|connected|offline|connecting，方便调界面
+  // 浏览器预览：?state=ready|consent|admin|reboot|connected|offline|connecting，方便调界面
   const state = (new URLSearchParams(location.search).get("state") ?? "ready") as Status["state"];
   const demo: Record<Status["state"], Status> = {
     connecting: { state: "connecting" },
     offline: { state: "offline", message: "IO error: 由于目标计算机积极拒绝，无法连接。 (os error 10061)" },
     ready: { state: "ready", code: "482913" },
     consent: { state: "consent", techName: "小王", timeoutSec: 120 },
+    admin: { state: "admin", techName: "小王", timeoutSec: 120 },
+    reboot: { state: "reboot", techName: "小王", timeoutSec: 120 },
     connected: { state: "connected", techName: "小王", code: "482913" },
   };
   renderCode("482913");
   render(demo[state]);
-  if (state === "connected") {
-    ["你允许了 小王 连接", "查看了电脑基本信息", "查看了你的屏幕", "查看了系统错误日志",
-      "执行命令：Get-Process chrome | Stop-Process", "查看了正在运行的程序"].forEach(addActivity);
+  if (state === "connected" || state === "admin" || state === "reboot") {
+    ["你允许了 小王 连接", "查看了电脑基本信息", "查看了你的屏幕", "点击了屏幕", "输入了文字：notepad",
+      "按下了 enter", "执行命令：Get-Process chrome | Stop-Process", "请求管理员权限"].forEach(addActivity);
   }
 }

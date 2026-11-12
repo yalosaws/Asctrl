@@ -113,8 +113,25 @@ svg {
 }
 
 body[data-state="ready"] .pill i { background: var(--accent); }
-body[data-state="connected"] .pill { color: var(--accent); background: var(--accent-soft); }
-body[data-state="connected"] .pill i { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+body[data-state="connected"] .pill,
+body[data-state="admin"] .pill,
+body[data-state="reboot"] .pill { color: var(--accent); background: var(--accent-soft); }
+body[data-state="connected"] .pill i,
+body[data-state="admin"] .pill i,
+body[data-state="reboot"] .pill i { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+
+.admin-tag {
+  padding: 1px 7px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.admin-tag[hidden] {
+  display: none;
+}
 body[data-state="offline"] .pill { color: var(--warn); background: var(--warn-soft); }
 body[data-state="offline"] .pill i { background: var(--warn); }
 
@@ -141,7 +158,9 @@ body[data-state="connecting"] [data-view="connecting"],
 body[data-state="offline"] [data-view="offline"],
 body[data-state="ready"] [data-view="ready"],
 body[data-state="consent"] [data-view="ready"],
-body[data-state="connected"] [data-view="connected"] {
+body[data-state="connected"] [data-view="connected"],
+body[data-state="admin"] [data-view="connected"],
+body[data-state="reboot"] [data-view="connected"] {
   display: flex;
 }
 
@@ -443,7 +462,9 @@ body[data-state="connected"] [data-view="connected"] {
   color: var(--ink-3);
 }
 
-body[data-state="connected"] .foot {
+body[data-state="connected"] .foot,
+body[data-state="admin"] .foot,
+body[data-state="reboot"] .foot {
   display: none;
 }
 
@@ -498,6 +519,20 @@ body[data-state="connected"] .foot {
   list-style: none;
   text-align: left;
   font-size: 14px;
+}
+
+.perm[hidden],
+.sheet-note[hidden] {
+  display: none;
+}
+
+.sheet-note {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--warn);
+  background: var(--warn-soft);
 }
 
 .perm li::before {

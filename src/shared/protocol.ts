@@ -6,7 +6,37 @@ export type ToolName =
   | "system_info"
   | "list_processes"
   | "event_log"
-  | "run_powershell";
+  | "run_powershell"
+  | "reset_shell"
+  // 以下只有图形界面被控端（agent-app）支持
+  | "click"
+  | "scroll"
+  | "drag"
+  | "type_text"
+  | "press_keys"
+  | "upload_file"
+  | "download_file"
+  | "request_admin"
+  | "restart_computer"
+  | "zoom"
+  | "cursor_position"
+  | "mouse_move"
+  | "mouse_down"
+  | "mouse_up"
+  | "hold_key"
+  | "list_windows"
+  | "focus_window"
+  | "open_app"
+  | "read_clipboard"
+  | "write_clipboard"
+  | "read_file"
+  | "write_file"
+  | "edit_file"
+  | "list_dir"
+  | "find_files"
+  | "search_files"
+  | "job_output"
+  | "stop_job";
 
 // ---- 握手阶段 ----
 
@@ -72,6 +102,8 @@ export interface ToolResult {
   text?: string;
   /** 图片结果（base64） */
   image?: { data: string; mimeType: string };
+  /** 文件结果（download_file，base64） */
+  file?: { name: string; data: string };
   error?: string;
 }
 
