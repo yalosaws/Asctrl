@@ -5,7 +5,6 @@ import { listen } from "@tauri-apps/api/event";
 import { center, dock, hit, home, initGeo, isTauri, primary, setHome, syncHits, type OverlayInfo } from "./geo";
 import { orb } from "./orb";
 import { resizeFx, stepFx, stream, burst, ring } from "./particles";
-import { caption, followCaption } from "./caption";
 import { collapse, expand, isShown } from "./frame";
 import { fxEnd, fxStart, type FxEvent } from "./fx";
 import { sleep } from "./ease";
@@ -29,7 +28,6 @@ const orbHit = $<HTMLButtonElement>("orb-hit");
 
 let state: Status["state"] = "connecting";
 let lastCode = "";
-let techName = "";
 let entered = false;
 let consentTimer: number | undefined;
 
@@ -99,8 +97,6 @@ let menuTimer: number | undefined;
 function openMenu() {
   window.clearTimeout(menuTimer);
   if (state === "consent" || state === "admin" || state === "reboot") return;
-  $("menu-status").textContent =
-    state === "connected" ? `${techName} 正在帮你看电脑` : state === "ready" ? "等待对方连接" : state === "offline" ? "暂时连不上服务器" : "正在准备";
   resetQuit();
   showPanel(menu, true, true);
 }
@@ -127,7 +123,6 @@ quitBtn.addEventListener("click", async () => {
     return;
   }
   showPanel(menu, false, true);
-  caption("再见", 0);
   orb.setMood("happy");
   await sleep(500);
   orb.show(false);
@@ -140,18 +135,6 @@ $("btn-end").addEventListener("click", () => {
   else render({ state: "ready", code: lastCode });
 });
 
-function addActivity(text: string) {
-  const li = document.createElement("li");
-  const time = document.createElement("time");
-  time.textContent = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-  const span = document.createElement("span");
-  span.textContent = text;
-  span.title = text;
-  li.append(time, span);
-  const log = $("menu-log");
-  log.prepend(li);
-  while (log.childElementCount > 8) log.lastElementChild?.remove();
-}
 
 // ---------------- 同意 ----------------
 
@@ -208,7 +191,6 @@ $("btn-deny").addEventListener("click", () => respond(false));
 // ---------------- 状态机 ----------------
 
 function render(s: Status) {
-  const prev = state;
   state = s.state;
   document.body.dataset.state = s.state;
   const asking = s.state === "consent" || s.state === "admin" || s.state === "reboot";
@@ -221,7 +203,6 @@ function render(s: Status) {
     orb.bump(1);
     showPanel(codeCard, false);
     showConsent(s.techName, s.timeoutSec, s.state as Ask);
-    caption("");
     return;
   }
   setHome(null);
@@ -231,25 +212,20 @@ function render(s: Status) {
     case "connecting":
       orb.setMood("ready");
       showPanel(codeCard, false);
-      caption("正在准备…", 0);
       break;
     case "offline":
       orb.setMood("offline");
       showPanel(codeCard, false);
-      caption(`暂时连不上服务器，正在重试${s.message ? "" : "…"}`, 0);
       if (entered) orb.goTo(home(), "slow");
       break;
     case "ready":
       renderCode(s.code);
-      techName = "";
       if (isShown()) {
-        caption("协助已结束", 3000);
         void collapse().then(() => {
           orb.goTo(home(), "slow");
           if (state === "ready") showPanel(codeCard, true);
         });
       } else {
-        if (prev !== "ready") caption("");
         if (entered) {
           orb.goTo(home(), "slow");
           showPanel(codeCard, true);
@@ -258,13 +234,10 @@ function render(s: Status) {
       orb.setMood("ready");
       break;
     case "connected":
-      techName = s.techName;
       showPanel(codeCard, false);
       if (!isShown()) {
-        caption(`${s.techName} 开始帮你看电脑`, 0);
         void expand().then(() => {
           orb.setMood("idle");
-          caption(`${s.techName} 正在帮你看电脑，每一步都会显示在这里`, 4000);
         });
       } else {
         orb.goTo(home(), "slow");
@@ -313,7 +286,6 @@ function frame(now: number) {
   last = now;
   orb.update(dt);
   stepFx(dt);
-  followCaption();
   besideOrb(codeCard, "left");
   besideOrb(menu, "left");
   besideOrb(consent, "below");
@@ -348,7 +320,6 @@ async function boot() {
 
   if (isTauri) {
     await listen<Status>("status", (e) => render(e.payload));
-    await listen<{ text: string }>("activity", (e) => addActivity(e.payload.text));
     await listen<FxEvent>("fx", (e) => (e.payload.phase === "start" ? fxStart(e.payload) : fxEnd(e.payload)));
     $("admin-tag").hidden = !(await invoke<boolean>("is_admin"));
     render(await invoke<Status>("get_status"));
@@ -356,7 +327,7 @@ async function boot() {
   } else {
     document.body.classList.add("demo");
     void entrance();
-    runDemo({ render, addActivity, dock });
+    runDemo({ render, dock });
   }
 }
 

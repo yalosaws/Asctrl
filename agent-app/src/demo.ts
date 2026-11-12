@@ -9,15 +9,13 @@ import { sleep } from "./ease";
 interface Hooks {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   render: (s: any) => void;
-  addActivity: (t: string) => void;
   dock: () => Pt;
 }
 
 let seq = 0;
 
-async function sim(tool: string, desc: string, args: Record<string, unknown>, geo: Record<string, unknown>, ms: number, ok = true, text = "", geoEnd: Record<string, unknown> = {}, hooks?: Hooks) {
+async function sim(tool: string, desc: string, args: Record<string, unknown>, geo: Record<string, unknown>, ms: number, ok = true, text = "", geoEnd: Record<string, unknown> = {}, _hooks?: Hooks) {
   const id = `d${++seq}`;
-  hooks?.addActivity(desc);
   const start: FxEvent = { phase: "start", id, tool, desc, args, geo };
   fxStart(start);
   await sleep(ms);

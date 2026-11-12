@@ -176,33 +176,6 @@ body.demo .fake-taskbar {
   box-shadow: 0 0 12px rgba(255, 181, 71, 0.7);
 }
 
-#caption {
-  position: fixed;
-  left: 0;
-  top: 0;
-  z-index: 21;
-  max-width: 460px;
-  padding: 8px 16px;
-  border-radius: 99px;
-  font-size: 14px;
-  line-height: 1.4;
-  color: var(--ink);
-  background: var(--glass);
-  border: 1px solid var(--line);
-  box-shadow:
-    0 8px 30px rgba(0, 0, 0, 0.35),
-    0 0 20px rgba(61, 139, 255, 0.25);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  opacity: 0;
-  transition: opacity 0.35s ease;
-  pointer-events: none;
-}
-#caption.on {
-  opacity: 1;
-}
-
 /* ---------------- 面板通用 ---------------- */
 
 .panel {
@@ -318,39 +291,8 @@ body.demo .fake-taskbar {
 /* ---------------- 菜单 ---------------- */
 
 .menu {
-  width: 300px;
-  padding: 14px;
-}
-.menu-status {
-  margin: 0 4px 8px;
-  font-size: 14px;
-  font-weight: 600;
-}
-.menu-log {
-  list-style: none;
-  margin: 0 0 12px;
-  padding: 0;
-  max-height: 180px;
-  overflow: hidden;
-  font-size: 12.5px;
-  color: var(--ink-2);
-}
-.menu-log li {
-  display: flex;
-  gap: 8px;
-  padding: 5px 4px;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.menu-log time {
-  color: var(--ink-3);
-  font-variant-numeric: tabular-nums;
-}
-.menu-log span {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  width: 260px;
+  padding: 12px;
 }
 .menu-actions {
   display: flex;
@@ -776,6 +718,21 @@ body:not([data-state="connected"]) #btn-end {
   color: #bfe4ff;
   background: rgba(70, 160, 255, 0.16);
 }
+.card-badge:empty {
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border-radius: 50%;
+  background: #62b0ff;
+  box-shadow: 0 0 10px #62b0ff;
+  animation: badge-breathe 0.9s ease-in-out infinite alternate;
+}
+@keyframes badge-breathe {
+  to {
+    transform: scale(0.55);
+    opacity: 0.5;
+  }
+}
 .card-badge.ok {
   color: #08301e;
   background: var(--green);
@@ -950,9 +907,6 @@ body:not([data-state="connected"]) #btn-end {
 }
 .term-line .prompt {
   color: #62b0ff;
-}
-.term-line .note {
-  color: #6c7a99;
 }
 .term-line.out {
   color: #b5c3e0;

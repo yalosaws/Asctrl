@@ -36,7 +36,7 @@ function open() {
   el("i", "dot r", bar);
   el("i", "dot y", bar);
   el("i", "dot g", bar);
-  el("span", "term-title", bar, "Windows PowerShell · AI 正在操作");
+  el("span", "term-title", bar, "PowerShell");
   body = el("div", "term-body", win);
   win.animate(
     [
@@ -96,7 +96,7 @@ async function typeInto(target: HTMLElement, text: string) {
 }
 
 /** 开始一条命令：打出命令，显示等待中的转圈 */
-export function termStart(id: string, command: string, note?: string) {
+export function termStart(id: string, command: string) {
   // 终端挨着小精灵的"家"，先飞回去再敲命令
   orb.goTo(home(), "fast");
   orb.lookAt(null);
@@ -109,7 +109,6 @@ export function termStart(id: string, command: string, note?: string) {
       el("span", "prompt", l, i === 0 ? "PS ~> " : ">> ");
       const span = el("span", "", l);
       await typeInto(span, lines[i]);
-      if (i === lines.length - 1 && note) el("span", "note", l, `  # ${note}`);
     }
     const spin = el("span", "spin", line("wait"));
     pending.set(id, spin);
@@ -134,7 +133,7 @@ export function termEnd(id: string, ok: boolean, text: string) {
     }
     if (all.length > MAX) line("more").textContent = `… 还有 ${all.length - MAX + 1} 行`;
     const status = line(ok ? "ok" : "err");
-    status.textContent = ok ? "✔ 完成" : "✖ 出错了";
+    status.textContent = ok ? "✔" : "✖";
     if (win) {
       const b = win.getBoundingClientRect();
       burst({ x: b.left + 40, y: b.bottom - 24 }, { n: 12, hue: ok ? 150 : 0, speed: 180 });

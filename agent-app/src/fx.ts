@@ -5,7 +5,6 @@ import { center, dock, home, monitorAt, monitors, primary, pt, rect, type Pt, ty
 import { orb } from "./orb";
 import { absorb, beam, burst, ring, shatterRect, stream } from "./particles";
 import { pulse } from "./frame";
-import { caption } from "./caption";
 import { termBox, termEnd, termStart } from "./terminal";
 import { done, el, sleep, tween } from "./ease";
 
@@ -492,7 +491,7 @@ interface Card {
 let current: Card | null = null;
 const cards = new Map<string, Card>();
 
-function card(id: string, kind: string, title: string, sub: string, label: string): Card {
+function card(id: string, kind: string, title: string, sub = ""): Card {
   if (current) dismiss(current, true);
   const root = el("div", `card k-${kind}`, layer);
   const head = el("div", "card-head", root);
@@ -500,7 +499,7 @@ function card(id: string, kind: string, title: string, sub: string, label: strin
   const tt = el("div", "card-titles", head);
   el("div", "card-title", tt, title);
   if (sub) el("div", "card-sub", tt, sub);
-  const badge = el("span", "card-badge", head, label);
+  const badge = el("span", "card-badge", head);
   const body = el("div", "card-body", root);
   const d = dock();
   const work = primary().work;
@@ -573,7 +572,7 @@ async function fillLines(c: Card, lines: string[], cls = "", highlight?: RegExp)
 }
 
 function finishBadge(c: Card, ok: boolean, text?: string) {
-  c.badge.textContent = ok ? "✔ 完成" : "✖ 失败";
+  c.badge.textContent = ok ? "✔" : "✖";
   c.badge.classList.add(ok ? "ok" : "bad");
   c.root.classList.add(ok ? "ok" : "bad");
   if (!ok && text) {
@@ -595,19 +594,19 @@ function fileStart(e: FxEvent) {
   const path = str(a.path);
   switch (e.tool) {
     case "read_file": {
-      const c = card(e.id, "read", baseName(path), dirName(path), "读取中");
+      const c = card(e.id, "read", baseName(path), dirName(path));
       skeleton(c);
       setTimeout(() => beam(() => orb.pos, () => center(cardRect(c)), { ms: 700, hue: 200 }), 200);
       return;
     }
     case "write_file": {
-      const c = card(e.id, "write", baseName(path), dirName(path), "写入中");
+      const c = card(e.id, "write", baseName(path), dirName(path));
       stream(() => orb.pos, () => center(cardRect(c)), { n: 20, hue: 150 });
       fillLines(c, lines(str(a.content)), "add");
       return;
     }
     case "edit_file": {
-      const c = card(e.id, "edit", baseName(path), dirName(path), "修改中");
+      const c = card(e.id, "edit", baseName(path), dirName(path));
       const oldL = lines(str(a.oldText)).slice(0, 5);
       const newL = lines(str(a.newText)).slice(0, 5);
       (async () => {
@@ -626,18 +625,18 @@ function fileStart(e: FxEvent) {
       return;
     }
     case "list_dir": {
-      const c = card(e.id, "dir", baseName(path || "~") || "用户目录", path, "打开中");
+      const c = card(e.id, "dir", baseName(path || "~"), path);
       skeleton(c, 7);
       return;
     }
     case "find_files": {
-      const c = card(e.id, "find", `找 ${str(a.pattern)}`, path, "查找中");
+      const c = card(e.id, "find", str(a.pattern), path);
       skeleton(c, 5);
       scanBar(c);
       return;
     }
     case "search_files": {
-      const c = card(e.id, "search", `搜 “${str(a.pattern)}”`, path, "搜索中");
+      const c = card(e.id, "search", str(a.pattern), path);
       skeleton(c, 5);
       scanBar(c);
       const lens = el("i", "card-lens", c.root);
@@ -649,7 +648,7 @@ function fileStart(e: FxEvent) {
       return;
     }
     case "upload_file": {
-      const c = card(e.id, "upload", baseName(path), "对方传来一个文件", "接收中");
+      const c = card(e.id, "upload", baseName(path));
       const bar = el("div", "prog", c.body);
       el("i", "", bar).animate([{ width: "0%" }, { width: "92%" }], { duration: 1200, easing: "cubic-bezier(.3,.6,.4,1)", fill: "forwards" });
       const top = primary().bounds;
@@ -657,18 +656,18 @@ function fileStart(e: FxEvent) {
       return;
     }
     case "download_file": {
-      const c = card(e.id, "download", baseName(path), "发送给帮你的人", "读取中");
+      const c = card(e.id, "download", baseName(path));
       const bar = el("div", "prog", c.body);
       el("i", "", bar).animate([{ width: "0%" }, { width: "70%" }], { duration: 900, fill: "forwards" });
       return;
     }
     case "read_clipboard": {
-      const c = card(e.id, "clip", "剪贴板", "", "查看中");
+      const c = card(e.id, "clip", "");
       skeleton(c, 3);
       return;
     }
     case "write_clipboard": {
-      const c = card(e.id, "clip", "剪贴板", "放入内容", "写入中");
+      const c = card(e.id, "clip", "");
       fillLines(c, lines(str(a.text)), "add");
       stream(() => orb.pos, () => center(cardRect(c)), { n: 12, hue: 150 });
       return;
@@ -744,25 +743,25 @@ async function fileEnd(e: FxEvent) {
 
 // ---- 命令行 ----
 
-function termCommand(e: FxEvent): [string, string?] {
+function termCommand(e: FxEvent): string {
   const a = e.args ?? {};
   switch (e.tool) {
     case "run_powershell":
-      return a.background === true ? [`Start-Job { ${str(a.script).trim()} }`, "后台运行"] : [str(a.script).trim()];
+      return a.background === true ? `Start-Job { ${str(a.script).trim()} }` : str(a.script).trim();
     case "system_info":
-      return ["Get-ComputerInfo", "查看电脑基本信息"];
+      return "Get-ComputerInfo";
     case "list_processes":
-      return [`Get-Process | Sort-Object WorkingSet64 -Descending | Select -First ${num(a.top, 30)}`, "看看哪些程序在运行"];
+      return `Get-Process | Sort-Object WorkingSet64 -Descending | Select -First ${num(a.top, 30)}`;
     case "event_log":
-      return [`Get-WinEvent -LogName ${str(a.log) || "System"} -MaxEvents ${num(a.max, 30)}`, "查看系统错误日志"];
+      return `Get-WinEvent -LogName ${str(a.log) || "System"} -MaxEvents ${num(a.max, 30)}`;
     case "job_output":
-      return [a.jobId === undefined ? "Get-Job" : `Receive-Job -Id ${str(a.jobId)}`, "后台任务进度"];
+      return a.jobId === undefined ? "Get-Job" : `Receive-Job -Id ${str(a.jobId)}`;
     case "stop_job":
-      return [`Stop-Job -Id ${str(a.jobId)}`];
+      return `Stop-Job -Id ${str(a.jobId)}`;
     case "reset_shell":
-      return ["exit; powershell", "重开一个命令窗口"];
+      return "exit; powershell";
     default:
-      return [e.tool];
+      return e.tool;
   }
 }
 
@@ -779,7 +778,6 @@ const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
 export function fxStart(e: FxEvent) {
   started.set(e.id, { args: e.args, geo: e.geo });
   attend();
-  if (e.desc) caption(e.desc);
   pulse(HUE_OF(e.tool));
   switch (e.tool) {
     case "screenshot":
@@ -816,8 +814,7 @@ export function fxStart(e: FxEvent) {
       return;
   }
   if (TERM.has(e.tool)) {
-    const [cmd, note] = termCommand(e);
-    return termStart(e.id, cmd, note);
+    return termStart(e.id, termCommand(e));
   }
   if (FILE.has(e.tool)) return fileStart(e);
 }
@@ -857,6 +854,5 @@ export function fxEnd(ev: FxEvent) {
       if (TERM.has(e.tool)) termEnd(e.id, ok, e.text ?? "");
       else if (FILE.has(e.tool)) void fileEnd(e);
   }
-  if (!ok && e.text) caption(`没成功：${e.text.split("\n")[0].slice(0, 60)}`, 3500);
   release(ok, TERM.has(e.tool) ? 2600 : 1500);
 }
