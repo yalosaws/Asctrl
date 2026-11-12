@@ -367,8 +367,16 @@ body.demo .fake-taskbar {
 /* ---------------- Assist code ---------------- */
 
 .code-card {
+  /* Light theme, matching the work panel */
+  --ink: #1d2033;
+  --line: rgba(24, 28, 64, 0.08);
   padding: 18px 20px;
   text-align: center;
+  color: var(--ink);
+  background: #fff;
+  box-shadow:
+    0 14px 36px rgba(24, 28, 64, 0.16),
+    0 0 0 1px var(--line);
 }
 .code {
   display: flex;
@@ -385,7 +393,7 @@ body.demo .fake-taskbar {
   width: 38px;
   padding: 4px 0;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(24, 28, 64, 0.04);
   box-shadow: inset 0 0 0 1px var(--line);
   animation: digit-in 0.55s cubic-bezier(0.2, 1.3, 0.4, 1) backwards;
 }
