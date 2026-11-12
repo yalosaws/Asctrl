@@ -18,6 +18,8 @@ interface Edge {
   /** Wider, brighter ring that flashes only when an action happens */
   flare: HTMLDivElement;
   spins: Animation[];
+  /** The flare's current flash, if any; a new flash continues from its opacity instead of restarting */
+  glow?: Animation;
   mon: R;
 }
 
@@ -84,7 +86,7 @@ export function expand(): Promise<void> {
     const ins: Promise<void>[] = [];
     for (const e of edges) {
       ins.push(done(play(e.ring, [{ opacity: 0, transform: "scale(1.06)" }, { opacity: 1, transform: "scale(1)" }], { duration: 900 })));
-      play(e.flare, [{ opacity: 0 }, { opacity: 1, offset: 0.25 }, { opacity: 0 }], { duration: 1700, easing: EASE.soft });
+      flash(e, 1, 425, 1275);
     }
     await Promise.all(ins);
     orb.goTo(home(), "normal");
@@ -107,9 +109,32 @@ export function collapse(): Promise<void> {
   return busy;
 }
 
+/**
+ * Light the flare up to `peak` and let it fade. It always starts from the flare's current opacity, so
+ * back-to-back flashes (e.g. rapid screenshots) blend into one steady glow instead of dropping to dark
+ * and jumping back up, which strobed. While it is already bright it simply holds and fades later.
+ */
+function flash(e: Edge, peak: number, riseMs: number, fallMs: number, holdMs = 0) {
+  const cur = Number(getComputedStyle(e.flare).opacity) || 0;
+  const top = Math.max(cur, peak);
+  const rise = top > 0 ? riseMs * ((top - cur) / top) : 0;
+  const total = rise + holdMs + fallMs;
+  e.glow?.cancel();
+  e.glow = play(
+    e.flare,
+    [
+      { opacity: cur, easing: EASE.inOut },
+      { opacity: top, offset: rise / total, easing: "linear" },
+      { opacity: top, offset: (rise + holdMs) / total, easing: EASE.inOut },
+      { opacity: 0 },
+    ],
+    { duration: total, easing: "linear" },
+  );
+}
+
 /** When a tool starts, the ring brightens and thickens briefly */
 export function pulse() {
-  for (const e of edges) play(e.flare, [{ opacity: 0.9 }, { opacity: 0 }], { duration: 900, easing: EASE.out });
+  for (const e of edges) flash(e, 0.9, 0, 900);
 }
 
 const overlaps = (a: R, b: R) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
@@ -118,7 +143,7 @@ const overlaps = (a: R, b: R) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y
 export function breathe(regions?: R[]) {
   for (const e of edges) {
     if (regions && !regions.some((r) => overlaps(r, e.mon))) continue;
-    play(e.flare, [{ opacity: 0 }, { opacity: 1, offset: 0.4 }, { opacity: 0 }], { duration: 1100, easing: EASE.inOut });
+    flash(e, 1, 440, 660, 350);
   }
 }
 
