@@ -62,7 +62,7 @@ npm run tauri build
 2. Environment variable `ASCTRL_RELAY_URL`
 3. `relay.txt` next to the exe (one line with the URL)
 4. Compile-time environment variable `ASCTRL_RELAY_URL` (recommended: set it before building so the exe you send needs no setup)
-5. Default `ws://localhost:8787`
+5. Default: the hosted relay `ws://124.222.182.40:8787` in release builds, `ws://localhost:8787` in debug builds
 
 The `--code <6 digits>` flag fixes the assist code (used to keep the same code across an elevated restart). The `ASCTRL_CODE` (fixed code) and `ASCTRL_AUTO_ACCEPT` (auto-allow) environment variables only work in debug builds, for automated tests.
 

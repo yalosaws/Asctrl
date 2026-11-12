@@ -45,7 +45,8 @@ fn random_code() -> String {
     format!("{:06}", rand::random_range(0..1_000_000))
 }
 
-/// Relay URL: command-line flag > environment variable > relay.txt next to the exe > compile-time value > localhost
+/// Relay URL: command-line flag > environment variable > relay.txt next to the exe > compile-time value >
+/// hosted relay (release) / localhost (debug)
 fn relay_url() -> String {
     if let Some(u) = arg("--relay").or_else(|| std::env::var("ASCTRL_RELAY_URL").ok()) {
         return u;
@@ -58,7 +59,10 @@ fn relay_url() -> String {
     {
         return u;
     }
-    option_env!("ASCTRL_RELAY_URL").unwrap_or("ws://localhost:8787").to_string()
+    // A release exe built without ASCTRL_RELAY_URL used to fall back to localhost and silently
+    // register its code with a relay the console never sees, so release builds default to the hosted one.
+    let fallback = if cfg!(debug_assertions) { "ws://localhost:8787" } else { "ws://124.222.182.40:8787" };
+    option_env!("ASCTRL_RELAY_URL").unwrap_or(fallback).to_string()
 }
 
 fn auto_accept() -> bool {
