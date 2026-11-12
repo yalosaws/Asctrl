@@ -815,11 +815,6 @@ pub fn fx_after(ctx: &Ctx, tool: &str, before: &Value) -> Value {
             Some(h) => json!({ "rect": winmgr::rect_of(h as isize).map(rect_json) }),
             None => json!({}),
         },
-        "list_windows" => {
-            let rects: Vec<Value> =
-                winmgr::list().iter().filter(|w| !w.minimized).take(24).map(|w| rect_json(w.rect)).collect();
-            json!({ "windows": rects })
-        }
         _ => json!({}),
     }
 }

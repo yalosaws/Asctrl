@@ -276,16 +276,6 @@ async function winEnd(e: FxEvent) {
   void ol.out("fade", 480, 900);
 }
 
-function listWindowsEnd(e: FxEvent) {
-  const ws = Array.isArray(e.geo?.windows) ? (e.geo!.windows as unknown[]) : [];
-  ws.slice(0, 14).forEach((w, i) => {
-    const r = rect(w);
-    if (!r || r.w < 40 || r.h < 30) return;
-    void new Outline(r, "thin").popIn(i * 70).out("fade", 420, 620 + i * 70);
-  });
-  orb.setMood("focus");
-}
-
 function openAppStart() {
   orb.bump(1);
   bloom(orb.pos, { size: 180, ms: 700 });
@@ -453,7 +443,8 @@ const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
 
 export function fxStart(e: FxEvent) {
   started.set(e.id, { args: e.args, geo: e.geo });
-  if (e.tool === "screenshot") return;
+  // Screenshots only breathe the edge at the end; listing windows changes nothing and draws nothing
+  if (e.tool === "screenshot" || e.tool === "list_windows") return;
   attend();
   pulse();
   switch (e.tool) {
@@ -478,9 +469,6 @@ export function fxStart(e: FxEvent) {
       return;
     case "focus_window":
       return winStart(e);
-    case "list_windows":
-      orb.setMood("focus");
-      return;
     case "open_app":
       return openAppStart();
     case "wait":
@@ -497,6 +485,8 @@ export function fxEnd(ev: FxEvent) {
   started.delete(ev.id);
   const e: FxEvent = { ...ev, args: ev.args ?? st?.args ?? {}, geo: { ...(st?.geo ?? {}), ...(ev.geo ?? {}) } };
   const ok = !!e.ok;
+  // Never woke the orb at start, so there is nothing to release
+  if (e.tool === "list_windows") return;
   switch (e.tool) {
     case "screenshot":
       // Screenshots only breathe the edge; they never woke the orb, so there is nothing to release
@@ -509,9 +499,6 @@ export function fxEnd(ev: FxEvent) {
       break;
     case "focus_window":
       void winEnd(e);
-      break;
-    case "list_windows":
-      listWindowsEnd(e);
       break;
     case "open_app":
       openAppEnd(e);

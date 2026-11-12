@@ -216,6 +216,8 @@ export class Outline {
     this.el.style.transformOrigin = "50% 50%";
     const k = this.popScale() - 1;
     const end = how === "burst" ? `scale(${1 + k * 2.2})` : how === "sink" ? `scale(${1 - k * 1.6})` : "scale(1)";
-    return playOut(this.el, [{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: end }], { duration: ms, delay, easing: how === "fade" ? EASE.inOut : EASE.out });
+    // fill "forwards", not the default "both": a backwards fill would hold opacity 1 during `delay`
+    // and, being the newer animation, override a still-pending popIn, so everything showed at once.
+    return playOut(this.el, [{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: end }], { duration: ms, delay, fill: "forwards", easing: how === "fade" ? EASE.inOut : EASE.out });
   }
 }
