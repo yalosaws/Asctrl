@@ -1,6 +1,7 @@
 // Technician-side MCP server: lets Claude (Claude Code / Claude desktop) call tools on the remote computer directly.
 // Usage: configure `node src/console/mcp-server.ts` in your MCP client; RELAY_URL / RELAY_TOKEN / TECH_NAME env vars are optional.
 
+import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
@@ -10,10 +11,39 @@ import { z } from "zod";
 import { TechClient } from "./tech-client.ts";
 import { DEFAULT_RELAY_URL, type ToolName, type ToolResult } from "../shared/protocol.ts";
 
+/**
+ * The relay token normally arrives via RELAY_TOKEN (expanded from ASCTRL_RELAY_TOKEN in .mcp.json).
+ * A GUI app launched before the variable was set keeps a stale environment, so the expansion is empty.
+ * Fall back to a gitignored .env next to package.json, then to the Windows user environment in the registry.
+ */
+function resolveRelayToken(): string | undefined {
+  const fromEnv = process.env.RELAY_TOKEN || process.env.ASCTRL_RELAY_TOKEN;
+  if (fromEnv) return fromEnv;
+  try {
+    const envFile = path.resolve(import.meta.dirname, "../../.env");
+    if (existsSync(envFile)) {
+      process.loadEnvFile(envFile);
+      if (process.env.ASCTRL_RELAY_TOKEN) return process.env.ASCTRL_RELAY_TOKEN;
+    }
+  } catch {}
+  if (process.platform === "win32") {
+    try {
+      const out = execFileSync("reg", ["query", "HKCU\\Environment", "/v", "ASCTRL_RELAY_TOKEN"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+      });
+      const m = out.match(/ASCTRL_RELAY_TOKEN\s+REG_(?:EXPAND_)?SZ\s+(.+)/);
+      if (m) return m[1].trim();
+    } catch {}
+  }
+  return undefined;
+}
+
 const client = new TechClient(
   process.env.RELAY_URL ?? DEFAULT_RELAY_URL,
   process.env.TECH_NAME ?? "Technician",
-  process.env.RELAY_TOKEN,
+  resolveRelayToken(),
 );
 
 const server = new McpServer({ name: "asctrl", version: "0.3.0" });

@@ -73,7 +73,7 @@ The `--code <6 digits>` flag fixes the assist code (used to keep the same code a
 The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-relay` on the server, code in `~/asctrl-relay`; port 8787 is open in the Tencent Cloud security group and ufw).
 
 - Agent: build with `ASCTRL_RELAY_URL=ws://124.222.182.40:8787` so the address is compiled into the exe.
-- Console: `.mcp.json` already points at this address. The relay requires a token, read from the `ASCTRL_RELAY_TOKEN` environment variable (not in the repo; ask the maintainer).
+- Console: `.mcp.json` already points at this address. The relay requires a token, read from the `ASCTRL_RELAY_TOKEN` environment variable (not in the repo; ask the maintainer). If the MCP client was started before the variable was set, the server falls back to `ASCTRL_RELAY_TOKEN=...` in a gitignored `.env` at the repo root, then (on Windows) to the user environment in the registry.
 - Updating the relay: copy `src/relay/server.ts` and `src/shared/protocol.ts` to the matching paths under `~/asctrl-relay/src/` on the server, then `sudo systemctl restart asctrl-relay`.
 
 ## Tools
