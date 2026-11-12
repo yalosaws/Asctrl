@@ -6,7 +6,7 @@
 import { center, home, monitorAt, monitors, primary, pt, rect, type Pt, type R } from "./geo";
 import { orb } from "./orb";
 import { bloom, capture, dart, hold, Outline, ripple, streaks, strand, sweep, type Tone } from "./light";
-import { pulse } from "./edge";
+import { breathe, pulse } from "./edge";
 import { closeCard, deckRect, fillEntries, fillLines, openCard, progress, scan, skeleton, termEnd, termStart, type Card } from "./panel";
 import { easeInOutCubic, el, fadeOut, play, sleep, SPRING, tween } from "./motion";
 
@@ -86,25 +86,11 @@ function shotRegions(args: Record<string, unknown>): R[] {
   return monitors.map((m) => m.bounds);
 }
 
-function screenshotStart(e: FxEvent) {
-  const regions = shotRegions(e.args ?? {});
-  shots.set(e.id, { stop: regions.map((r) => sweep(r, { loop: true })) });
-  orb.setMood("focus");
-  orb.bump(0.5);
-  ready.set(e.id, sleep(520));
-}
-
-async function screenshotEnd(e: FxEvent) {
-  const s = shots.get(e.id);
-  shots.delete(e.id);
-  await whenReady(e.id);
-  s?.stop.forEach((f) => f());
+/** The only screenshot effect: the edge ring of the captured screens breathes once */
+function screenshotEnd(e: FxEvent) {
   if (!e.ok) return;
   const shot = rect(e.geo?.shot);
-  const regions = shot ? [shot] : shotRegions(e.args ?? {});
-  pulse();
-  await Promise.all(regions.map((r) => capture(r, () => orb.pos)));
-  swallow();
+  breathe(shot ? [shot] : shotRegions(e.args ?? {}));
 }
 
 // ---- Zoom ----
@@ -467,11 +453,10 @@ const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
 
 export function fxStart(e: FxEvent) {
   started.set(e.id, { args: e.args, geo: e.geo });
+  if (e.tool === "screenshot") return;
   attend();
   pulse();
   switch (e.tool) {
-    case "screenshot":
-      return screenshotStart(e);
     case "zoom":
       return zoomStart(e);
     case "click":
@@ -514,8 +499,8 @@ export function fxEnd(ev: FxEvent) {
   const ok = !!e.ok;
   switch (e.tool) {
     case "screenshot":
-      void screenshotEnd(e);
-      break;
+      // Screenshots only breathe the edge; they never woke the orb, so there is nothing to release
+      return screenshotEnd(e);
     case "zoom":
       void zoomEnd(e);
       break;

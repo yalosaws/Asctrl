@@ -18,6 +18,7 @@ interface Edge {
   /** Wider, brighter ring that flashes only when an action happens */
   flare: HTMLDivElement;
   spins: Animation[];
+  mon: R;
 }
 
 let edges: Edge[] = [];
@@ -59,7 +60,7 @@ function make(mon: R): Edge {
   Object.assign(root.style, { left: `${mon.x}px`, top: `${mon.y}px`, width: `${mon.w}px`, height: `${mon.h}px` });
   const ring = el("div", "edge-ring", root);
   const flare = el("div", "edge-flare", root);
-  return { root, ring, flare, spins: [spinner(ring, mon), spinner(flare, mon)] };
+  return { root, ring, flare, spins: [spinner(ring, mon), spinner(flare, mon)], mon };
 }
 
 /** AI takes control: the orb flies to the middle of the primary screen and blooms; a ripple spreads out and the ring lights up when it reaches the edges */
@@ -109,6 +110,16 @@ export function collapse(): Promise<void> {
 /** When a tool starts, the ring brightens and thickens briefly */
 export function pulse() {
   for (const e of edges) play(e.flare, [{ opacity: 0.9 }, { opacity: 0 }], { duration: 900, easing: EASE.out });
+}
+
+const overlaps = (a: R, b: R) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+/** Screenshot taken: the ring on the captured screens breathes once (swells in, eases back out) */
+export function breathe(regions?: R[]) {
+  for (const e of edges) {
+    if (regions && !regions.some((r) => overlaps(r, e.mon))) continue;
+    play(e.flare, [{ opacity: 0 }, { opacity: 1, offset: 0.4 }, { opacity: 0 }], { duration: 1100, easing: EASE.inOut });
+  }
 }
 
 export const isShown = () => shown;
