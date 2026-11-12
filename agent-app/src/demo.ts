@@ -4,7 +4,7 @@
 
 import { fxEnd, fxStart, type FxEvent } from "./fx";
 import type { Pt } from "./geo";
-import { sleep } from "./ease";
+import { sleep } from "./motion";
 
 interface Hooks {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

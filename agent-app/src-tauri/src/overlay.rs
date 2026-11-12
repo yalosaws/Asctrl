@@ -170,10 +170,11 @@ pub fn overlay_info(app: AppHandle) -> Info {
 
 /// 界面告诉后台哪些地方可以点（CSS 像素，相对于悬浮层左上角）
 #[tauri::command]
-pub fn set_hit_regions(app: AppHandle, rects: Vec<HitRect>) {
+pub fn set_hit_regions(app: AppHandle, rects: Vec<HitRect>, scale: Option<f64>) {
     let ov = app.state::<Overlay>();
     let info = ov.info.lock().unwrap().clone();
-    let s = info.scale;
+    // 以界面实际的缩放为准：窗口刚跨屏移动后，后台记的值可能还是旧的
+    let s = scale.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(info.scale);
     *ov.regions.lock().unwrap() = rects
         .iter()
         .map(|r| Rect {

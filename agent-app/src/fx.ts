@@ -1,12 +1,13 @@
 // 每个工具调用对应的动画。start 在工具开始执行时触发，end 在结果出来后触发。
-// 所有文字都用 textContent 写入，不拼 HTML（命令输出、文件内容都可能带尖括号）。
+// 相邻动作之间靠小精灵衔接：它是一个连续运动的物体，从上一个落点直接飞向下一个，不会瞬移。
+// 结果比动画先到时，收尾动画会等前半段播到位再接上（见 ready）。
 
 import { center, dock, home, monitorAt, monitors, primary, pt, rect, type Pt, type R } from "./geo";
 import { orb } from "./orb";
-import { absorb, beam, burst, ring, shatterRect, stream } from "./particles";
-import { pulse } from "./frame";
-import { termBox, termEnd, termStart } from "./terminal";
-import { done, el, sleep, tween } from "./ease";
+import { bloom, capture, dart, hold, Outline, ripple, streaks, strand, sweep, type Tone } from "./light";
+import { pulse, setActive } from "./edge";
+import { closeCard, deckRect, fillEntries, fillLines, openCard, progress, scan, skeleton, termEnd, termStart, type Card } from "./panel";
+import { easeInOutCubic, el, fadeOut, play, sleep, SPRING, tween } from "./motion";
 
 export interface FxEvent {
   phase: "start" | "end";
@@ -39,62 +40,47 @@ function attend() {
   active++;
   window.clearTimeout(homeTimer);
   orb.setMood("work");
+  setActive(true);
 }
 
 function release(ok = true, delay = 1500) {
   active = Math.max(0, active - 1);
-  if (!ok) {
-    orb.setMood("error");
-    orb.bump(0.8);
-  }
+  if (!ok) orb.setMood("error");
   window.clearTimeout(homeTimer);
   homeTimer = window.setTimeout(() => {
     if (active > 0) return;
     orb.setMood("idle");
-    orb.lookAt(null);
     orb.goTo(home(), "slow");
+    setActive(false);
   }, ok ? delay : delay + 1200);
 }
 
-/** 飞到目标点旁边（不挡住目标），眼睛盯着它 */
+/** 飞到目标点旁边（不挡住目标） */
 function near(p: Pt, speed: "normal" | "fast" = "fast") {
   const work = monitorAt(p).work;
-  const dx = p.x + 90 > work.x + work.w ? -78 : 78;
-  const dy = p.y + 90 > work.y + work.h ? -70 : 70;
+  const dx = p.x + 80 > work.x + work.w ? -52 : 52;
+  const dy = p.y + 80 > work.y + work.h ? -46 : 46;
   orb.goTo({ x: p.x + dx, y: p.y + dy }, speed);
-  orb.lookAt(p);
 }
 
-// ---- 标记层上的小元素 ----
+/** 开始动画播到位的时刻；结束动画等它 */
+const ready = new Map<string, Promise<void>>();
+const whenReady = (id: string) => {
+  const p = ready.get(id) ?? Promise.resolve();
+  ready.delete(id);
+  return p;
+};
 
-function mark(cls: string, p: Pt) {
-  const m = el("div", `mk ${cls}`, marks);
-  m.style.transform = `translate3d(${p.x}px, ${p.y}px, 0)`;
-  return m;
-}
-
-function box(cls: string, r: R) {
-  const b = el("div", `bx ${cls}`, marks);
-  setRect(b, r);
-  return b;
-}
-
-function setRect(b: HTMLElement, r: R) {
-  b.style.left = `${r.x}px`;
-  b.style.top = `${r.y}px`;
-  b.style.width = `${r.w}px`;
-  b.style.height = `${r.h}px`;
-}
-
-function fadeOut(e: HTMLElement, ms = 400, extra: Keyframe = {}) {
-  const a = e.animate([{ opacity: 1 }, { opacity: 0, ...extra }], { duration: ms, easing: "ease-in", fill: "forwards" });
-  done(a).then(() => e.remove());
+/** 小精灵收下一样东西 */
+function swallow() {
+  orb.bump(1.2);
+  bloom(orb.pos, { size: 150, ms: 620 });
+  ripple(orb.pos, { size: 50, ms: 560 });
 }
 
 // ---- 截图 ----
 
-const SHOT_HUE = 190;
-const shots = new Map<string, HTMLElement[]>();
+const shots = new Map<string, { stop: (() => void)[]; ol?: Outline }>();
 
 function shotRegions(args: Record<string, unknown>): R[] {
   const d = num(args.display);
@@ -102,68 +88,25 @@ function shotRegions(args: Record<string, unknown>): R[] {
   return monitors.map((m) => m.bounds);
 }
 
-function viewfinder(r: R) {
-  const v = box("vf", r);
-  for (const c of ["tl", "tr", "bl", "br"]) el("i", `vf-c ${c}`, v);
-  const scan = el("i", "vf-scan", v);
-  v.animate([{ opacity: 0, transform: "scale(1.06)" }, { opacity: 1, transform: "scale(1)" }], {
-    duration: 420,
-    easing: "cubic-bezier(.2,.9,.3,1)",
-  });
-  scan.animate([{ transform: "translateY(-10vh)" }, { transform: `translateY(${r.h}px)` }], {
-    duration: 900,
-    easing: "cubic-bezier(.5,0,.5,1)",
-    iterations: Infinity,
-  });
-  return v;
-}
-
 function screenshotStart(e: FxEvent) {
   const regions = shotRegions(e.args ?? {});
-  shots.set(e.id, regions.map(viewfinder));
+  shots.set(e.id, { stop: regions.map((r) => sweep(r, { loop: true })) });
   orb.setMood("focus");
-  orb.lookAt(center(primary().bounds));
-  orb.bump(0.6);
+  orb.bump(0.5);
+  ready.set(e.id, sleep(520));
 }
 
-async function flyInto(card: HTMLElement, from: R, opts: { rotate?: number; ms?: number } = {}) {
-  const to = orb.pos;
-  const c = center(from);
-  const s = Math.max(0.02, 46 / Math.max(from.w, from.h));
-  const a = card.animate(
-    [
-      { transform: "translate(0,0) scale(1) rotate(0)", opacity: 1 },
-      { transform: `translate(${(to.x - c.x) * 0.15}px, ${(to.y - c.y) * 0.15 - 20}px) scale(0.82) rotate(${(opts.rotate ?? -4) / 2}deg)`, opacity: 1, offset: 0.35 },
-      { transform: `translate(${to.x - c.x}px, ${to.y - c.y}px) scale(${s}) rotate(${opts.rotate ?? -4}deg)`, opacity: 0.2 },
-    ],
-    { duration: opts.ms ?? 720, easing: "cubic-bezier(.55,0,.25,1)", fill: "forwards" },
-  );
-  await done(a);
-  card.remove();
-  orb.bump(1.3);
-  ring(orb.pos, { r1: 64, hue: orb.hueNow, ms: 520 });
-  burst(orb.pos, { n: 16, hue: orb.hueNow, speed: 200 });
-}
-
-function screenshotEnd(e: FxEvent) {
-  const vfs = shots.get(e.id) ?? [];
+async function screenshotEnd(e: FxEvent) {
+  const s = shots.get(e.id);
   shots.delete(e.id);
-  vfs.forEach((v) => {
-    v.querySelector(".vf-scan")?.remove();
-    v.animate([{ transform: "scale(1)" }, { transform: "scale(0.97)" }, { transform: "scale(1)" }], { duration: 260 });
-    setTimeout(() => fadeOut(v, 300), 180);
-  });
+  await whenReady(e.id);
+  s?.stop.forEach((f) => f());
   if (!e.ok) return;
   const shot = rect(e.geo?.shot);
   const regions = shot ? [shot] : shotRegions(e.args ?? {});
-  for (const r of regions) {
-    const f = box("flash", r);
-    done(f.animate([{ opacity: 0 }, { opacity: 0.55, offset: 0.15 }, { opacity: 0 }], { duration: 480, easing: "ease-out" })).then(() => f.remove());
-    const photo = box("photo", r);
-    el("i", "photo-sheen", photo);
-    setTimeout(() => flyInto(photo, r), 220);
-  }
-  orb.setMood("focus");
+  pulse();
+  await Promise.all(regions.map((r) => capture(r, () => orb.pos)));
+  swallow();
 }
 
 // ---- 放大查看 ----
@@ -173,65 +116,78 @@ function zoomStart(e: FxEvent) {
   const b = pt(e.geo?.to);
   if (!a || !b) return;
   const r: R = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
-  const v = viewfinder(r);
-  v.classList.add("small");
-  const lens = mark("lens", center(r));
-  lens.animate([{ scale: "0.2", opacity: 0 }, { scale: "1", opacity: 1 }], { duration: 420, easing: "cubic-bezier(.2,1.4,.4,1)", fill: "forwards" });
-  near(center(r));
-  shots.set(e.id, [v, lens]);
+  near({ x: r.x + r.w, y: r.y + r.h });
+  const ol = new Outline(r).popIn().trace(620);
+  shots.set(e.id, { stop: [sweep(r, { loop: true })], ol });
+  orb.setMood("focus");
+  ready.set(e.id, sleep(560));
 }
 
-function zoomEnd(e: FxEvent) {
-  const els = shots.get(e.id) ?? [];
+async function zoomEnd(e: FxEvent) {
+  const s = shots.get(e.id);
   shots.delete(e.id);
-  const [v, lens] = els;
-  lens && fadeOut(lens, 300, { scale: "1.6" });
-  if (!v) return;
-  v.querySelector(".vf-scan")?.remove();
-  if (e.ok) {
-    const r = v.getBoundingClientRect();
-    v.classList.add("photo");
-    flyInto(v, { x: r.left, y: r.top, w: r.width, h: r.height }, { ms: 600 });
-  } else fadeOut(v);
+  await whenReady(e.id);
+  s?.stop.forEach((f) => f());
+  const ol = s?.ol;
+  if (!ol) return;
+  if (!e.ok) {
+    ol.shake();
+    void ol.out("fade", 400, 500);
+    return;
+  }
+  void ol.out("sink", 420);
+  await capture(ol.r, () => orb.pos, { ms: 640 });
+  swallow();
 }
 
 // ---- 鼠标 ----
 
 let holdMark: HTMLElement | null = null;
-const BTN_HUE = (b: string) => (b === "right" ? 38 : b === "middle" ? 280 : 200);
+const TONE = (b: string): Tone => (b === "right" ? "warm" : b === "middle" ? "mint" : "aurora");
+const aims = new Map<string, HTMLElement>();
 
 function clickStart(e: FxEvent) {
   const p = pt(e.geo?.at);
   if (!p) return;
+  const tone = TONE(str(e.args?.button));
+  const from = { ...orb.pos };
   near(p);
-  const hue = BTN_HUE(str(e.args?.button));
-  ring(p, { r0: 56, r1: 9, ms: 320, hue, width: 2 });
-  beam(() => orb.pos, () => p, { ms: 650, hue, width: 2 });
-  const m = mark("reticle", p);
-  m.style.setProperty("--h", String(hue));
-  m.animate([{ scale: "2.2", opacity: 0, rotate: "-90deg" }, { scale: "1", opacity: 1, rotate: "0deg" }], {
-    duration: 300,
-    easing: "cubic-bezier(.2,.9,.3,1)",
-    fill: "forwards",
-  });
-  setTimeout(() => fadeOut(m, 350, { scale: "0.6" }), 700);
+  // 一道光从小精灵射向目标，到了以后收成一个瞄准圈
+  ready.set(
+    e.id,
+    dart(from, p, { tone }).then(() => {
+      const aim = el("div", `aim t-${tone}`, marks);
+      aim.style.left = `${p.x}px`;
+      aim.style.top = `${p.y}px`;
+      aims.set(e.id, aim);
+      play(aim, [{ transform: "scale(2.4)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }], { spring: SPRING.snap });
+    }),
+  );
 }
 
-function clickEnd(e: FxEvent) {
+async function clickEnd(e: FxEvent) {
   const p = pt(e.geo?.at);
-  if (!p) return;
-  const hue = BTN_HUE(str(e.args?.button));
-  if (!e.ok) return;
+  await whenReady(e.id);
+  const aim = aims.get(e.id);
+  aims.delete(e.id);
+  if (!p) return void aim?.remove();
+  const tone = TONE(str(e.args?.button));
+  if (!e.ok) {
+    if (aim) void fadeOut(aim, 400, { transform: "scale(1.6)" });
+    ripple(p, { size: 36, tone: "red" });
+    return;
+  }
+  if (aim) void fadeOut(aim, 260, { transform: "scale(.5)" });
   const n = Math.max(1, Math.min(3, num(e.args?.count, 1)));
-  for (let i = 0; i < n; i++) ring(p, { r1: 40 + i * 6, ms: 560, hue, width: 3, delay: i * 120 });
-  burst(p, { n: 12, hue, speed: 220, size: 11 });
+  bloom(p, { size: 130, ms: 620, tone });
+  for (let i = 0; i < n; i++) ripple(p, { size: 34, ms: 560, to: 1.9 + i * 0.35, tone, delay: i * 130 });
 }
 
 function moveStart(e: FxEvent) {
   const p = pt(e.geo?.at);
   if (!p) return;
   near(p);
-  ring(p, { r0: 30, r1: 6, ms: 380, hue: 200, width: 2 });
+  ripple(p, { size: 26, ms: 520, from: 1.8, to: 0.5 });
 }
 
 function downStart(e: FxEvent) {
@@ -239,15 +195,14 @@ function downStart(e: FxEvent) {
   if (!p) return;
   near(p);
   holdMark?.remove();
-  holdMark = mark("hold", p);
-  holdMark.style.setProperty("--h", String(BTN_HUE(str(e.args?.button))));
+  holdMark = hold(p, TONE(str(e.args?.button)));
 }
 
 function upStart(e: FxEvent) {
   const p = pt(e.geo?.at);
-  if (holdMark) fadeOut(holdMark, 300, { scale: "1.8" });
+  if (holdMark) void fadeOut(holdMark, 320, { transform: "scale(1.9)" });
   holdMark = null;
-  if (p) ring(p, { r1: 36, hue: 200 });
+  if (p) ripple(p, { size: 34 });
 }
 
 function scrollStart(e: FxEvent) {
@@ -256,39 +211,29 @@ function scrollStart(e: FxEvent) {
   near(p);
   const amount = num(e.args?.amount, 3);
   const horiz = e.args?.horizontal === true;
-  const dir = horiz ? (amount >= 0 ? "right" : "left") : amount >= 0 ? "down" : "up";
-  const m = mark(`scroll ${dir}`, p);
-  for (let i = 0; i < 3; i++) {
-    const c = el("i", "chev", m);
-    c.style.animationDelay = `${i * 110}ms`;
-  }
-  setTimeout(() => fadeOut(m, 300), 1100);
+  streaks(p, horiz ? (amount >= 0 ? "right" : "left") : amount >= 0 ? "down" : "up");
 }
 
 async function dragStart(e: FxEvent) {
   const a = pt(e.geo?.from);
   const b = pt(e.geo?.to);
   if (!a || !b) return;
-  near(a);
-  ring(a, { r0: 40, r1: 8, ms: 300, hue: 200 });
-  const grip = mark("hold", a);
-  grip.style.setProperty("--h", "200");
-  await sleep(320);
-  let last = performance.now();
-  beam(() => a, () => orb.pos, { ms: 1400, hue: 205, width: 2, bend: 0 });
-  await tween(760, (t) => {
-    const now = performance.now();
-    const k = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-    const p = { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k };
-    grip.style.transform = `translate3d(${p.x}px, ${p.y}px, 0)`;
-    orb.pin({ x: p.x + 60, y: p.y + 56 }, (now - last) / 1000);
-    last = now;
-    if (Math.random() < 0.7) burst(p, { n: 1, hue: 205, speed: 40, life: 0.7, size: 12 });
+  orb.goTo(a, "fast");
+  const grip = hold(a);
+  await sleep(340);
+  const ms = 780;
+  const line = strand(a, b, ms);
+  // 小精灵自己拖着这条线走到终点
+  await tween(ms, (t, dt) => {
+    const k = easeInOutCubic(t);
+    orb.pin({ x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k }, dt);
   });
   orb.unpin();
-  orb.lookAt(b);
-  ring(b, { r1: 44, hue: 200, width: 3 });
-  fadeOut(grip, 400, { scale: "1.6" });
+  near(b, "normal");
+  bloom(b, { size: 120, ms: 600 });
+  ripple(b, { size: 34 });
+  void fadeOut(grip, 360, { transform: "scale(1.8)" });
+  void fadeOut(line, 520);
 }
 
 // ---- 键盘 ----
@@ -298,27 +243,25 @@ let typingPill: HTMLElement | null = null;
 async function typeStart(e: FxEvent) {
   const text = str(e.args?.text);
   const at = pt(e.geo?.at) ?? dock();
-  typingPill?.remove();
+  if (typingPill) void fadeOut(typingPill, 200, { transform: "translateY(-8px)" });
   const work = monitorAt(at).work;
   const pill = el("div", "typing", layer);
   typingPill = pill;
-  const x = Math.min(at.x + 18, work.x + work.w - 380);
+  const x = Math.max(work.x + 12, Math.min(at.x + 18, work.x + work.w - 380));
   const y = Math.min(at.y + 30, work.y + work.h - 70);
-  pill.style.left = `${Math.max(work.x + 12, x)}px`;
-  pill.style.top = `${y}px`;
-  el("span", "kbd-ico", pill, "⌨");
+  pill.style.left = `${Math.round(x)}px`;
+  pill.style.top = `${Math.round(y)}px`;
   const line = el("span", "typing-text", pill);
   const caret = el("i", "caret", pill);
-  pill.animate([{ opacity: 0, transform: "translateY(10px) scale(.9)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.2,.9,.3,1)" });
-  orb.goTo({ x: Math.max(work.x + 12, x) - 50, y: y + 22 }, "fast");
-  orb.lookAt({ x: Math.max(work.x + 12, x) + 80, y: y + 22 });
+  play(pill, [{ opacity: 0, transform: "translateY(10px) scale(.9)" }, { opacity: 1, transform: "none" }], { spring: SPRING.pop });
+  orb.goTo({ x: x - 34, y: y + 21 }, "fast");
 
   const chars = [...text.replace(/\r?\n/g, "⏎")];
   const per = Math.min(60, Math.max(14, 1400 / Math.max(1, chars.length)));
   for (const ch of chars) {
     if (typingPill !== pill) return;
     const s = el("span", "ch", line, ch);
-    s.animate([{ transform: "translateY(-12px) scale(1.6)", opacity: 0 }, { transform: "none", opacity: 1 }], { duration: 220, easing: "cubic-bezier(.2,1.3,.4,1)" });
+    play(s, [{ transform: "translateY(9px)", opacity: 0 }, { transform: "none", opacity: 1 }], { spring: SPRING.snap, fill: "none" });
     // 只保留最后一截，长文本不撑爆
     while (line.childElementCount > 42) line.firstElementChild?.remove();
     await sleep(per);
@@ -332,8 +275,8 @@ function typeEnd(e: FxEvent) {
   pill.classList.add(e.ok ? "ok" : "bad");
   setTimeout(() => {
     if (typingPill === pill) typingPill = null;
-    fadeOut(pill, 380, { transform: "translateY(-10px) scale(.95)" });
-  }, 1300);
+    void fadeOut(pill, 380, { transform: "translateY(-10px) scale(.96)" });
+  }, 1200);
 }
 
 const KEY_LABEL: Record<string, string> = {
@@ -348,368 +291,195 @@ async function keysStart(e: FxEvent) {
   const combos = raw.split(/\s+/).slice(0, 6);
   const wrap = el("div", "keys", layer);
   const p = orb.pos;
-  wrap.style.left = `${p.x}px`;
-  wrap.style.top = `${p.y - 110}px`;
-  orb.lookAt({ x: p.x, y: p.y - 100 });
+  const above = p.y - 96 > monitorAt(p).work.y;
+  wrap.style.left = `${Math.round(p.x)}px`;
+  wrap.style.top = `${Math.round(p.y + (above ? -84 : 84))}px`;
   for (const combo of combos) {
     const g = el("div", "combo", wrap);
     combo.split("+").forEach((k, i) => {
       if (i) el("span", "plus", g, "+");
       const cap = el("span", "cap", g, KEY_LABEL[k.toLowerCase()] ?? (k.length === 1 ? k.toUpperCase() : k));
-      cap.animate([{ transform: "translateY(-16px) scale(.6)", opacity: 0 }, { transform: "none", opacity: 1 }], {
-        duration: 280,
-        delay: i * 60,
-        easing: "cubic-bezier(.2,1.4,.4,1)",
-        fill: "backwards",
-      });
+      play(cap, [{ transform: `translateY(${above ? 14 : -14}px) scale(.7)`, opacity: 0 }, { transform: "none", opacity: 1 }], { spring: SPRING.pop, delay: i * 60, fill: "backwards" });
     });
-    await sleep(260);
-    for (const cap of g.querySelectorAll<HTMLElement>(".cap")) cap.classList.add("down");
-    burst({ x: p.x, y: p.y - 100 }, { n: 8, hue: 210, speed: 160, size: 9 });
-    await sleep(e.tool === "hold_key" ? 700 : 220);
-    for (const cap of g.querySelectorAll<HTMLElement>(".cap")) cap.classList.remove("down");
-    await sleep(160);
+    await sleep(280);
+    const caps = g.querySelectorAll<HTMLElement>(".cap");
+    caps.forEach((c) => c.classList.add("down"));
+    await sleep(e.tool === "hold_key" ? 700 : 230);
+    caps.forEach((c) => c.classList.remove("down"));
+    await sleep(170);
   }
-  setTimeout(() => fadeOut(wrap, 400, { transform: "translateY(-14px)" }), 600);
+  setTimeout(() => void fadeOut(wrap, 380, { transform: `translateY(${above ? -10 : 10}px)` }), 520);
 }
 
 // ---- 窗口 ----
 
-const winCtx = new Map<string, HTMLElement>();
+const winCtx = new Map<string, Outline>();
 
-function spotlight(r: R, ms = 1300) {
-  const s = box("spot", r);
-  done(s.animate([{ opacity: 0 }, { opacity: 1, offset: 0.2 }, { opacity: 1, offset: 0.7 }, { opacity: 0 }], { duration: ms, easing: "ease-in-out" })).then(() => s.remove());
-}
+const aboveWindow = (r: R): Pt => ({ x: r.x + r.w / 2, y: Math.max(monitorAt(center(r)).work.y + 34, r.y - 30) });
 
 function winStart(e: FxEvent) {
   const r0 = rect(e.geo?.rect);
   if (!r0) return;
-  const o = box("winline", r0);
-  o.animate([{ opacity: 0, transform: "scale(1.04)" }, { opacity: 1, transform: "scale(1)" }], { duration: 300, easing: "cubic-bezier(.2,.9,.3,1)" });
-  winCtx.set(e.id, o);
-  orb.goTo({ x: r0.x + r0.w / 2, y: Math.max(primary().work.y + 40, r0.y - 34) }, "fast");
-  orb.lookAt(center(r0));
-  beam(() => orb.pos, () => ({ x: r0.x + r0.w / 2, y: r0.y + 8 }), { ms: 600, hue: 205 });
+  orb.goTo(aboveWindow(r0), "fast");
+  winCtx.set(e.id, new Outline(r0).popIn().trace());
+  ready.set(e.id, sleep(420));
 }
 
 async function winEnd(e: FxEvent) {
   const action = str(e.args?.action) || "focus";
+  await whenReady(e.id);
   const o = winCtx.get(e.id);
   winCtx.delete(e.id);
   const r1 = rect(e.geo?.rect);
   if (!e.ok) {
-    if (o) {
-      o.classList.add("bad");
-      o.animate([{ translate: "0" }, { translate: "-8px" }, { translate: "8px" }, { translate: "0" }], { duration: 300 });
-      setTimeout(() => fadeOut(o), 600);
-    }
+    o?.shake();
+    void o?.out("fade", 400, 600);
     return;
   }
-  const from = o ? o.getBoundingClientRect() : null;
-  const r0: R | null = from ? { x: from.left, y: from.top, w: from.width, h: from.height } : null;
-
-  if (action === "close" && r0 && o) {
-    o.remove();
-    shatterRect(r0, 205);
+  if (action === "close" && o) {
+    bloom(center(o.r), { size: Math.min(520, Math.max(o.r.w, o.r.h) * 0.6), ms: 700 });
+    void o.out("burst", 520);
     return;
   }
-  if (action === "minimize" && r0 && o) {
-    const w = monitorAt(center(r0)).work;
-    const to: R = { x: w.x + w.w / 2 - 40, y: w.y + w.h - 10, w: 80, h: 10 };
-    await morph(o, r0, to, 520);
-    fadeOut(o, 200);
-    ring({ x: to.x + 40, y: to.y + 5 }, { r1: 30, hue: 205 });
+  if (action === "minimize" && o) {
+    const w = monitorAt(center(o.r)).work;
+    const to: R = { x: w.x + w.w / 2 - 40, y: w.y + w.h - 6, w: 80, h: 8 };
+    await o.moveTo(to, 520);
+    ripple(center(to), { size: 40 });
+    void o.out("fade", 220);
     return;
   }
-  if (!r1) {
-    if (o) fadeOut(o);
-    return;
+  if (!r1) return void o?.out("fade");
+  // 窗口移动、放大、还原：同一个框变形到新位置；原来没有框（窗口之前是最小化的）就直接冒出来
+  orb.goTo(aboveWindow(r1), "fast");
+  let ol = o;
+  if (ol) await ol.moveTo(r1, 500);
+  else {
+    ol = new Outline(r1).popIn().trace();
+    await sleep(360);
   }
-  const line = o ?? box("winline", { x: center(r1).x - 40, y: primary().work.y + primary().work.h - 10, w: 80, h: 10 });
-  const start = r0 ?? { x: center(r1).x - 40, y: primary().work.y + primary().work.h - 10, w: 80, h: 10 };
-  orb.goTo({ x: r1.x + r1.w / 2, y: Math.max(primary().work.y + 40, r1.y - 34) }, "fast");
-  await morph(line, start, r1, 520);
-  spotlight(r1);
-  line.classList.add("lock");
-  burst({ x: r1.x, y: r1.y }, { n: 8, hue: 205, speed: 160 });
-  burst({ x: r1.x + r1.w, y: r1.y + r1.h }, { n: 8, hue: 205, speed: 160 });
-  setTimeout(() => fadeOut(line, 500), 1100);
-}
-
-function morph(b: HTMLElement, a: R, c: R, ms: number) {
-  const k = (r: R): Keyframe => ({ left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
-  setRect(b, c);
-  return done(b.animate([k(a), k(c)], { duration: ms, easing: "cubic-bezier(.65,0,.25,1)" }));
+  ol.flash();
+  for (const p of [
+    { x: r1.x, y: r1.y },
+    { x: r1.x + r1.w, y: r1.y + r1.h },
+  ])
+    ripple(p, { size: 30, ms: 620 });
+  void ol.out("fade", 480, 900);
 }
 
 function listWindowsEnd(e: FxEvent) {
   const ws = Array.isArray(e.geo?.windows) ? (e.geo!.windows as unknown[]) : [];
-  ws.forEach((w, i) => {
+  ws.slice(0, 14).forEach((w, i) => {
     const r = rect(w);
     if (!r || r.w < 40 || r.h < 30) return;
-    const b = box("winline thin", r);
-    b.animate([{ opacity: 0 }, { opacity: 1, offset: 0.25 }, { opacity: 0 }], { duration: 900, delay: i * 70, fill: "both" });
-    setTimeout(() => b.remove(), 900 + i * 70);
+    void new Outline(r, "thin").popIn(i * 70).out("fade", 420, 620 + i * 70);
   });
   orb.setMood("focus");
 }
 
 function openAppStart() {
   orb.bump(1);
-  burst(orb.pos, { n: 22, hue: 260, speed: 360, dir: -Math.PI / 2, spread: 0.9 });
-  ring(orb.pos, { r1: 80, hue: 260, ms: 600 });
+  bloom(orb.pos, { size: 180, ms: 700 });
+  ripple(orb.pos, { size: 60, ms: 700 });
 }
 
 function openAppEnd(e: FxEvent) {
   if (!e.ok) return;
   const c = center(primary().work);
-  ring(c, { r0: 20, r1: 260, hue: 260, ms: 900, width: 3 });
-  burst(c, { n: 30, hue: 260, speed: 420 });
+  void dart(orb.pos, c).then(() => {
+    bloom(c, { size: 520, ms: 900 });
+    ripple(c, { size: 120, ms: 900, to: 3.2 });
+  });
 }
 
-// ---- 文件卡片 ----
+// ---- 文件 ----
 
-const ICON: Record<string, string> = {
-  read: "📄",
-  write: "✏️",
-  edit: "🩹",
-  dir: "📁",
-  find: "🔎",
-  search: "🔎",
-  upload: "⬇️",
-  download: "⬆️",
-  clip: "📋",
-};
-
-interface Card {
-  root: HTMLDivElement;
-  body: HTMLDivElement;
-  badge: HTMLSpanElement;
-}
-
-let current: Card | null = null;
-const cards = new Map<string, Card>();
-
-function card(id: string, kind: string, title: string, sub = ""): Card {
-  if (current) dismiss(current, true);
-  const root = el("div", `card k-${kind}`, layer);
-  const head = el("div", "card-head", root);
-  el("span", "card-ico", head, ICON[kind] ?? "📄");
-  const tt = el("div", "card-titles", head);
-  el("div", "card-title", tt, title);
-  if (sub) el("div", "card-sub", tt, sub);
-  const badge = el("span", "card-badge", head);
-  const body = el("div", "card-body", root);
-  const d = dock();
-  const work = primary().work;
-  const tb = termBox();
-  const bottom = tb ? tb.top - 18 : d.y - 64;
-  root.style.left = `${Math.max(work.x + 16, d.x - 500)}px`;
-  root.style.top = `${Math.max(work.y + 16, bottom - 300)}px`;
-  root.animate(
-    [
-      { opacity: 0, transform: "translate(60px, 60px) scale(.3) rotate(6deg)", filter: "blur(8px)" },
-      { opacity: 1, transform: "none", filter: "blur(0)" },
-    ],
-    { duration: 520, easing: "cubic-bezier(.2,1.1,.3,1)" },
-  );
-  const c = { root, body, badge };
-  orb.goTo(home(), "fast");
-  current = c;
-  cards.set(id, c);
-  setTimeout(() => {
-    const b = root.getBoundingClientRect();
-    orb.lookAt({ x: b.left + b.width / 2, y: b.top + b.height / 2 });
-  }, 0);
-  return c;
-}
-
-function cardRect(c: Card): R {
-  const b = c.root.getBoundingClientRect();
-  return { x: b.left, y: b.top, w: b.width, h: b.height };
-}
-
-function dismiss(c: Card, quick = false) {
-  if (current === c) current = null;
-  if (!c.root.isConnected) return;
-  if (quick) return fadeOut(c.root, 220, { transform: "translateY(-20px) scale(.96)" });
-  flyInto(c.root, cardRect(c), { rotate: 8, ms: 620 });
-}
-
-function skeleton(c: Card, n = 6) {
-  for (let i = 0; i < n; i++) {
-    const s = el("div", "sk", c.body);
-    s.style.width = `${40 + Math.random() * 55}%`;
-    s.style.animationDelay = `${i * 80}ms`;
-  }
-}
-
-async function fillLines(c: Card, lines: string[], cls = "", highlight?: RegExp) {
-  c.body.replaceChildren();
-  const max = 11;
-  for (const [i, text] of lines.slice(0, max).entries()) {
-    const l = el("div", `ln ${cls}`, c.body);
-    if (highlight) {
-      let last = 0;
-      for (const m of text.matchAll(highlight)) {
-        if (m.index === undefined || !m[0]) continue;
-        l.append(text.slice(last, m.index));
-        el("mark", "", l, m[0]);
-        last = m.index + m[0].length;
-      }
-      l.append(text.slice(last));
-    } else l.textContent = text || " ";
-    l.animate([{ opacity: 0, transform: "translateX(-14px)" }, { opacity: 1, transform: "none" }], {
-      duration: 260,
-      delay: i * 45,
-      easing: "cubic-bezier(.2,.9,.3,1)",
-      fill: "backwards",
-    });
-  }
-  if (lines.length > max) el("div", "ln more", c.body, `… 共 ${lines.length} 行`);
-  await sleep(Math.min(lines.length, max) * 45 + 260);
-}
-
-function finishBadge(c: Card, ok: boolean, text?: string) {
-  c.badge.textContent = ok ? "✔" : "✖";
-  c.badge.classList.add(ok ? "ok" : "bad");
-  c.root.classList.add(ok ? "ok" : "bad");
-  if (!ok && text) {
-    const er = el("div", "ln err", c.body, text.split("\n")[0]);
-    er.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200 });
-    c.root.animate([{ translate: "0" }, { translate: "-8px" }, { translate: "8px" }, { translate: "0" }], { duration: 320 });
-  }
-}
-
-function scanBar(c: Card) {
-  const s = el("i", "card-scan", c.root);
-  done(s.animate([{ top: "40px", opacity: 1 }, { top: "100%", opacity: 0.2 }], { duration: 900, easing: "ease-in-out" })).then(() => s.remove());
-}
-
+const cards = new Map<string, { card: Card; finish?: () => void }>();
 const lines = (t: string) => t.replace(/\r/g, "").replace(/\n+$/, "").split("\n");
 
 function fileStart(e: FxEvent) {
   const a = e.args ?? {};
   const path = str(a.path);
+  const put = (card: Card, finish?: () => void) => {
+    cards.set(e.id, { card, finish });
+    return card;
+  };
   switch (e.tool) {
-    case "read_file": {
-      const c = card(e.id, "read", baseName(path), dirName(path));
-      skeleton(c);
-      setTimeout(() => beam(() => orb.pos, () => center(cardRect(c)), { ms: 700, hue: 200 }), 200);
-      return;
-    }
-    case "write_file": {
-      const c = card(e.id, "write", baseName(path), dirName(path));
-      stream(() => orb.pos, () => center(cardRect(c)), { n: 20, hue: 150 });
-      fillLines(c, lines(str(a.content)), "add");
-      return;
-    }
+    case "read_file":
+      return void skeleton(put(openCard("read", baseName(path), dirName(path))));
+    case "write_file":
+      return void fillLines(put(openCard("write", baseName(path), dirName(path))), lines(str(a.content)), "add");
     case "edit_file": {
-      const c = card(e.id, "edit", baseName(path), dirName(path));
+      const c = put(openCard("edit", baseName(path), dirName(path)));
       const oldL = lines(str(a.oldText)).slice(0, 5);
       const newL = lines(str(a.newText)).slice(0, 5);
-      (async () => {
-        c.body.replaceChildren();
+      void (async () => {
         const olds = oldL.map((t) => el("div", "ln del", c.body, t || " "));
-        await sleep(450);
-        stream(() => orb.pos, () => center(cardRect(c)), { n: 14, hue: 150 });
-        olds.forEach((o, i) =>
-          o.animate([{ opacity: 1 }, { opacity: 0.35, textDecorationColor: "rgba(255,120,120,1)" }], { duration: 300, delay: i * 50, fill: "forwards" }),
-        );
+        olds.forEach((o, i) => play(o, [{ opacity: 0, transform: "translateX(-16px)" }, { opacity: 1, transform: "none" }], { spring: SPRING.snap, delay: i * 38, fill: "backwards" }));
+        await sleep(520);
+        olds.forEach((o, i) => play(o, [{ opacity: 1 }, { opacity: 0.35 }], { duration: 300, delay: i * 50 }));
         for (const [i, t] of newL.entries()) {
           const n = el("div", "ln add", c.body, t || " ");
-          n.animate([{ opacity: 0, transform: "translateX(18px)" }, { opacity: 1, transform: "none" }], { duration: 300, delay: i * 60, fill: "backwards" });
+          play(n, [{ opacity: 0, transform: "translateX(18px)" }, { opacity: 1, transform: "none" }], { spring: SPRING.snap, delay: i * 60, fill: "backwards" });
         }
       })();
       return;
     }
-    case "list_dir": {
-      const c = card(e.id, "dir", baseName(path || "~"), path);
-      skeleton(c, 7);
-      return;
-    }
-    case "find_files": {
-      const c = card(e.id, "find", str(a.pattern), path);
-      skeleton(c, 5);
-      scanBar(c);
-      return;
-    }
+    case "list_dir":
+      return void skeleton(put(openCard("dir", baseName(path || "~"), path)), 7);
+    case "find_files":
     case "search_files": {
-      const c = card(e.id, "search", str(a.pattern), path);
+      const c = put(openCard(e.tool === "find_files" ? "find" : "search", str(a.pattern), path));
       skeleton(c, 5);
-      scanBar(c);
-      const lens = el("i", "card-lens", c.root);
-      lens.animate([{ left: "10%", top: "45%" }, { left: "80%", top: "60%" }, { left: "30%", top: "80%" }, { left: "10%", top: "45%" }], {
-        duration: 1400,
-        iterations: Infinity,
-        easing: "ease-in-out",
-      });
+      scan(c, true);
       return;
     }
     case "upload_file": {
-      const c = card(e.id, "upload", baseName(path));
-      const bar = el("div", "prog", c.body);
-      el("i", "", bar).animate([{ width: "0%" }, { width: "92%" }], { duration: 1200, easing: "cubic-bezier(.3,.6,.4,1)", fill: "forwards" });
-      const top = primary().bounds;
-      stream(() => ({ x: top.x + top.w * Math.random(), y: top.y - 10 }), () => center(cardRect(c)), { n: 26, hue: 170 });
+      const c = openCard("upload", baseName(path));
+      put(c, progress(c, 0.9, 1400));
       return;
     }
     case "download_file": {
-      const c = card(e.id, "download", baseName(path));
-      const bar = el("div", "prog", c.body);
-      el("i", "", bar).animate([{ width: "0%" }, { width: "70%" }], { duration: 900, fill: "forwards" });
+      const c = openCard("download", baseName(path));
+      put(c, progress(c, 0.7, 1000));
       return;
     }
-    case "read_clipboard": {
-      const c = card(e.id, "clip", "");
-      skeleton(c, 3);
-      return;
-    }
-    case "write_clipboard": {
-      const c = card(e.id, "clip", "");
-      fillLines(c, lines(str(a.text)), "add");
-      stream(() => orb.pos, () => center(cardRect(c)), { n: 12, hue: 150 });
-      return;
-    }
+    case "read_clipboard":
+      return void skeleton(put(openCard("clip", "")), 3);
+    case "write_clipboard":
+      return void fillLines(put(openCard("clip", "")), lines(str(a.text)), "add");
   }
 }
 
 async function fileEnd(e: FxEvent) {
-  const c = cards.get(e.id);
+  const ctx = cards.get(e.id);
   cards.delete(e.id);
-  if (!c || !c.root.isConnected) return;
-  const ok = !!e.ok;
+  if (!ctx) return;
+  const c = ctx.card;
   const text = e.text ?? "";
-  if (!ok) {
-    c.body.querySelectorAll(".sk").forEach((s) => s.remove());
-    finishBadge(c, false, text);
-    setTimeout(() => dismiss(c, true), 2200);
-    return;
-  }
+  if (!e.ok) return closeCard(c, false, text, 2200);
+  let linger = 1500;
   switch (e.tool) {
-    case "read_file": {
-      const ls = lines(text).slice(1); // 第一行是路径和编码
-      await fillLines(c, ls, "mono");
-      scanBar(c);
-      absorb(cardRect(c), () => orb.pos, { n: 34, hue: 200 });
+    case "read_file":
+      await fillLines(c, lines(text).slice(1), "mono"); // 第一行是路径和编码
+      scan(c);
+      linger = 2200;
       break;
-    }
-    case "list_dir": {
-      const ls = lines(text)
-        .slice(1)
-        .map((l) => {
-          const name = l.split(/\s{2,}/).pop() ?? l;
-          return (name.endsWith("\\") ? "📁 " + name.slice(0, -1) : "📄 " + name).trim();
-        });
-      await fillLines(c, ls);
+    case "list_dir":
+      await fillEntries(
+        c,
+        lines(text)
+          .slice(1)
+          .map((l) => {
+            const name = (l.split(/\s{2,}/).pop() ?? l).trim();
+            return name.endsWith("\\") ? { name: name.slice(0, -1), dir: true } : { name, dir: false };
+          }),
+      );
       break;
-    }
     case "find_files":
       await fillLines(c, lines(text).map((l) => baseName(l) || l));
       break;
     case "search_files": {
-      c.root.querySelector(".card-lens")?.remove();
       let re: RegExp | undefined;
       try {
         re = new RegExp(str(e.args?.pattern), e.args?.ignoreCase === false ? "g" : "gi");
@@ -717,28 +487,27 @@ async function fileEnd(e: FxEvent) {
         re = undefined;
       }
       await fillLines(c, lines(text), "mono", re);
+      linger = 2200;
       break;
     }
     case "upload_file":
     case "download_file": {
-      const bar = c.body.querySelector<HTMLElement>(".prog i");
-      bar?.getAnimations().forEach((a) => a.cancel());
-      if (bar) bar.style.width = "100%";
+      ctx.finish?.();
       if (e.tool === "download_file") {
-        // 文件飞向小精灵，再往上飞走（送给对方）
-        absorb(cardRect(c), () => orb.pos, { n: 26, hue: 170 });
-        setTimeout(() => burst(orb.pos, { n: 26, hue: 170, speed: 520, dir: -Math.PI / 2, spread: 0.35 }), 900);
+        // 文件从面板送进小精灵，再往上送走（交给对方）
+        const d = deckRect();
+        if (d) await dart({ x: d.x + d.w - 40, y: d.y + d.h - 40 }, orb.pos, { tone: "mint" });
+        swallow();
+        void sleep(360).then(() => dart(orb.pos, { x: orb.pos.x, y: orb.pos.y - 320 }, { tone: "mint" }));
       }
       break;
     }
     case "read_clipboard":
       await fillLines(c, lines(text));
-      absorb(cardRect(c), () => orb.pos, { n: 18, hue: 200 });
       break;
   }
-  finishBadge(c, true);
   orb.setMood("happy");
-  setTimeout(() => dismiss(c), e.tool === "read_file" || e.tool === "search_files" ? 2200 : 1500);
+  closeCard(c, true, "", linger);
 }
 
 // ---- 命令行 ----
@@ -769,8 +538,6 @@ function termCommand(e: FxEvent): string {
 
 const TERM = new Set(["run_powershell", "system_info", "list_processes", "event_log", "job_output", "stop_job", "reset_shell"]);
 const FILE = new Set(["read_file", "write_file", "edit_file", "list_dir", "find_files", "search_files", "upload_file", "download_file", "read_clipboard", "write_clipboard"]);
-const HUE_OF = (tool: string) =>
-  TERM.has(tool) ? 228 : FILE.has(tool) ? 170 : tool === "screenshot" || tool === "zoom" ? SHOT_HUE : tool === "focus_window" ? 260 : 205;
 
 /** 结束事件只带结果，参数和开始时的位置从这里补上 */
 const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
@@ -778,7 +545,7 @@ const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
 export function fxStart(e: FxEvent) {
   started.set(e.id, { args: e.args, geo: e.geo });
   attend();
-  pulse(HUE_OF(e.tool));
+  pulse();
   switch (e.tool) {
     case "screenshot":
       return screenshotStart(e);
@@ -813,9 +580,7 @@ export function fxStart(e: FxEvent) {
       orb.setBusy(true);
       return;
   }
-  if (TERM.has(e.tool)) {
-    return termStart(e.id, termCommand(e));
-  }
+  if (TERM.has(e.tool)) return termStart(e.id, termCommand(e));
   if (FILE.has(e.tool)) return fileStart(e);
 }
 
@@ -826,13 +591,13 @@ export function fxEnd(ev: FxEvent) {
   const ok = !!e.ok;
   switch (e.tool) {
     case "screenshot":
-      screenshotEnd(e);
+      void screenshotEnd(e);
       break;
     case "zoom":
-      zoomEnd(e);
+      void zoomEnd(e);
       break;
     case "click":
-      clickEnd(e);
+      void clickEnd(e);
       break;
     case "type_text":
       typeEnd(e);

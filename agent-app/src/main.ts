@@ -1,13 +1,13 @@
-// 被控端界面：没有窗口，只有一个会动的小精灵。所有界面元素都浮在透明的全屏悬浮层上。
+// 被控端界面：没有窗口，只有一颗会动的光球。所有界面元素都浮在透明的全屏悬浮层上。
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { center, dock, hit, home, initGeo, isTauri, primary, setHome, syncHits, type OverlayInfo } from "./geo";
+import { center, dock, hit, home, initGeo, isTauri, primary, setHome, snap, syncHits, type OverlayInfo } from "./geo";
 import { orb } from "./orb";
-import { resizeFx, stepFx, stream, burst, ring } from "./particles";
-import { collapse, expand, isShown } from "./frame";
+import { bloom, ripple } from "./light";
+import { collapse, expand, isShown, relayout as relayoutEdge } from "./edge";
 import { fxEnd, fxStart, type FxEvent } from "./fx";
-import { sleep } from "./ease";
+import { EASE, play, sleep, SPRING } from "./motion";
 import { runDemo } from "./demo";
 
 type Status =
@@ -44,51 +44,68 @@ function renderCode(code: string) {
     const el = document.createElement("span");
     el.className = "digit";
     el.textContent = d;
-    el.style.animationDelay = `${300 + i * 70}ms`;
+    el.style.animationDelay = `${260 + i * 60}ms`;
     box.append(el);
   });
 }
 
 // ---------------- 面板的显示与位置 ----------------
 
-function showPanel(p: HTMLElement, on: boolean, interactive = false) {
-  if (on === !p.hidden) return;
-  if (on) {
-    p.hidden = false;
-    p.animate(
-      [
-        { opacity: 0, transform: "scale(.85)", filter: "blur(8px)" },
-        { opacity: 1, transform: "scale(1)", filter: "blur(0)" },
-      ],
-      { duration: 380, easing: "cubic-bezier(.2,1.1,.3,1)" },
-    );
-  } else {
-    const a = p.animate([{ opacity: 1 }, { opacity: 0, transform: "scale(.92)", filter: "blur(6px)" }], { duration: 220, easing: "ease-in" });
-    a.finished.then(() => (p.hidden = true), () => (p.hidden = true));
-  }
-  if (interactive) hit(p, on);
-}
+// 面板挨着小精灵：位置写在 translate 上，出现/消失的缩放写在 transform 上，两者互不干扰。
+// 尺寸只在显示时量一次，小精灵移动时不再读布局。
+const PANELS: [HTMLElement, "left" | "below"][] = [
+  [codeCard, "left"],
+  [menu, "left"],
+  [consent, "below"],
+];
+const sizes = new Map<HTMLElement, { w: number; h: number }>();
 
-/** 面板放在小精灵左边（放不下就放下面），每帧跟着走 */
-function besideOrb(p: HTMLElement, prefer: "left" | "below") {
-  if (p.hidden) return;
-  const w = p.offsetWidth;
-  const h = p.offsetHeight;
+function placePanel(p: HTMLElement, prefer: "left" | "below") {
+  const size = sizes.get(p);
+  if (p.hidden || !size) return;
+  const { w, h } = size;
   const work = primary().work;
   const o = orb.pos;
   let x: number;
   let y: number;
-  if (prefer === "left" && o.x - w - 60 > work.x) {
-    x = o.x - w - 56;
+  if (prefer === "left" && o.x - w - 52 > work.x) {
+    x = o.x - w - 44;
     y = o.y - h / 2;
   } else {
     x = o.x - w / 2;
-    y = o.y + 62;
+    y = o.y + 48;
   }
-  x = Math.min(Math.max(x, work.x + 12), work.x + work.w - w - 12);
-  y = Math.min(Math.max(y, work.y + 12), work.y + work.h - h - 12);
-  p.style.left = `${x}px`;
-  p.style.top = `${y}px`;
+  x = snap(Math.min(Math.max(x, work.x + 12), work.x + work.w - w - 12));
+  y = snap(Math.min(Math.max(y, work.y + 12), work.y + work.h - h - 12));
+  p.style.translate = `${x}px ${y}px`;
+  // 缩放的原点指向小精灵，面板看起来是从它身上展开的
+  p.style.transformOrigin = `${o.x - x}px ${o.y - y}px`;
+}
+
+orb.onMove(() => {
+  for (const [p, prefer] of PANELS) placePanel(p, prefer);
+});
+
+function showPanel(p: HTMLElement, on: boolean, interactive = false) {
+  const prefer = PANELS.find(([q]) => q === p)?.[1] ?? "left";
+  if (on === !p.hidden) {
+    if (on) {
+      sizes.set(p, { w: p.offsetWidth, h: p.offsetHeight });
+      placePanel(p, prefer);
+    }
+    return;
+  }
+  if (on) {
+    p.getAnimations().forEach((a) => a.cancel());
+    p.hidden = false;
+    sizes.set(p, { w: p.offsetWidth, h: p.offsetHeight });
+    placePanel(p, prefer);
+    play(p, [{ opacity: 0, transform: "scale(.6)" }, { opacity: 1, transform: "scale(1)" }], { spring: SPRING.pop, fill: "none" });
+  } else {
+    const a = play(p, [{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(.7)" }], { duration: 220, easing: EASE.in });
+    a.finished.then(() => (p.hidden = true), () => (p.hidden = true));
+  }
+  if (interactive) hit(p, on);
 }
 
 // ---------------- 悬停菜单 ----------------
@@ -124,7 +141,8 @@ quitBtn.addEventListener("click", async () => {
   }
   showPanel(menu, false, true);
   orb.setMood("happy");
-  await sleep(500);
+  await sleep(450);
+  ripple(orb.pos, { size: 60, ms: 520, from: 1.8, to: 0.3 });
   orb.show(false);
   await sleep(500);
   if (isTauri) invoke("quit");
@@ -134,7 +152,6 @@ $("btn-end").addEventListener("click", () => {
   if (isTauri) invoke("disconnect");
   else render({ state: "ready", code: lastCode });
 });
-
 
 // ---------------- 同意 ----------------
 
@@ -179,7 +196,9 @@ async function respond(allow: boolean) {
   hideConsent();
   if (allow) {
     orb.setMood("happy");
-    burst(orb.pos, { n: 30, hue: 150, speed: 320 });
+    orb.bump(1);
+    bloom(orb.pos, { size: 220, ms: 760, tone: "mint" });
+    ripple(orb.pos, { size: 60, ms: 700, tone: "mint" });
   }
   if (isTauri) await invoke("respond", { allow });
   else if (allow || wasAsk !== "consent") render({ state: "connected", techName: $("consent-name").textContent ?? "", code: lastCode });
@@ -225,21 +244,16 @@ function render(s: Status) {
           orb.goTo(home(), "slow");
           if (state === "ready") showPanel(codeCard, true);
         });
-      } else {
-        if (entered) {
-          orb.goTo(home(), "slow");
-          showPanel(codeCard, true);
-        }
+      } else if (entered) {
+        orb.goTo(home(), "slow");
+        showPanel(codeCard, true);
       }
       orb.setMood("ready");
       break;
     case "connected":
       showPanel(codeCard, false);
-      if (!isShown()) {
-        void expand().then(() => {
-          orb.setMood("idle");
-        });
-      } else {
+      if (!isShown()) void expand().then(() => orb.setMood("idle"));
+      else {
         orb.goTo(home(), "slow");
         orb.setMood("idle");
       }
@@ -252,52 +266,23 @@ function render(s: Status) {
 async function entrance() {
   const c = center(primary().work);
   orb.place(c);
-  // 粒子从四周汇聚成小精灵
-  stream(
-    () => {
-      const a = Math.random() * Math.PI * 2;
-      const r = 220 + Math.random() * 160;
-      return { x: c.x + Math.cos(a) * r, y: c.y + Math.sin(a) * r };
-    },
-    () => c,
-    { n: 70, hue: 205 },
-  );
-  await sleep(700);
+  await sleep(300);
   orb.show(true);
-  orb.bump(1.6);
-  ring(c, { r1: 120, hue: 205, ms: 800, width: 4 });
-  burst(c, { n: 30, hue: 205, speed: 300 });
-  await sleep(1300);
+  bloom(c, { size: 380, ms: 950 });
+  ripple(c, { size: 90, ms: 950, to: 3 });
+  await sleep(1200);
   entered = true;
   // 出场期间状态可能已经变了，按当前状态归位
   if (state === "ready") {
     orb.goTo(home(), "slow");
-    await sleep(500);
+    await sleep(650);
     if (state === "ready") showPanel(codeCard, true);
   } else if (state === "connecting" || state === "offline") orb.goTo(home(), "slow");
 }
 
-// ---------------- 主循环 ----------------
+// ---------------- 启动 ----------------
 
-let last = performance.now();
-let hitClock = 0;
-function frame(now: number) {
-  const dt = Math.min(0.05, (now - last) / 1000);
-  last = now;
-  orb.update(dt);
-  stepFx(dt);
-  besideOrb(codeCard, "left");
-  besideOrb(menu, "left");
-  besideOrb(consent, "below");
-  hitClock += dt;
-  if (hitClock > 0.08) {
-    hitClock = 0;
-    syncHits();
-  }
-  requestAnimationFrame(frame);
-}
-
-async function boot() {
+async function fetchGeo() {
   let info: OverlayInfo | null = null;
   if (isTauri) {
     try {
@@ -307,16 +292,29 @@ async function boot() {
     }
   }
   initGeo(info);
-  resizeFx();
-  orb.resize();
+}
+
+async function boot() {
+  await fetchGeo();
   orb.place(center(primary().work));
   hit(orbHit, true);
-  requestAnimationFrame(frame);
+  // 可交互区域：布局没变时这次查询几乎不花时间
+  window.setInterval(syncHits, 100);
 
-  window.addEventListener("resize", () => {
-    if (!isTauri) initGeo(null);
-    resizeFx();
-  });
+  // 显示器插拔、改分辨率、改缩放后重新铺一遍
+  let relayout: number | undefined;
+  let lastLayout = 0;
+  const onGeoChange = () => {
+    window.clearTimeout(relayout);
+    relayout = window.setTimeout(async () => {
+      if (Date.now() - lastLayout < 2000) return;
+      lastLayout = Date.now();
+      await fetchGeo();
+      relayoutEdge();
+      if (entered) orb.goTo(home(), "normal");
+    }, 300);
+  };
+  window.addEventListener("resize", onGeoChange);
 
   if (isTauri) {
     await listen<Status>("status", (e) => render(e.payload));

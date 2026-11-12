@@ -1,7 +1,7 @@
 //! 窗口列表、切换窗口、打开程序。坐标是屏幕物理像素。
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -78,8 +78,7 @@ pub fn list() -> Vec<Win> {
             if pid == std::process::id() {
                 continue;
             }
-            let mut r = RECT::default();
-            let _ = GetWindowRect(h, &mut r);
+            let r = visible_rect(h).unwrap_or_default();
             out.push(Win {
                 handle: h.0 as isize,
                 title,
@@ -187,8 +186,19 @@ pub fn rect_of(handle: isize) -> Option<(i32, i32, i32, i32)> {
         if !IsWindow(Some(h)).as_bool() || !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
             return None;
         }
-        let mut r = RECT::default();
-        GetWindowRect(h, &mut r).ok()?;
+        let r = visible_rect(h)?;
         Some((r.left, r.top, r.right, r.bottom))
     }
+}
+
+/// 窗口看得见的那部分的边界。GetWindowRect 在 Win10/11 上还包含四周一圈看不见的缩放边框
+/// （左右下各约 7 像素），照着它画框会比窗口大一圈；DWM 给的才是实际显示的范围。
+unsafe fn visible_rect(h: HWND) -> Option<RECT> {
+    let mut r = RECT::default();
+    let size = std::mem::size_of::<RECT>() as u32;
+    if unsafe { DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut RECT as *mut _, size) }.is_ok() && r.right > r.left && r.bottom > r.top {
+        return Some(r);
+    }
+    unsafe { GetWindowRect(h, &mut r) }.ok()?;
+    Some(r)
 }
