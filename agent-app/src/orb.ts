@@ -1,12 +1,12 @@
-// 小精灵：一颗流动的渐变光球。位置由弹簧物理驱动，飞行时身后拖一道光迹。
-// 静止时没有任何逐帧脚本：自转、呼吸、悬浮都是合成器上的 CSS 动画。
+// The orb: a ball of flowing gradient light. Its position is driven by spring physics, with a light trail while flying.
+// At rest no per-frame script runs: spin, breathing and floating are all compositor CSS animations.
 
 import type { Pt } from "./geo";
 import { clamp, EASE, onFrame, play, SPRING } from "./motion";
 
 export type Mood = "idle" | "ready" | "work" | "focus" | "ask" | "happy" | "error" | "offline";
 
-/** 各状态下光球自转的快慢 */
+/** Spin speed of the orb in each mood */
 const SPIN: Record<Mood, number> = { idle: 0.6, ready: 1, work: 2.8, focus: 1.7, ask: 1.1, happy: 1.6, error: 0.5, offline: 0 };
 
 const q = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
@@ -28,7 +28,7 @@ class Orb {
   private target: Pt = { x: -200, y: -200 };
   private stiffness = 70;
   private damping = 0.78;
-  /** 被别的动画直接摆位置（例如拖动时） */
+  /** Positioned directly by another animation (e.g. while dragging) */
   private pinned = false;
   private running = false;
   private shown = false;
@@ -65,12 +65,12 @@ class Orb {
     else play(this.pres, [{ transform: "scale(1)", opacity: 1 }, { transform: "scale(0)", opacity: 0 }], { duration: 300, easing: EASE.in });
   }
 
-  /** 位置变化时通知（跟着小精灵走的面板用） */
+  /** Notified on position changes (for panels that follow the orb) */
   onMove(cb: () => void) {
     this.moved.push(cb);
   }
 
-  /** 瞬移（不播放飞行） */
+  /** Teleport (no flight) */
   place(p: Pt) {
     this.pos = { ...p };
     this.target = { ...p };
@@ -86,7 +86,7 @@ class Orb {
     this.wake();
   }
 
-  /** 由外部逐帧设置位置（保留速度，光迹和拉伸照常） */
+  /** Position set externally per frame (velocity kept, trail and stretch still work) */
   pin(p: Pt, dt: number) {
     this.pinned = true;
     if (dt > 0) this.vel = { x: (p.x - this.pos.x) / dt, y: (p.y - this.pos.y) / dt };
@@ -101,7 +101,7 @@ class Orb {
     this.wake();
   }
 
-  /** 吞下东西、受到冲击时的一下弹跳 */
+  /** A bounce when it swallows something or takes a hit */
   bump(strength = 1) {
     play(this.bumper, [{ transform: `scale(${1 + 0.3 * strength})` }, { transform: "scale(1)" }], { spring: SPRING.bounce, fill: "none" });
     play(this.halo, [{ opacity: 1, transform: `scale(${1 + 0.45 * strength})` }, { opacity: 0.55, transform: "scale(1)" }], { duration: 620, fill: "none" });
@@ -140,10 +140,10 @@ class Orb {
     this.el.style.transform = `translate3d(${x.toFixed(2)}px,${y.toFixed(2)}px,0)`;
     const speed = Math.hypot(this.vel.x, this.vel.y);
     const ang = Math.atan2(this.vel.y, this.vel.x).toFixed(3);
-    // 沿飞行方向拉伸
+    // Stretch along the direction of flight
     const s = clamp(speed / 2600, 0, 0.3);
     this.body.style.transform = s < 0.004 ? "" : `rotate(${ang}rad) scale(${(1 + s).toFixed(3)},${(1 - s * 0.55).toFixed(3)}) rotate(${-ang}rad)`;
-    // 光迹：越快越长越亮
+    // Trail: longer and brighter the faster it goes
     const t = clamp((speed - 120) / 1000);
     this.tail.style.opacity = t.toFixed(3);
     if (t > 0) this.tail.style.transform = `rotate(${ang}rad) scaleX(${(0.2 + t * 1.15).toFixed(3)})`;

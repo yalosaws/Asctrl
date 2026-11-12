@@ -1,6 +1,6 @@
-// 动效基础：弹簧曲线、统一帧循环、Web Animations 的小封装。
-// 原则：所有动画只动 transform / opacity，交给合成器去跑；需要逐帧算的东西（小精灵的飞行）
-// 走同一个帧循环，没人需要时循环自己停掉。
+// Motion basics: spring curves, a shared frame loop, and small Web Animations helpers.
+// Rule: every animation moves only transform / opacity and runs on the compositor; anything computed
+// per frame (the orb's flight) shares one frame loop, which stops itself when nobody needs it.
 
 export const clamp = (v: number, a = 0, b = 1) => Math.min(b, Math.max(a, v));
 export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -19,7 +19,7 @@ export interface Spring {
   duration: number;
 }
 
-/** 把一根真实弹簧（0 → 1）采样成 CSS linear() 曲线，动画仍由合成器执行 */
+/** Sample a real spring (0 -> 1) into a CSS linear() curve; the compositor still runs the animation */
 export function spring(stiffness: number, damping: number, mass = 1): Spring {
   const dt = 1 / 240;
   let x = 0;
@@ -43,13 +43,13 @@ export function spring(stiffness: number, damping: number, mass = 1): Spring {
 }
 
 export const SPRING = {
-  /** 干脆利落，不回弹 */
+  /** Crisp, no overshoot */
   snap: spring(420, 40),
-  /** 轻微回弹，用于"冒出来" */
+  /** Slight overshoot, for things popping in */
   pop: spring(300, 21),
-  /** 明显回弹，用于受到冲击的一下 */
+  /** Strong overshoot, for an impact bounce */
   bounce: spring(380, 15),
-  /** 慢而柔和 */
+  /** Slow and soft */
   soft: spring(140, 22),
 };
 
@@ -61,18 +61,18 @@ export function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", pare
   return e;
 }
 
-/** 等一个 Web Animation 播完（被取消也算完） */
+/** Wait for a Web Animation to finish (cancelled counts as finished) */
 export const done = (a: Animation) => a.finished.then(() => {}, () => {});
 
 type Timing = Omit<KeyframeAnimationOptions, "easing" | "duration"> & { easing?: string; duration?: number; spring?: Spring };
 
-/** 播放一段动画，默认停在最后一帧 */
+/** Play an animation, holding the last frame by default */
 export function play(e: Element, frames: Keyframe[], o: Timing = {}) {
   const { spring: s, ...rest } = o;
   return e.animate(frames, { duration: s?.duration ?? 400, easing: s?.easing ?? EASE.out, fill: "both", ...rest });
 }
 
-/** 播完就把元素移除 */
+/** Remove the element when the animation ends */
 export function playOut(e: Element, frames: Keyframe[], o: Timing = {}) {
   return done(play(e, frames, o)).then(() => e.remove());
 }
@@ -81,7 +81,7 @@ export function fadeOut(e: Element, ms = 300, extra: Keyframe = {}) {
   return playOut(e, [{}, { opacity: 0, ...extra }], { duration: ms, easing: EASE.inOut });
 }
 
-// ---- 帧循环 ----
+// ---- Frame loop ----
 
 type Tick = (dt: number, now: number) => boolean | void;
 const ticks = new Set<Tick>();
@@ -95,7 +95,7 @@ function loop(now: number) {
   raf = ticks.size ? requestAnimationFrame(loop) : 0;
 }
 
-/** 每帧调用 fn，直到它返回 false */
+/** Call fn every frame until it returns false */
 export function onFrame(fn: Tick) {
   ticks.add(fn);
   if (!raf) {
@@ -104,7 +104,7 @@ export function onFrame(fn: Tick) {
   }
 }
 
-/** 按时间推进的一段逐帧动画 */
+/** A per-frame animation driven by elapsed time */
 export function tween(ms: number, step: (t: number, dt: number) => void): Promise<void> {
   return new Promise((resolve) => {
     let t = 0;

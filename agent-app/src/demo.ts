@@ -1,6 +1,6 @@
-// 浏览器预览用：假桌面 + 按顺序演示所有动画。
-// 地址加 ?state=ready|consent|admin|reboot|connected|offline|connecting 只停在某个状态；
-// 控制台里可以用 demoFx("click", {...}) 单独触发。
+// Browser preview: a fake desktop plus every animation played in sequence.
+// Add ?state=ready|consent|admin|reboot|connected|offline|connecting to the URL to stop at one state;
+// in the console, demoFx("click", {...}) triggers a single effect.
 
 import { fxEnd, fxStart, type FxEvent } from "./fx";
 import type { Pt } from "./geo";
@@ -36,12 +36,12 @@ function fakeDesktop() {
   const tb = document.createElement("div");
   tb.className = "fake-taskbar";
   document.body.prepend(tb);
-  const a = mk("记事本", W * 0.08, H * 0.1, W * 0.42, H * 0.5);
-  const b = mk("网络和 Internet 设置", W * 0.45, H * 0.22, W * 0.4, H * 0.45);
+  const a = mk("Notepad", W * 0.08, H * 0.1, W * 0.42, H * 0.5);
+  const b = mk("Network & Internet settings", W * 0.45, H * 0.22, W * 0.4, H * 0.45);
   return { a, b, W, H };
 }
 
-const HOSTS = `C:\\Windows\\System32\\drivers\\etc\\hosts（UTF-8，共 24 行）
+const HOSTS = `C:\\Windows\\System32\\drivers\\etc\\hosts (UTF-8, 24 lines)
      1\t# Copyright (c) 1993-2009 Microsoft Corp.
      2\t#
      3\t# This is a sample HOSTS file used by Microsoft TCP/IP for Windows.
@@ -54,19 +54,19 @@ const HOSTS = `C:\\Windows\\System32\\drivers\\etc\\hosts（UTF-8，共 24 行�
 
 const NET = `Name                      Status       LinkSpeed
 ----                      ------       ---------
-以太网                    Disconnected 0 bps
+Ethernet                  Disconnected 0 bps
 WLAN                      Up           866.7 Mbps
-蓝牙网络连接              Disconnected 3 Mbps`;
+Bluetooth Network         Disconnected 3 Mbps`;
 
 export async function runDemo(h: Hooks) {
   const { a, b, W, H } = fakeDesktop();
   const q = new URLSearchParams(location.search);
   const only = q.get("state");
-  // 给控制台调试用
+  // For debugging from the console
   (window as unknown as Record<string, unknown>).demoFx = (tool: string, args = {}, geo = {}, ms = 800, ok = true, text = "", geoEnd = {}) =>
     sim(tool, tool, args, geo, ms, ok, text, geoEnd);
 
-  const T = { techName: "小王", timeoutSec: 120 };
+  const T = { techName: "Alex", timeoutSec: 120 };
   if (only) {
     const map: Record<string, unknown> = {
       connecting: { state: "connecting" },
@@ -75,7 +75,7 @@ export async function runDemo(h: Hooks) {
       consent: { state: "consent", ...T },
       admin: { state: "admin", ...T },
       reboot: { state: "reboot", ...T },
-      connected: { state: "connected", techName: "小王", code: "482913" },
+      connected: { state: "connected", techName: "Alex", code: "482913" },
     };
     h.render(map[only] ?? map.ready);
     return;
@@ -91,52 +91,52 @@ export async function runDemo(h: Hooks) {
     await sleep(4500);
     h.render({ state: "consent", ...T });
     await sleep(3000);
-    h.render({ state: "connected", techName: "小王", code: "482913" });
+    h.render({ state: "connected", techName: "Alex", code: "482913" });
     await sleep(5200);
 
-    await s("screenshot", "查看了你的屏幕", {}, {}, 900, true, "截图", { shot: [0, 0, W, H] });
+    await s("screenshot", "Looked at your screen", {}, {}, 900, true, "Screenshot", { shot: [0, 0, W, H] });
     await sleep(1600);
-    await s("click", "点击了屏幕", { button: "left", count: 1 }, { at: [a[0] + a[2] * 0.5, a[1] + a[3] * 0.4] }, 450);
+    await s("click", "Clicked the screen", { button: "left", count: 1 }, { at: [a[0] + a[2] * 0.5, a[1] + a[3] * 0.4] }, 450);
     await sleep(700);
-    await s("type_text", "输入了文字：你好，我来帮你修网络", { text: "你好，我来帮你修网络" }, { at: [a[0] + a[2] * 0.5, a[1] + a[3] * 0.4] }, 1300);
+    await s("type_text", "Typed: Hi, I'm here to fix your network", { text: "Hi, I'm here to fix your network" }, { at: [a[0] + a[2] * 0.5, a[1] + a[3] * 0.4] }, 1300);
     await sleep(800);
-    await s("press_keys", "按下了 ctrl+s", { keys: "ctrl+s" }, {}, 600);
+    await s("press_keys", "Pressed ctrl+s", { keys: "ctrl+s" }, {}, 600);
     await sleep(1200);
-    await s("run_powershell", "执行命令：Get-NetAdapter", { script: "Get-NetAdapter | Select Name, Status, LinkSpeed" }, {}, 1900, true, NET);
+    await s("run_powershell", "Ran: Get-NetAdapter", { script: "Get-NetAdapter | Select Name, Status, LinkSpeed" }, {}, 1900, true, NET);
     await sleep(1400);
-    await s("run_powershell", "执行命令：ipconfig /flushdns", { script: "ipconfig /flushdns" }, {}, 1200, true, "Windows IP 配置\n\n已成功刷新 DNS 解析缓存。");
+    await s("run_powershell", "Ran: ipconfig /flushdns", { script: "ipconfig /flushdns" }, {}, 1200, true, "Windows IP Configuration\n\nSuccessfully flushed the DNS Resolver Cache.");
     await sleep(3600);
-    await s("read_file", "查看了文件 hosts", { path: "C:\\Windows\\System32\\drivers\\etc\\hosts" }, {}, 900, true, HOSTS);
+    await s("read_file", "Read file hosts", { path: "C:\\Windows\\System32\\drivers\\etc\\hosts" }, {}, 900, true, HOSTS);
     await sleep(3200);
     await s(
       "edit_file",
-      "修改了文件 hosts",
-      { path: "C:\\Windows\\System32\\drivers\\etc\\hosts", oldText: "127.0.0.1 ads.example.com\n127.0.0.1 tracker.example.net", newText: "# 已清理" },
+      "Edited file hosts",
+      { path: "C:\\Windows\\System32\\drivers\\etc\\hosts", oldText: "127.0.0.1 ads.example.com\n127.0.0.1 tracker.example.net", newText: "# cleaned up" },
       {},
       1300,
     );
     await sleep(2200);
-    await s("search_files", "在 ~\\Documents 里搜索 网络", { path: "~\\Documents", pattern: "网络" }, {}, 1400, true,
-      "报告.txt:3: 网络老是断开\n笔记.md:12: 家里网络密码在路由器背面\n待办.txt:1: 打电话问宽带网络");
+    await s("search_files", "Searched ~\\Documents for network", { path: "~\\Documents", pattern: "network" }, {}, 1400, true,
+      "report.txt:3: the network keeps dropping\nnotes.md:12: home network password is on the back of the router\ntodo.txt:1: call the ISP about the network");
     await sleep(3200);
-    await s("list_dir", "查看了文件夹 下载", { path: "~\\Downloads" }, {}, 700, true,
-      "C:\\Users\\me\\Downloads（6 项）\n2026-11-01 10:00  <文件夹>  安装包\\\n2026-11-02 11:00  2.1 MB  驱动.zip\n2026-11-03 09:00  80 KB  发票.pdf\n2026-11-04 12:00  1.2 GB  系统镜像.iso\n2026-11-05 13:00  4 KB  readme.txt");
+    await s("list_dir", "Listed folder Downloads", { path: "~\\Downloads" }, {}, 700, true,
+      "C:\\Users\\me\\Downloads (6 items)\n2026-11-01 10:00  <DIR>  installers\\\n2026-11-02 11:00  2.1 MB  driver.zip\n2026-11-03 09:00  80 KB  invoice.pdf\n2026-11-04 12:00  1.2 GB  system-image.iso\n2026-11-05 13:00  4 KB  readme.txt");
     await sleep(2400);
-    await s("focus_window", "最大化了一个窗口", { action: "maximize" }, { rect: [b[0], b[1], b[2], b[3]] }, 600, true, "", {
+    await s("focus_window", "Maximized a window", { action: "maximize" }, { rect: [b[0], b[1], b[2], b[3]] }, 600, true, "", {
       rect: [work.x, work.y, work.w, work.h],
     });
     await sleep(2000);
-    await s("drag", "拖动了鼠标", {}, { from: [W * 0.3, H * 0.3], to: [W * 0.6, H * 0.55] }, 1100);
+    await s("drag", "Dragged the mouse", {}, { from: [W * 0.3, H * 0.3], to: [W * 0.6, H * 0.55] }, 1100);
     await sleep(1000);
-    await s("scroll", "滚动了页面", { amount: 5 }, { at: [W * 0.5, H * 0.5] }, 500);
+    await s("scroll", "Scrolled the page", { amount: 5 }, { at: [W * 0.5, H * 0.5] }, 500);
     await sleep(1200);
-    await s("list_windows", "查看了打开的窗口", {}, {}, 300, true, "", { windows: [a, b] });
+    await s("list_windows", "Listed open windows", {}, {}, 300, true, "", { windows: [a, b] });
     await sleep(1400);
-    await s("zoom", "放大查看了屏幕的一部分", {}, { from: [b[0] + 40, b[1] + 60], to: [b[0] + 360, b[1] + 220] }, 900);
+    await s("zoom", "Zoomed into part of the screen", {}, { from: [b[0] + 40, b[1] + 60], to: [b[0] + 360, b[1] + 220] }, 900);
     await sleep(1800);
-    await s("download_file", "取走了文件 发票.pdf", { path: "~\\Downloads\\发票.pdf" }, {}, 900);
+    await s("download_file", "Downloaded invoice.pdf", { path: "~\\Downloads\\invoice.pdf" }, {}, 900);
     await sleep(2400);
-    await s("focus_window", "关闭了一个窗口", { action: "close" }, { rect: [a[0], a[1], a[2], a[3]] }, 400);
+    await s("focus_window", "Closed a window", { action: "close" }, { rect: [a[0], a[1], a[2], a[3]] }, 400);
     await sleep(2400);
     h.render({ state: "ready", code: "482913" });
     await sleep(5000);

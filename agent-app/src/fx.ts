@@ -1,11 +1,12 @@
-// 每个工具调用对应的动画。start 在工具开始执行时触发，end 在结果出来后触发。
-// 相邻动作之间靠小精灵衔接：它是一个连续运动的物体，从上一个落点直接飞向下一个，不会瞬移。
-// 结果比动画先到时，收尾动画会等前半段播到位再接上（见 ready）。
+// One animation per tool call. `start` fires when the tool begins, `end` when its result arrives.
+// The orb ties consecutive actions together: it is one continuously moving object that flies from
+// the last spot straight to the next, never teleporting.
+// If the result arrives before the start animation lands, the end animation waits for it (see `ready`).
 
-import { center, dock, home, monitorAt, monitors, primary, pt, rect, type Pt, type R } from "./geo";
+import { center, home, monitorAt, monitors, primary, pt, rect, type Pt, type R } from "./geo";
 import { orb } from "./orb";
 import { bloom, capture, dart, hold, Outline, ripple, streaks, strand, sweep, type Tone } from "./light";
-import { pulse, setActive } from "./edge";
+import { pulse } from "./edge";
 import { closeCard, deckRect, fillEntries, fillLines, openCard, progress, scan, skeleton, termEnd, termStart, type Card } from "./panel";
 import { easeInOutCubic, el, fadeOut, play, sleep, SPRING, tween } from "./motion";
 
@@ -20,7 +21,6 @@ export interface FxEvent {
   text?: string;
 }
 
-const layer = document.getElementById("cards") as HTMLDivElement;
 const marks = document.getElementById("marks") as HTMLDivElement;
 
 const str = (v: unknown) => (typeof v === "string" ? v : v === undefined || v === null ? "" : String(v));
@@ -31,7 +31,7 @@ const dirName = (p: string) => {
   return i > 0 ? p.slice(0, i) : "";
 };
 
-// ---- 小精灵的注意力：干完活过一会儿回到角落 ----
+// ---- Orb attention: drift back to the corner a while after the work is done ----
 
 let homeTimer: number | undefined;
 let active = 0;
@@ -40,7 +40,6 @@ function attend() {
   active++;
   window.clearTimeout(homeTimer);
   orb.setMood("work");
-  setActive(true);
 }
 
 function release(ok = true, delay = 1500) {
@@ -51,11 +50,10 @@ function release(ok = true, delay = 1500) {
     if (active > 0) return;
     orb.setMood("idle");
     orb.goTo(home(), "slow");
-    setActive(false);
   }, ok ? delay : delay + 1200);
 }
 
-/** 飞到目标点旁边（不挡住目标） */
+/** Fly next to a target point (without covering it) */
 function near(p: Pt, speed: "normal" | "fast" = "fast") {
   const work = monitorAt(p).work;
   const dx = p.x + 80 > work.x + work.w ? -52 : 52;
@@ -63,7 +61,7 @@ function near(p: Pt, speed: "normal" | "fast" = "fast") {
   orb.goTo({ x: p.x + dx, y: p.y + dy }, speed);
 }
 
-/** 开始动画播到位的时刻；结束动画等它 */
+/** When each start animation lands; the end animation waits for it */
 const ready = new Map<string, Promise<void>>();
 const whenReady = (id: string) => {
   const p = ready.get(id) ?? Promise.resolve();
@@ -71,14 +69,14 @@ const whenReady = (id: string) => {
   return p;
 };
 
-/** 小精灵收下一样东西 */
+/** The orb takes something in */
 function swallow() {
   orb.bump(1.2);
   bloom(orb.pos, { size: 150, ms: 620 });
   ripple(orb.pos, { size: 50, ms: 560 });
 }
 
-// ---- 截图 ----
+// ---- Screenshot ----
 
 const shots = new Map<string, { stop: (() => void)[]; ol?: Outline }>();
 
@@ -109,7 +107,7 @@ async function screenshotEnd(e: FxEvent) {
   swallow();
 }
 
-// ---- 放大查看 ----
+// ---- Zoom ----
 
 function zoomStart(e: FxEvent) {
   const a = pt(e.geo?.from);
@@ -140,7 +138,7 @@ async function zoomEnd(e: FxEvent) {
   swallow();
 }
 
-// ---- 鼠标 ----
+// ---- Mouse ----
 
 let holdMark: HTMLElement | null = null;
 const TONE = (b: string): Tone => (b === "right" ? "warm" : b === "middle" ? "mint" : "aurora");
@@ -152,7 +150,7 @@ function clickStart(e: FxEvent) {
   const tone = TONE(str(e.args?.button));
   const from = { ...orb.pos };
   near(p);
-  // 一道光从小精灵射向目标，到了以后收成一个瞄准圈
+  // A beam shoots from the orb to the target, then settles into an aim ring
   ready.set(
     e.id,
     dart(from, p, { tone }).then(() => {
@@ -223,7 +221,7 @@ async function dragStart(e: FxEvent) {
   await sleep(340);
   const ms = 780;
   const line = strand(a, b, ms);
-  // 小精灵自己拖着这条线走到终点
+  // The orb itself pulls the line to the end point
   await tween(ms, (t, dt) => {
     const k = easeInOutCubic(t);
     orb.pin({ x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k }, dt);
@@ -236,82 +234,7 @@ async function dragStart(e: FxEvent) {
   void fadeOut(line, 520);
 }
 
-// ---- 键盘 ----
-
-let typingPill: HTMLElement | null = null;
-
-async function typeStart(e: FxEvent) {
-  const text = str(e.args?.text);
-  const at = pt(e.geo?.at) ?? dock();
-  if (typingPill) void fadeOut(typingPill, 200, { transform: "translateY(-8px)" });
-  const work = monitorAt(at).work;
-  const pill = el("div", "typing", layer);
-  typingPill = pill;
-  const x = Math.max(work.x + 12, Math.min(at.x + 18, work.x + work.w - 380));
-  const y = Math.min(at.y + 30, work.y + work.h - 70);
-  pill.style.left = `${Math.round(x)}px`;
-  pill.style.top = `${Math.round(y)}px`;
-  const line = el("span", "typing-text", pill);
-  const caret = el("i", "caret", pill);
-  play(pill, [{ opacity: 0, transform: "translateY(10px) scale(.9)" }, { opacity: 1, transform: "none" }], { spring: SPRING.pop });
-  orb.goTo({ x: x - 34, y: y + 21 }, "fast");
-
-  const chars = [...text.replace(/\r?\n/g, "⏎")];
-  const per = Math.min(60, Math.max(14, 1400 / Math.max(1, chars.length)));
-  for (const ch of chars) {
-    if (typingPill !== pill) return;
-    const s = el("span", "ch", line, ch);
-    play(s, [{ transform: "translateY(9px)", opacity: 0 }, { transform: "none", opacity: 1 }], { spring: SPRING.snap, fill: "none" });
-    // 只保留最后一截，长文本不撑爆
-    while (line.childElementCount > 42) line.firstElementChild?.remove();
-    await sleep(per);
-  }
-  caret.remove();
-}
-
-function typeEnd(e: FxEvent) {
-  const pill = typingPill;
-  if (!pill) return;
-  pill.classList.add(e.ok ? "ok" : "bad");
-  setTimeout(() => {
-    if (typingPill === pill) typingPill = null;
-    void fadeOut(pill, 380, { transform: "translateY(-10px) scale(.96)" });
-  }, 1200);
-}
-
-const KEY_LABEL: Record<string, string> = {
-  ctrl: "Ctrl", control: "Ctrl", shift: "Shift", alt: "Alt", win: "Win", meta: "Win", cmd: "Win", super: "Win",
-  enter: "Enter ⏎", return: "Enter ⏎", tab: "Tab ⇥", esc: "Esc", escape: "Esc", space: "Space", backspace: "⌫",
-  delete: "Del", del: "Del", up: "↑", down: "↓", left: "←", right: "→", pageup: "PgUp", pagedown: "PgDn", home: "Home", end: "End",
-};
-
-async function keysStart(e: FxEvent) {
-  const raw = str(e.args?.keys).trim();
-  if (!raw) return;
-  const combos = raw.split(/\s+/).slice(0, 6);
-  const wrap = el("div", "keys", layer);
-  const p = orb.pos;
-  const above = p.y - 96 > monitorAt(p).work.y;
-  wrap.style.left = `${Math.round(p.x)}px`;
-  wrap.style.top = `${Math.round(p.y + (above ? -84 : 84))}px`;
-  for (const combo of combos) {
-    const g = el("div", "combo", wrap);
-    combo.split("+").forEach((k, i) => {
-      if (i) el("span", "plus", g, "+");
-      const cap = el("span", "cap", g, KEY_LABEL[k.toLowerCase()] ?? (k.length === 1 ? k.toUpperCase() : k));
-      play(cap, [{ transform: `translateY(${above ? 14 : -14}px) scale(.7)`, opacity: 0 }, { transform: "none", opacity: 1 }], { spring: SPRING.pop, delay: i * 60, fill: "backwards" });
-    });
-    await sleep(280);
-    const caps = g.querySelectorAll<HTMLElement>(".cap");
-    caps.forEach((c) => c.classList.add("down"));
-    await sleep(e.tool === "hold_key" ? 700 : 230);
-    caps.forEach((c) => c.classList.remove("down"));
-    await sleep(170);
-  }
-  setTimeout(() => void fadeOut(wrap, 380, { transform: `translateY(${above ? -10 : 10}px)` }), 520);
-}
-
-// ---- 窗口 ----
+// ---- Windows ----
 
 const winCtx = new Map<string, Outline>();
 
@@ -350,7 +273,7 @@ async function winEnd(e: FxEvent) {
     return;
   }
   if (!r1) return void o?.out("fade");
-  // 窗口移动、放大、还原：同一个框变形到新位置；原来没有框（窗口之前是最小化的）就直接冒出来
+  // Move / maximize / restore: the same outline morphs to the new spot; if there was none (the window was minimized), pop one in
   orb.goTo(aboveWindow(r1), "fast");
   let ol = o;
   if (ol) await ol.moveTo(r1, 500);
@@ -392,7 +315,7 @@ function openAppEnd(e: FxEvent) {
   });
 }
 
-// ---- 文件 ----
+// ---- Files ----
 
 const cards = new Map<string, { card: Card; finish?: () => void }>();
 const lines = (t: string) => t.replace(/\r/g, "").replace(/\n+$/, "").split("\n");
@@ -461,7 +384,7 @@ async function fileEnd(e: FxEvent) {
   let linger = 1500;
   switch (e.tool) {
     case "read_file":
-      await fillLines(c, lines(text).slice(1), "mono"); // 第一行是路径和编码
+      await fillLines(c, lines(text).slice(1), "mono"); // first line is path and encoding
       scan(c);
       linger = 2200;
       break;
@@ -494,7 +417,7 @@ async function fileEnd(e: FxEvent) {
     case "download_file": {
       ctx.finish?.();
       if (e.tool === "download_file") {
-        // 文件从面板送进小精灵，再往上送走（交给对方）
+        // The file flies from the panel into the orb, then up and away (to the technician)
         const d = deckRect();
         if (d) await dart({ x: d.x + d.w - 40, y: d.y + d.h - 40 }, orb.pos, { tone: "mint" });
         swallow();
@@ -510,7 +433,7 @@ async function fileEnd(e: FxEvent) {
   closeCard(c, true, "", linger);
 }
 
-// ---- 命令行 ----
+// ---- Command line ----
 
 function termCommand(e: FxEvent): string {
   const a = e.args ?? {};
@@ -534,12 +457,12 @@ function termCommand(e: FxEvent): string {
   }
 }
 
-// ---- 分发 ----
+// ---- Dispatch ----
 
 const TERM = new Set(["run_powershell", "system_info", "list_processes", "event_log", "job_output", "stop_job", "reset_shell"]);
 const FILE = new Set(["read_file", "write_file", "edit_file", "list_dir", "find_files", "search_files", "upload_file", "download_file", "read_clipboard", "write_clipboard"]);
 
-/** 结束事件只带结果，参数和开始时的位置从这里补上 */
+/** End events carry only the result; args and start geometry are filled in from here */
 const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
 
 export function fxStart(e: FxEvent) {
@@ -564,10 +487,10 @@ export function fxStart(e: FxEvent) {
     case "drag":
       return void dragStart(e);
     case "type_text":
-      return void typeStart(e);
     case "press_keys":
     case "hold_key":
-      return void keysStart(e);
+      // Typing and key presses show nothing on screen
+      return;
     case "focus_window":
       return winStart(e);
     case "list_windows":
@@ -598,9 +521,6 @@ export function fxEnd(ev: FxEvent) {
       break;
     case "click":
       void clickEnd(e);
-      break;
-    case "type_text":
-      typeEnd(e);
       break;
     case "focus_window":
       void winEnd(e);

@@ -2,7 +2,7 @@
   "name": "asctrl",
   "version": "0.1.0",
   "private": true,
-  "description": "AI 辅助远程修电脑：被控端 + 中继服务器 + MCP 控制端",
+  "description": "AI-assisted remote PC repair: agent + relay server + MCP technician console",
   "type": "module",
   "engines": {
     "node": ">=24"

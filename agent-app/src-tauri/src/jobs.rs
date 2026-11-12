@@ -1,5 +1,5 @@
-//! 后台任务：在独立的 PowerShell 进程里跑耗时命令（sfc、DISM、安装程序等），
-//! 不受单次调用超时限制，随时可以查看新输出或停止。技术员断开时全部停止。
+//! Background jobs: run long commands (sfc, DISM, installers, ...) in a separate PowerShell process,
+//! free of the per-call timeout; new output can be read or the job stopped at any time. All stop when the technician disconnects.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -15,7 +15,7 @@ struct Job {
     started: Instant,
     pid: Option<u32>,
     out: Arc<Mutex<String>>,
-    /// 已经返回给技术员的输出长度
+    /// Length of output already returned to the technician
     read_pos: usize,
     exit: Arc<Mutex<Option<String>>>,
     file: std::path::PathBuf,
@@ -28,7 +28,7 @@ pub struct Jobs {
 }
 
 fn fmt_secs(secs: u64) -> String {
-    format!("{}分{}秒", secs / 60, secs % 60)
+    format!("{}m{}s", secs / 60, secs % 60)
 }
 
 fn kill_tree(pid: u32) {
@@ -51,7 +51,7 @@ fn pump(mut r: impl AsyncReadExt + Unpin + Send + 'static, out: Arc<Mutex<String
                 break;
             }
             pending.extend_from_slice(&buf[..n]);
-            // 只把完整的 UTF-8 部分放进去，避免把一个汉字切成两半
+            // Only append complete UTF-8 sequences, so a multi-byte character is never split
             let valid = match std::str::from_utf8(&pending) {
                 Ok(_) => pending.len(),
                 Err(e) => e.valid_up_to(),
@@ -73,13 +73,13 @@ impl Jobs {
     pub fn start(&mut self, script: &str) -> Result<u32, String> {
         self.next += 1;
         let id = self.next;
-        // 写成 .ps1 再用 -File 运行：多行脚本、引号都不用转义
+        // Write a .ps1 and run it with -File: no escaping needed for multi-line scripts or quotes
         let file = std::env::temp_dir().join(format!("asctrl-job-{}-{id}.ps1", std::process::id()));
         let body = format!(
             "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'; $ConfirmPreference='None'\r\n\
              Set-Location $env:USERPROFILE\r\n& {{\r\n{script}\r\n}} 2>&1 | Out-String -Stream -Width 250\r\nexit $LASTEXITCODE\r\n"
         );
-        std::fs::write(&file, [&[0xEF, 0xBB, 0xBF][..], body.as_bytes()].concat()).map_err(|e| format!("写临时脚本失败：{e}"))?;
+        std::fs::write(&file, [&[0xEF, 0xBB, 0xBF][..], body.as_bytes()].concat()).map_err(|e| format!("Failed to write the temp script: {e}"))?;
 
         let mut cmd = Command::new("powershell.exe");
         cmd.args(["-NoProfile", "-NoLogo", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
@@ -90,7 +90,7 @@ impl Jobs {
             .kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000);
-        let mut child = cmd.spawn().map_err(|e| format!("启动 PowerShell 失败：{e}"))?;
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to start PowerShell: {e}"))?;
 
         let out = Arc::new(Mutex::new(String::new()));
         let exit = Arc::new(Mutex::new(None));
@@ -106,10 +106,10 @@ impl Jobs {
             let took = fmt_secs(started.elapsed().as_secs());
             *exit2.lock().unwrap() = Some(match status {
                 Ok(s) => match s.code() {
-                    Some(c) => format!("已结束，退出码 {c}（用时 {took}）"),
-                    None => format!("已结束（用时 {took}）"),
+                    Some(c) => format!("Finished, exit code {c} (took {took})"),
+                    None => format!("Finished (took {took})"),
                 },
-                Err(e) => format!("异常：{e}"),
+                Err(e) => format!("Error: {e}"),
             });
         });
         self.map.insert(id, Job { script: script.into(), started, pid, out, read_pos: 0, exit, file });
@@ -119,13 +119,13 @@ impl Jobs {
     fn status(j: &Job) -> String {
         match j.exit.lock().unwrap().clone() {
             Some(s) => s,
-            None => format!("运行中（已 {}）", fmt_secs(j.started.elapsed().as_secs())),
+            None => format!("Running ({} so far)", fmt_secs(j.started.elapsed().as_secs())),
         }
     }
 
-    /// 返回上次读取之后的新输出；all 为真时返回全部输出
+    /// Return output since the last read; all output when `all` is true
     pub fn output(&mut self, id: u32, all: bool) -> Result<String, String> {
-        let j = self.map.get_mut(&id).ok_or(format!("没有编号为 {id} 的后台任务"))?;
+        let j = self.map.get_mut(&id).ok_or(format!("No background job {id}"))?;
         let out = j.out.lock().unwrap().clone();
         let from = if all { 0 } else { j.read_pos.min(out.len()) };
         j.read_pos = out.len();
@@ -136,19 +136,19 @@ impl Jobs {
             while !new.is_char_boundary(cut) {
                 cut += 1;
             }
-            new = format!("…（前面 {} 字节省略）\n{}", cut, &new[cut..]);
+            new = format!("… (first {} bytes omitted)\n{}", cut, &new[cut..]);
         }
-        let label = if all { "全部输出" } else { "新输出" };
+        let label = if all { "all output" } else { "new output" };
         Ok(format!(
-            "任务 {id}：{}\n---- {label} ----\n{}",
+            "Job {id}: {}\n---- {label} ----\n{}",
             Self::status(j),
-            if new.is_empty() { "(暂无)" } else { &new }
+            if new.is_empty() { "(none yet)" } else { &new }
         ))
     }
 
     pub fn list(&self) -> String {
         if self.map.is_empty() {
-            return "没有后台任务".into();
+            return "No background jobs".into();
         }
         let mut ids: Vec<&u32> = self.map.keys().collect();
         ids.sort();
@@ -163,14 +163,14 @@ impl Jobs {
     }
 
     pub fn stop(&mut self, id: u32) -> Result<String, String> {
-        let j = self.map.get(&id).ok_or(format!("没有编号为 {id} 的后台任务"))?;
+        let j = self.map.get(&id).ok_or(format!("No background job {id}"))?;
         if j.exit.lock().unwrap().is_some() {
-            return Ok(format!("任务 {id} 已经结束了"));
+            return Ok(format!("Job {id} has already finished"));
         }
         if let Some(pid) = j.pid {
             kill_tree(pid);
         }
-        Ok(format!("已停止任务 {id}"))
+        Ok(format!("Stopped job {id}"))
     }
 
     pub fn stop_all(&mut self) {

@@ -9,12 +9,12 @@ pub struct PsResult {
     pub timed_out: bool,
 }
 
-/// 运行一段 PowerShell 脚本，输出统一用 UTF-8（避免中文乱码），不弹出窗口。
+/// Run a PowerShell script with UTF-8 output (so non-ASCII text isn't garbled) and no visible window.
 pub async fn run(script: &str, timeout: Duration) -> PsResult {
     let full = format!(
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$ProgressPreference='SilentlyContinue';\n{script}"
     );
-    // -EncodedCommand 需要 UTF-16LE 的 base64，可以避开所有引号转义问题
+    // -EncodedCommand takes UTF-16LE base64, which sidesteps every quoting problem
     let utf16: Vec<u8> = full.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
     let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
 

@@ -1,11 +1,11 @@
-//! 鼠标和键盘控制（Windows SendInput）。坐标是屏幕物理像素。
+//! Mouse and keyboard control (Windows SendInput). Coordinates are physical screen pixels.
 
 use std::time::Duration;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
 
-const BLOCKED: &str = "输入被系统拦截：目标窗口可能是管理员权限运行的（可先 request_admin），或当前是锁屏/UAC 界面";
+const BLOCKED: &str = "Input was blocked by Windows: the target window may be running as administrator (try request_admin first), or the lock screen / UAC prompt is showing";
 
 fn send(inputs: &[INPUT]) -> Result<(), String> {
     let n = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
@@ -29,12 +29,12 @@ fn key(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 }
 
 fn move_to(x: i32, y: i32) -> Result<(), String> {
-    unsafe { SetCursorPos(x, y) }.map_err(|e| format!("移动鼠标失败：{e}"))
+    unsafe { SetCursorPos(x, y) }.map_err(|e| format!("Failed to move the mouse: {e}"))
 }
 
 pub fn cursor_pos() -> Result<(i32, i32), String> {
     let mut p = POINT::default();
-    unsafe { GetCursorPos(&mut p) }.map_err(|e| format!("读取鼠标位置失败：{e}"))?;
+    unsafe { GetCursorPos(&mut p) }.map_err(|e| format!("Failed to read the mouse position: {e}"))?;
     Ok((p.x, p.y))
 }
 
@@ -43,16 +43,16 @@ fn buttons(button: &str) -> Result<(MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS), Strin
         "" | "left" => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
         "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
         "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
-        other => return Err(format!("不认识的鼠标键：{other}")),
+        other => return Err(format!("Unknown mouse button: {other}")),
     })
 }
 
-/// 解析 "ctrl+shift" 这样的按键组合
+/// Parse a key combination such as "ctrl+shift"
 fn parse_keys(combo: &str) -> Result<Vec<(VIRTUAL_KEY, bool)>, String> {
     if combo.trim().is_empty() {
         return Ok(vec![]);
     }
-    combo.split('+').map(|k| vk_of(k).ok_or_else(|| format!("不认识的按键：{k}"))).collect()
+    combo.split('+').map(|k| vk_of(k).ok_or_else(|| format!("Unknown key: {k}"))).collect()
 }
 
 fn ext(e: bool) -> KEYBD_EVENT_FLAGS {
@@ -67,7 +67,7 @@ fn keys_up(keys: &[(VIRTUAL_KEY, bool)]) -> Vec<INPUT> {
     keys.iter().rev().map(|&(vk, e)| key(vk, 0, ext(e) | KEYEVENTF_KEYUP)).collect()
 }
 
-/// 点击，可以按住修饰键（例如 ctrl 多选、shift 连选）
+/// Click, optionally holding modifier keys (e.g. ctrl to multi-select, shift to range-select)
 pub fn click(x: i32, y: i32, button: &str, count: u32, modifiers: &str) -> Result<(), String> {
     let (down, up) = buttons(button)?;
     let mods = parse_keys(modifiers)?;
@@ -94,7 +94,7 @@ pub fn mouse_move(x: i32, y: i32) -> Result<(), String> {
     move_to(x, y)
 }
 
-/// 只按下或只松开鼠标键，用于需要精细控制的拖动
+/// Press or release a mouse button on its own, for drags that need fine control
 pub fn mouse_button(x: Option<(i32, i32)>, button: &str, press: bool) -> Result<(), String> {
     let (down, up) = buttons(button)?;
     if let Some((x, y)) = x {
@@ -104,7 +104,7 @@ pub fn mouse_button(x: Option<(i32, i32)>, button: &str, press: bool) -> Result<
     send(&[mouse(if press { down } else { up }, 0)])
 }
 
-/// amount > 0 向下（横向时向右）滚，< 0 向上（向左）滚，单位是"格"
+/// amount > 0 scrolls down (right when horizontal), < 0 up (left), in wheel notches
 pub fn scroll(x: i32, y: i32, amount: i32, horizontal: bool) -> Result<(), String> {
     move_to(x, y)?;
     std::thread::sleep(Duration::from_millis(40));
@@ -127,7 +127,7 @@ pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), String> {
     send(&[mouse(MOUSEEVENTF_LEFTUP, 0)])
 }
 
-/// 输入任意文字（包括中文），不依赖输入法
+/// Type any text (including CJK) without depending on the input method
 pub fn type_text(text: &str) -> Result<(), String> {
     for ch in text.chars() {
         if ch == '\n' {
@@ -148,7 +148,7 @@ pub fn type_text(text: &str) -> Result<(), String> {
 
 fn vk_of(name: &str) -> Option<(VIRTUAL_KEY, bool)> {
     let n = name.trim().to_lowercase();
-    // (虚拟键, 是否扩展键)
+    // (virtual key, is extended key)
     let k = match n.as_str() {
         "ctrl" | "control" => (VK_CONTROL, false),
         "shift" => (VK_SHIFT, false),
@@ -184,7 +184,7 @@ fn vk_of(name: &str) -> Option<(VIRTUAL_KEY, bool)> {
             if b.len() == 1 && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit()) {
                 return Some((VIRTUAL_KEY(b[0].to_ascii_uppercase() as u16), false));
             }
-            // 其他单个符号（, . / ; ' [ ] - = ` \）按当前键盘布局找对应的键
+            // Other single symbols (, . / ; ' [ ] - = ` \) are looked up in the current keyboard layout
             if b.len() == 1 && b[0].is_ascii_punctuation() {
                 let r = unsafe { VkKeyScanW(b[0] as u16) };
                 if r != -1 && (r as u16 >> 8) & 0xff == 0 {
@@ -200,22 +200,22 @@ fn vk_of(name: &str) -> Option<(VIRTUAL_KEY, bool)> {
     Some(k)
 }
 
-/// 按组合键，例如 "ctrl+c"、"win+r"、"alt+f4"、"enter"
+/// Press a key combination, e.g. "ctrl+c", "win+r", "alt+f4", "enter"
 pub fn press_keys(combo: &str) -> Result<(), String> {
     let keys = parse_keys(combo)?;
     if keys.is_empty() {
-        return Err("没有指定按键".into());
+        return Err("No keys given".into());
     }
     let mut inputs = keys_down(&keys);
     inputs.extend(keys_up(&keys));
     send(&inputs)
 }
 
-/// 按住组合键一段时间再松开
+/// Hold a key combination for a while, then release it
 pub fn hold_keys(combo: &str, ms: u64) -> Result<(), String> {
     let keys = parse_keys(combo)?;
     if keys.is_empty() {
-        return Err("没有指定按键".into());
+        return Err("No keys given".into());
     }
     send(&keys_down(&keys))?;
     std::thread::sleep(Duration::from_millis(ms));

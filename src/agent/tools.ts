@@ -1,4 +1,4 @@
-// 被控端能执行的工具。每个工具返回文本或图片。
+// Tools the agent can run. Each returns text or an image.
 import { runPowerShell } from "./powershell.ts";
 import type { ToolCall, ToolResult } from "../shared/protocol.ts";
 
@@ -7,17 +7,17 @@ type Output = Omit<ToolResult, "type" | "id">;
 const MAX_TEXT = 60_000;
 
 function textOut(s: string): Output {
-  if (s.length > MAX_TEXT) s = s.slice(0, MAX_TEXT) + `\n…（已截断，共 ${s.length} 字符）`;
+  if (s.length > MAX_TEXT) s = s.slice(0, MAX_TEXT) + `\n… (truncated, ${s.length} characters total)`;
   return { ok: true, text: s };
 }
 
 async function psText(script: string, timeoutMs?: number): Promise<Output> {
   const r = await runPowerShell(script, timeoutMs);
-  if (r.timedOut) return { ok: false, error: `超时（${timeoutMs ?? 30000}ms）\n${r.stdout}` };
+  if (r.timedOut) return { ok: false, error: `Timed out (${timeoutMs ?? 30000} ms)\n${r.stdout}` };
   const parts = [r.stdout.trim()];
   if (r.stderr.trim()) parts.push(`[stderr]\n${r.stderr.trim()}`);
   if (r.exitCode !== 0) parts.push(`[exit code ${r.exitCode}]`);
-  return textOut(parts.filter(Boolean).join("\n\n") || "(无输出)");
+  return textOut(parts.filter(Boolean).join("\n\n") || "(no output)");
 }
 
 const SCREENSHOT_PS = (maxWidth: number) => `
@@ -88,7 +88,7 @@ export async function runTool(call: ToolCall): Promise<Output> {
     case "screenshot": {
       const r = await runPowerShell(SCREENSHOT_PS(clampInt(a.maxWidth, 1600, 320, 3840)), 20_000);
       const data = r.stdout.trim();
-      if (!data || r.exitCode !== 0) return { ok: false, error: `截图失败：${r.stderr || "无输出"}` };
+      if (!data || r.exitCode !== 0) return { ok: false, error: `Screenshot failed: ${r.stderr || "no output"}` };
       return { ok: true, image: { data, mimeType: "image/jpeg" } };
     }
     case "system_info":
@@ -101,10 +101,10 @@ export async function runTool(call: ToolCall): Promise<Output> {
     }
     case "run_powershell": {
       const script = String(a.script ?? "");
-      if (!script.trim()) return { ok: false, error: "script 为空" };
+      if (!script.trim()) return { ok: false, error: "script is empty" };
       return psText(script, clampInt(a.timeoutSec, 60, 1, 600) * 1000);
     }
     default:
-      return { ok: false, error: `未知工具：${String(call.tool)}` };
+      return { ok: false, error: `Unknown tool: ${String(call.tool)}` };
   }
 }

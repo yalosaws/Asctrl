@@ -1,7 +1,7 @@
-// 工作面板：AI 跑命令、读写文件时从小精灵身体里展开的一块面板。
-// 终端和文件卡片共用同一个外壳，连续操作时外壳不动，只有里面的内容交替，
-// 所以相邻两个动作之间不会出现"一个消失、另一个再出现"的断档。
-// 所有文字都用 textContent 写入，不拼 HTML（命令输出、文件内容都可能带尖括号）。
+// Work panel: unfolds from the orb when the AI runs commands or reads/writes files.
+// The terminal and file cards share one shell. Across consecutive actions the shell stays put and only
+// its content swaps, so there is never a "one closes, another opens" gap between them.
+// All text goes in via textContent, never as HTML (command output and file contents may contain angle brackets).
 
 import { dock, home, primary, snap, type Pt, type R } from "./geo";
 import { orb } from "./orb";
@@ -22,12 +22,11 @@ let active: View | null = null;
 let closeTimer: number | undefined;
 let holds = 0;
 
-// ---- 图标（固定的内置字符串，不含任何外部内容） ----
+// ---- Icons (fixed built-in strings, no external content) ----
 
 const svg = (d: string) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
 const DOC = '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>';
 const ICON: Record<string, string> = {
-  term: svg('<path d="m5 8 4 4-4 4"/><path d="M12 16h7"/>'),
   read: svg(`${DOC}<path d="M9 13h6M9 17h4"/>`),
   write: svg('<path d="M12 20h8"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>'),
   edit: svg('<path d="M12 20h8"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>'),
@@ -47,7 +46,7 @@ function glyph(parent: HTMLElement, kind: string) {
   return g;
 }
 
-// ---- 外壳 ----
+// ---- Shell ----
 
 function place(): Pt {
   const d = dock();
@@ -57,7 +56,7 @@ function place(): Pt {
   return { x, y };
 }
 
-/** 面板缩放的原点：小精灵的家（相对面板左上角） */
+/** Panel scale origin: the orb's home (relative to the panel's top-left) */
 function origin(p: Pt) {
   const h = home();
   return `${h.x - p.x}px ${h.y - p.y}px`;
@@ -71,10 +70,8 @@ function open() {
   root = el("div", "deck", layer);
   Object.assign(root.style, { left: `${p.x}px`, top: `${p.y}px`, width: `${W}px`, height: `${H}px`, transformOrigin: origin(p) });
 
+  // The terminal has no title bar or icon; the first line is the command
   const term = el("div", "deck-view term", root);
-  const head = el("div", "deck-head", term);
-  glyph(head, "term");
-  el("span", "deck-title", head, "PowerShell");
   termBody = el("div", "term-body", term);
   const file = el("div", "deck-view file", root);
   views = { term, file };
@@ -110,31 +107,32 @@ function scheduleClose(ms: number) {
   }, ms);
 }
 
-/** 面板当前占的区域 */
+/** Area the panel currently covers */
 export function deckRect(): R | null {
   if (!root) return null;
   const p = place();
   return { x: p.x, y: p.y, w: W, h: H };
 }
 
-// ---- 终端 ----
+// ---- Terminal ----
 
 let queue: Promise<void> = Promise.resolve();
 const pending = new Map<string, HTMLElement>();
 
 function line(cls = "") {
   const l = el("div", `term-line ${cls}`, termBody!);
-  play(l, [{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 200 });
+  play(l, [{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], { duration: 140 });
   termBody!.scrollTop = termBody!.scrollHeight;
   return l;
 }
 
 async function typeInto(target: HTMLElement, text: string) {
   const chars = [...text];
-  const total = Math.min(1400, Math.max(240, chars.length * 26));
+  // About 6 ms per character; even long commands finish within 0.45 s
+  const total = Math.min(450, Math.max(80, chars.length * 6));
   const per = total / Math.max(1, chars.length);
   const caret = el("span", "caret", target);
-  // 每次至少等一帧，太快的话一次多打几个字
+  // Wait at least one frame per step; if that is too slow, type several characters at once
   const chunk = Math.max(1, Math.ceil(16 / per));
   for (let i = 0; i < chars.length; i += chunk) {
     caret.before(chars.slice(i, i + chunk).join(""));
@@ -144,7 +142,7 @@ async function typeInto(target: HTMLElement, text: string) {
   caret.remove();
 }
 
-/** 开始一条命令：打出命令，显示等待中的光标 */
+/** Start a command: type it out, then show a waiting indicator */
 export function termStart(id: string, command: string) {
   holds++;
   queue = queue.then(async () => {
@@ -160,7 +158,7 @@ export function termStart(id: string, command: string) {
   });
 }
 
-/** 命令结束：把输出流出来 */
+/** Command finished: stream the output in */
 export function termEnd(id: string, ok: boolean, text: string) {
   queue = queue.then(async () => {
     const spin = pending.get(id);
@@ -170,20 +168,21 @@ export function termEnd(id: string, ok: boolean, text: string) {
     const all = text.replace(/\r/g, "").replace(/\n+$/, "").split("\n");
     const MAX = 80;
     const shown = all.length > MAX ? all.slice(0, MAX - 1) : all;
-    const per = Math.max(4, Math.min(28, 700 / Math.max(1, shown.length)));
+    const per = Math.max(2, Math.min(14, 350 / Math.max(1, shown.length)));
     for (const s of shown) {
       line(ok ? "out" : "err").textContent = s || " ";
       await sleep(per);
     }
     if (all.length > MAX) line("more").textContent = `… ${all.length - MAX + 1}`;
-    mark(line("status"), ok);
+    // Success prints nothing extra; only failures get a cross
+    if (!ok) mark(line("status"), false);
     if (pending.size === 0) orb.setBusy(false);
     holds = Math.max(0, holds - 1);
     scheduleClose(4200);
   });
 }
 
-// ---- 文件卡片 ----
+// ---- File cards ----
 
 export interface Card {
   root: HTMLDivElement;
@@ -193,7 +192,7 @@ export interface Card {
 
 let current: Card | null = null;
 
-/** 画一个对勾或叉，笔画是描出来的 */
+/** Draw a check or a cross, stroke by stroke */
 function mark(parent: HTMLElement, ok: boolean) {
   const m = el("span", `mark ${ok ? "ok" : "bad"}`, parent);
   m.innerHTML = ok ? MARK_OK : MARK_BAD;
@@ -202,7 +201,7 @@ function mark(parent: HTMLElement, ok: boolean) {
   return m;
 }
 
-/** 换上一张新卡片；上一张向上滑走 */
+/** Swap in a new card; the previous one slides up and away */
 export function openCard(kind: string, title: string, sub = ""): Card {
   holds++;
   show("file");
@@ -221,7 +220,7 @@ export function openCard(kind: string, title: string, sub = ""): Card {
   return current;
 }
 
-/** 卡片上的操作结束 */
+/** The card's operation finished */
 export function closeCard(c: Card, ok: boolean, text = "", linger = 1600) {
   holds = Math.max(0, holds - 1);
   if (!c.root.isConnected) return;
@@ -238,7 +237,7 @@ export function closeCard(c: Card, ok: boolean, text = "", linger = 1600) {
   scheduleClose(ok ? linger : linger + 900);
 }
 
-/** 内容还没来时的占位条 */
+/** Placeholder bars until content arrives */
 export function skeleton(c: Card, n = 6) {
   for (let i = 0; i < n; i++) {
     const s = el("div", "sk", c.body);
@@ -248,7 +247,7 @@ export function skeleton(c: Card, n = 6) {
   }
 }
 
-/** 一条渐变光从上扫到下（搜索、读取） */
+/** A gradient light sweeps top to bottom (search, read) */
 export function scan(c: Card, loop = false) {
   const s = el("i", loop ? "card-scan loop" : "card-scan", c.root);
   const a = play(s, [{ transform: "translateY(0)", opacity: 0 }, { opacity: 1, offset: 0.15 }, { opacity: 1, offset: 0.85 }, { transform: `translateY(${H - 60}px)`, opacity: 0 }], {
@@ -259,7 +258,7 @@ export function scan(c: Card, loop = false) {
   if (!loop) void done(a).then(() => s.remove());
 }
 
-/** 进度条；返回一个把它推到头的函数 */
+/** Progress bar; returns a function that pushes it to the end */
 export function progress(c: Card, toward: number, ms: number) {
   const bar = el("i", "", el("div", "prog", c.body));
   const a = play(bar, [{ transform: "scaleX(0)" }, { transform: `scaleX(${toward})` }], { duration: ms, easing: EASE.soft });
@@ -270,7 +269,7 @@ export function progress(c: Card, toward: number, ms: number) {
   };
 }
 
-/** 把若干行文字依次推进卡片；highlight 命中的片段会被标出来 */
+/** Push lines into the card one by one; `highlight` matches are marked */
 export async function fillLines(c: Card, lines: string[], cls = "", highlight?: RegExp) {
   c.body.replaceChildren();
   const max = 11;
@@ -292,7 +291,7 @@ export async function fillLines(c: Card, lines: string[], cls = "", highlight?: 
   await sleep(Math.min(lines.length, max) * 38 + 260);
 }
 
-/** 目录里的一项：文件夹和文件用不同的小图形区分 */
+/** Directory entries: folders and files get different glyphs */
 export async function fillEntries(c: Card, entries: { name: string; dir: boolean }[]) {
   c.body.replaceChildren();
   const max = 11;

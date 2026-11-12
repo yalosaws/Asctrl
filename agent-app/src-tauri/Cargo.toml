@@ -1,12 +1,12 @@
 [package]
 name = "asctrl-agent"
 version = "0.1.0"
-description = "Asctrl 远程协助被控端"
+description = "Asctrl remote assist agent"
 authors = ["Asctrl"]
 edition = "2024"
 
 [lib]
-# 加 _lib 后缀是为了避免 Windows 上 lib 和 bin 同名冲突
+# The _lib suffix avoids a lib/bin name clash on Windows
 name = "asctrl_agent_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
@@ -33,6 +33,7 @@ windows = { version = "0.62", features = [
   "Win32_System_Registry",
   "Win32_System_Threading",
   "Win32_System_Time",
+  "Win32_UI_Accessibility",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Shell",

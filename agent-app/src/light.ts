@@ -1,5 +1,5 @@
-// 光效图元：绽放、涟漪、光迹、扫光、描边框。全部是普通 DOM 元素，只动 transform 和 opacity，
-// 播完自己移除。没有全屏画布。
+// Light primitives: bloom, ripple, dart, sweep, outline. All plain DOM elements that only animate
+// transform and opacity and remove themselves when done. No fullscreen canvas.
 
 import { center, grow, snapRect, type Pt, type R } from "./geo";
 import { clamp, done, EASE, el, fadeOut, play, playOut, SPRING } from "./motion";
@@ -22,14 +22,14 @@ function setRect(b: HTMLElement, r: R) {
   b.style.height = `${r.h}px`;
 }
 
-/** 一团柔光从中心绽开 */
+/** A soft glow blooms from the centre */
 export function bloom(p: Pt, o: { size?: number; ms?: number; tone?: Tone; delay?: number } = {}) {
   const b = at("bloom", p, o.tone);
   b.style.setProperty("--s", `${o.size ?? 150}px`);
   void playOut(b, [{ transform: "scale(.12)", opacity: 1 }, { transform: "scale(1)", opacity: 0 }], { duration: o.ms ?? 680, delay: o.delay ?? 0 });
 }
 
-/** 一圈细线向外扩散（from > to 时向内收） */
+/** A thin ring spreads outward (contracts when from > to) */
 export function ripple(p: Pt, o: { size?: number; ms?: number; from?: number; to?: number; delay?: number; tone?: Tone } = {}) {
   const r = at("ripple", p, o.tone);
   r.style.setProperty("--s", `${o.size ?? 40}px`);
@@ -41,7 +41,7 @@ export function ripple(p: Pt, o: { size?: number; ms?: number; from?: number; to
   });
 }
 
-/** 一道光从 a 射到 b，到达时 resolve */
+/** A beam shoots from a to b; resolves on arrival */
 export function dart(a: Pt, b: Pt, o: { tone?: Tone } = {}): Promise<void> {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
@@ -56,12 +56,12 @@ export function dart(a: Pt, b: Pt, o: { tone?: Tone } = {}): Promise<void> {
     easing: "cubic-bezier(.5,0,.15,1)",
   });
   return done(arrive).then(() => {
-    // 尾巴收进落点
+    // The tail retracts into the landing point
     void playOut(d, [{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: "linear" });
   });
 }
 
-/** 一条斜向的渐变光带扫过区域；返回停止函数 */
+/** A diagonal gradient band sweeps across the area; returns a stop function */
 export function sweep(r: R, o: { ms?: number; loop?: boolean } = {}) {
   const box = el("div", "sweep", layer);
   setRect(box, snapRect(r));
@@ -76,7 +76,7 @@ export function sweep(r: R, o: { ms?: number; loop?: boolean } = {}) {
   return () => void fadeOut(box, 220);
 }
 
-/** 一张"底片"从区域缩进目标点（截图被小精灵收走） */
+/** A "snapshot" shrinks from the area into a target point (the orb takes the screenshot) */
 export function capture(r: R, to: () => Pt, o: { ms?: number } = {}): Promise<void> {
   const s = snapRect(r);
   const sheet = el("div", "photo", layer);
@@ -99,14 +99,14 @@ export function capture(r: R, to: () => Pt, o: { ms?: number } = {}): Promise<vo
   );
 }
 
-/** 按住不放的标记 */
+/** Press-and-hold marker */
 export function hold(p: Pt, tone: Tone = "aurora") {
   const h = at("hold", p, tone);
   play(h, [{ transform: "scale(2)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }], { spring: SPRING.pop });
   return h;
 }
 
-/** 朝某个方向流过去的几道短光（滚动） */
+/** A few short streaks flowing in one direction (scroll) */
 export function streaks(p: Pt, dir: "up" | "down" | "left" | "right") {
   const ang = { right: 0, down: 90, left: 180, up: 270 }[dir];
   const g = at("streaks", p);
@@ -124,7 +124,7 @@ export function streaks(p: Pt, dir: "up" | "down" | "left" | "right") {
   setTimeout(() => g.remove(), 1500);
 }
 
-/** 从 a 画到 b 的一条细光线（拖动的轨迹）；返回元素，由调用方淡出 */
+/** A thin line of light drawn from a to b (drag path); returns the element for the caller to fade out */
 export function strand(a: Pt, b: Pt, ms: number) {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
@@ -135,7 +135,7 @@ export function strand(a: Pt, b: Pt, ms: number) {
   return s;
 }
 
-// ---- 描边框 ----
+// ---- Outline ----
 
 const RADIUS = 10;
 
@@ -144,8 +144,8 @@ function roundRect(w: number, h: number, r: number) {
 }
 
 /**
- * 沿着一个矩形的渐变描边（窗口、放大区域）。位置和尺寸只在创建和落定时写一次，
- * 中间的移动、缩放全是 transform。
+ * A gradient outline around a rectangle (window, zoom area). Position and size are written only on
+ * creation and when it settles; all movement and scaling in between is transform.
  */
 export class Outline {
   readonly el: HTMLDivElement;
@@ -169,7 +169,7 @@ export class Outline {
     return this;
   }
 
-  /** 两颗光点各跑半圈，像是把框描出来 */
+  /** Two sparks each run half the perimeter, as if tracing the outline */
   trace(ms = 720) {
     const path = roundRect(this.r.w, this.r.h, RADIUS);
     for (const [from, to] of [
@@ -183,14 +183,14 @@ export class Outline {
     return this;
   }
 
-  /** 光晕亮一下（落定、锁定） */
+  /** Glow flashes (settled / locked on) */
   flash() {
     const g = this.el.querySelector(".ol-glow")!;
     play(g, [{ opacity: 1, transform: "scale(1.012)" }, { opacity: 0.6, transform: "scale(1)" }], { duration: 700, fill: "none" });
     return this;
   }
 
-  /** 整个框移动并变形到新的矩形 */
+  /** Move and morph the whole outline to a new rectangle */
   async moveTo(r: R, ms = 480) {
     const to = snapRect(grow(r, 3));
     const a = this.r;
@@ -211,7 +211,7 @@ export class Outline {
     return this;
   }
 
-  /** fade 淡出；burst 向外散开；sink 向内收拢 */
+  /** fade: fade out; burst: scatter outward; sink: collapse inward */
   out(how: "fade" | "burst" | "sink" = "fade", ms = 380, delay = 0) {
     this.el.style.transformOrigin = "50% 50%";
     const k = this.popScale() - 1;

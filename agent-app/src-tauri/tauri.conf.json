@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "远程协助",
+        "title": "Remote Assist",
         "width": 800,
         "height": 600,
         "transparent": true,
@@ -25,7 +25,8 @@
         "visible": false,
         "focus": false,
         "maximizable": false,
-        "minimizable": false
+        "minimizable": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling"
       }
     ],
     "security": {

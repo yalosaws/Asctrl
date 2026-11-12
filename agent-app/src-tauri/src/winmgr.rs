@@ -1,4 +1,4 @@
-//! 窗口列表、切换窗口、打开程序。坐标是屏幕物理像素。
+//! Window listing, window switching, launching programs. Coordinates are physical screen pixels.
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
@@ -45,7 +45,7 @@ unsafe extern "system" fn enum_cb(h: HWND, lp: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-/// 用户能看到的顶层窗口（任务栏上那些），按 Z 顺序从前到后
+/// Top-level windows the user can see (the ones on the taskbar), in Z order from front to back
 pub fn list() -> Vec<Win> {
     let mut hs: Vec<HWND> = vec![];
     unsafe {
@@ -74,7 +74,7 @@ pub fn list() -> Vec<Win> {
             let title = String::from_utf16_lossy(&buf[..n as usize]);
             let mut pid = 0u32;
             GetWindowThreadProcessId(h, Some(&mut pid));
-            // 跳过自己的悬浮层，AI 不该看到也不该操作它
+            // Skip our own overlay; the AI should neither see nor operate it
             if pid == std::process::id() {
                 continue;
             }
@@ -94,20 +94,20 @@ pub fn list() -> Vec<Win> {
     out
 }
 
-/// 按句柄或标题/进程名关键字找窗口
+/// Find a window by handle or by a title / process-name keyword
 pub fn find(handle: Option<isize>, query: &str) -> Result<HWND, String> {
     let wins = list();
     if let Some(h) = handle {
-        return wins.iter().find(|w| w.handle == h).map(|w| HWND(w.handle as *mut _)).ok_or(format!("找不到句柄为 {h} 的窗口"));
+        return wins.iter().find(|w| w.handle == h).map(|w| HWND(w.handle as *mut _)).ok_or(format!("No window with handle {h}"));
     }
     let q = query.trim().to_lowercase();
     if q.is_empty() {
-        return Err("需要 handle 或 title".into());
+        return Err("handle or title is required".into());
     }
     let hits: Vec<&Win> =
         wins.iter().filter(|w| w.title.to_lowercase().contains(&q) || w.process.to_lowercase().contains(&q)).collect();
     match hits.len() {
-        0 => Err(format!("没有标题或程序名包含「{query}」的窗口，可以先 list_windows 看看")),
+        0 => Err(format!("No window whose title or program name contains \"{query}\"; try list_windows first")),
         _ => Ok(HWND(hits[0].handle as *mut _)),
     }
 }
@@ -119,7 +119,7 @@ pub fn act(h: HWND, action: &str) -> Result<String, String> {
                 if IsIconic(h).as_bool() {
                     let _ = ShowWindow(h, SW_RESTORE);
                 }
-                // 后台程序不能直接抢焦点：先模拟一次 Alt，系统才允许 SetForegroundWindow
+                // A background process can't just take focus: simulate an Alt press first so Windows allows SetForegroundWindow
                 let alt = |flags| INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_MENU, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
@@ -127,7 +127,7 @@ pub fn act(h: HWND, action: &str) -> Result<String, String> {
                 SendInput(&[alt(KEYBD_EVENT_FLAGS(0)), alt(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32);
                 let _ = BringWindowToTop(h);
                 if !SetForegroundWindow(h).as_bool() {
-                    return Err("系统拒绝切换窗口（目标可能是管理员权限的窗口）".into());
+                    return Err("Windows refused to switch windows (the target may be running as administrator)".into());
                 }
             }
             "minimize" => {
@@ -143,20 +143,20 @@ pub fn act(h: HWND, action: &str) -> Result<String, String> {
             "close" => {
                 PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0)).map_err(|e| e.to_string())?;
             }
-            other => return Err(format!("不支持的操作：{other}")),
+            other => return Err(format!("Unsupported action: {other}")),
         }
     }
     Ok(match action {
-        "minimize" => "已最小化",
-        "maximize" => "已最大化",
-        "restore" => "已还原",
-        "close" => "已发送关闭请求（程序可能会弹出保存提示）",
-        _ => "已切换到该窗口",
+        "minimize" => "Minimized",
+        "maximize" => "Maximized",
+        "restore" => "Restored",
+        "close" => "Close requested (the program may ask to save)",
+        _ => "Switched to the window",
     }
     .into())
 }
 
-/// 用资源管理器的方式打开：程序名、完整路径、文件、网址、ms-settings: 等都可以
+/// Open the way Explorer does: program names, full paths, files, URLs, ms-settings: links, etc.
 pub fn open(target: &str, args: &str, cwd: &str) -> Result<(), String> {
     let t = HSTRING::from(target);
     let a = HSTRING::from(args);
@@ -173,13 +173,13 @@ pub fn open(target: &str, args: &str, cwd: &str) -> Result<(), String> {
     };
     match r.0 as isize {
         n if n > 32 => Ok(()),
-        2 | 3 => Err(format!("找不到「{target}」")),
-        5 => Err("拒绝访问".into()),
-        n => Err(format!("打开失败（错误码 {n}）")),
+        2 | 3 => Err(format!("Can't find \"{target}\"")),
+        5 => Err("Access denied".into()),
+        n => Err(format!("Failed to open (error code {n})")),
     }
 }
 
-/// 窗口当前位置（屏幕物理像素）；最小化或已关闭时返回 None
+/// Current window position (physical screen pixels); None when minimized or closed
 pub fn rect_of(handle: isize) -> Option<(i32, i32, i32, i32)> {
     let h = HWND(handle as *mut _);
     unsafe {
@@ -191,8 +191,8 @@ pub fn rect_of(handle: isize) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
-/// 窗口看得见的那部分的边界。GetWindowRect 在 Win10/11 上还包含四周一圈看不见的缩放边框
-/// （左右下各约 7 像素），照着它画框会比窗口大一圈；DWM 给的才是实际显示的范围。
+/// Bounds of the visible part of the window. On Windows 10/11 GetWindowRect also includes an invisible
+/// resize border (about 7px left, right and bottom), so an outline drawn from it is too big; DWM gives the real visible bounds.
 unsafe fn visible_rect(h: HWND) -> Option<RECT> {
     let mut r = RECT::default();
     let size = std::mem::size_of::<RECT>() as u32;

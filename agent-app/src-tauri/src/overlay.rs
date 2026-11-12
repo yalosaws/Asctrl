@@ -1,5 +1,6 @@
-//! 全屏透明悬浮层：盖住所有显示器、鼠标默认穿透、不抢焦点、不进截图。
-//! 只有光标落在界面登记的"可交互区域"（小精灵、确认卡片）上时才接收鼠标。
+//! Fullscreen transparent overlay: covers every monitor, lets the mouse through by default, never takes
+//! focus, and is excluded from screenshots. It only catches the mouse over the "interactive regions" the
+//! UI registers (the orb, the consent card).
 
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -16,9 +17,9 @@ pub struct Rect {
 
 #[derive(Serialize, Clone)]
 pub struct MonitorInfo {
-    /// 整个显示器（物理像素，屏幕坐标）
+    /// The whole monitor (physical pixels, screen coordinates)
     pub bounds: Rect,
-    /// 去掉任务栏后的区域
+    /// The area minus the taskbar
     pub work: Rect,
     pub primary: bool,
 }
@@ -26,10 +27,10 @@ pub struct MonitorInfo {
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Info {
-    /// 悬浮层左上角的屏幕坐标（物理像素）
+    /// Screen coordinates of the overlay's top-left (physical pixels)
     pub origin_x: i32,
     pub origin_y: i32,
-    /// 物理像素 / CSS 像素
+    /// Physical pixels / CSS pixels
     pub scale: f64,
     pub monitors: Vec<MonitorInfo>,
 }
@@ -45,9 +46,9 @@ pub struct HitRect {
 #[derive(Default)]
 pub struct Overlay {
     info: Mutex<Info>,
-    /// 可交互区域（物理像素，屏幕坐标）
+    /// Interactive regions (physical pixels, screen coordinates)
     regions: Mutex<Vec<Rect>>,
-    /// AI 正在操作鼠标时暂停交互，免得点到小精灵身上
+    /// Interaction is paused while the AI drives the mouse, so it doesn't click the orb
     suppress_until: Mutex<Option<Instant>>,
 }
 
@@ -61,7 +62,7 @@ impl Overlay {
     }
 }
 
-/// 把窗口铺满所有显示器，返回界面需要的坐标信息
+/// Stretch the window over every monitor and return the geometry the UI needs
 fn layout(win: &WebviewWindow) -> Info {
     let mons = win.available_monitors().unwrap_or_default();
     let primary = win.primary_monitor().ok().flatten();
@@ -85,10 +86,61 @@ fn layout(win: &WebviewWindow) -> Info {
         (l, t, r, b) = (0, 0, 1920, 1080);
     }
     let _ = win.set_position(PhysicalPosition::new(l, t));
-    // 比屏幕矮 1 像素：正好盖满时 Windows 会当成"全屏程序"，把通知静音
+    // 1px shorter than the screen: an exact fit makes Windows treat it as a "fullscreen app" and mute notifications
     let _ = win.set_size(PhysicalSize::new((r - l) as u32, (b - t - 1).max(1) as u32));
     Info { origin_x: l, origin_y: t, scale: win.scale_factor().unwrap_or(1.0), monitors }
 }
+
+/// Overlay window handle, for the foreground hook and the topmost poll
+#[cfg(windows)]
+static HWND_RAW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Push the overlay straight to the top of the topmost band.
+/// Not via set_always_on_top: once the window already has the topmost flag it no longer calls SetWindowPos,
+/// so after another topmost window (or a program just clicked to the front) covers it, it never comes back.
+#[cfg(windows)]
+fn raise() {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    let raw = HWND_RAW.load(std::sync::atomic::Ordering::Relaxed);
+    if raw == 0 {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            HWND(raw as *mut _),
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn raise() {}
+
+/// Re-raise immediately whenever the foreground window changes (the user clicks another app, the Start menu opens, etc.).
+/// The hook callback runs on the installing thread, so it must be installed on the main thread, which has a message loop.
+#[cfg(windows)]
+fn watch_foreground() {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+    use windows::Win32::UI::WindowsAndMessaging::{EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS};
+    unsafe extern "system" fn on_event(_: HWINEVENTHOOK, _: u32, _: HWND, _: i32, _: i32, _: u32, _: u32) {
+        raise();
+    }
+    unsafe {
+        // Foreground changes and windows restored from minimized both bring other windows forward
+        SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_event), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        SetWinEventHook(EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZEEND, None, Some(on_event), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn watch_foreground() {}
 
 #[cfg(windows)]
 fn harden(win: &WebviewWindow) {
@@ -96,11 +148,12 @@ fn harden(win: &WebviewWindow) {
     use windows::Win32::UI::WindowsAndMessaging::*;
     let Ok(h) = win.hwnd() else { return };
     let h = HWND(h.0);
+    HWND_RAW.store(h.0 as isize, std::sync::atomic::Ordering::Relaxed);
     unsafe {
-        // 不在任务栏/Alt+Tab 出现（也让 list_windows 自动忽略它），点击时不抢焦点
+        // Hidden from the taskbar and Alt+Tab (so list_windows skips it too), and never takes focus on click
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         SetWindowLongPtrW(h, GWL_EXSTYLE, ex | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize);
-        // 截图时看不到这一层，AI 看到的永远是真实桌面（Win10 2004 起支持）
+        // Invisible to screen capture, so the AI always sees the real desktop (Windows 10 2004+)
         let _ = SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE);
     }
 }
@@ -125,9 +178,11 @@ pub fn setup(app: &AppHandle) {
     let _ = win.set_ignore_cursor_events(true);
     let _ = win.set_always_on_top(true);
     let _ = win.show();
+    raise();
+    watch_foreground();
     *app.state::<Overlay>().info.lock().unwrap() = info;
 
-    // 光标进出可交互区域时切换"鼠标穿透"
+    // Toggle mouse pass-through as the cursor enters or leaves an interactive region
     let app = app.clone();
     std::thread::spawn(move || {
         let mut passing = true;
@@ -147,11 +202,9 @@ pub fn setup(app: &AppHandle) {
                     let _ = w.set_ignore_cursor_events(passing);
                 }
             }
-            // 别的置顶窗口可能盖过来，每隔几秒重新置顶一次
-            if tick % 100 == 0 {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.set_always_on_top(true);
-                }
+            // Fallback: another topmost window may cover it without a foreground change, so re-raise every 0.3 s
+            if tick % 10 == 0 {
+                raise();
             }
         }
     });
@@ -159,7 +212,7 @@ pub fn setup(app: &AppHandle) {
 
 #[tauri::command]
 pub fn overlay_info(app: AppHandle) -> Info {
-    // 每次都重新铺一遍，显示器插拔、改分辨率后界面刷新即可恢复
+    // Re-lay out every time, so a UI reload recovers after monitors or resolution change
     let info = match app.get_webview_window("main") {
         Some(w) => layout(&w),
         None => Info::default(),
@@ -168,12 +221,12 @@ pub fn overlay_info(app: AppHandle) -> Info {
     info
 }
 
-/// 界面告诉后台哪些地方可以点（CSS 像素，相对于悬浮层左上角）
+/// The UI tells the backend which areas are clickable (CSS pixels, relative to the overlay's top-left)
 #[tauri::command]
 pub fn set_hit_regions(app: AppHandle, rects: Vec<HitRect>, scale: Option<f64>) {
     let ov = app.state::<Overlay>();
     let info = ov.info.lock().unwrap().clone();
-    // 以界面实际的缩放为准：窗口刚跨屏移动后，后台记的值可能还是旧的
+    // Trust the UI's actual scale: the backend's value may be stale right after the window moves across screens
     let s = scale.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(info.scale);
     *ov.regions.lock().unwrap() = rects
         .iter()

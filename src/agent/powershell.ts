@@ -7,13 +7,13 @@ export interface PsResult {
   timedOut: boolean;
 }
 
-/** 运行一段 PowerShell 脚本，输出统一用 UTF-8（避免中文乱码） */
+/** Run a PowerShell script with UTF-8 output (so non-ASCII text isn't garbled) */
 export function runPowerShell(script: string, timeoutMs = 30_000): Promise<PsResult> {
   const full =
     "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;" +
     "$ProgressPreference='SilentlyContinue';\n" +
     script;
-  // -EncodedCommand 需要 UTF-16LE 的 base64，可以避开所有引号转义问题
+  // -EncodedCommand takes UTF-16LE base64, which sidesteps every quoting problem
   const encoded = Buffer.from(full, "utf16le").toString("base64");
 
   return new Promise((resolve) => {

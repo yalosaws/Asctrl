@@ -1,7 +1,7 @@
 /*
- * 视觉语言只有一种材质：流动的渐变光（蓝 → 紫 → 粉 → 琥珀 → 青）。
- * 性能约定：会动的东西只动 transform / opacity；阴影、渐变、遮罩都画在静止的图层上，
- * 不使用 filter 和 backdrop-filter。
+ * The visual language has a single material: flowing gradient light (blue -> purple -> pink -> amber -> teal).
+ * Performance rule: moving things only animate transform / opacity; shadows, gradients and masks are
+ * painted on static layers. No filter or backdrop-filter.
  */
 :root {
   --g1: #5b8cff;
@@ -41,7 +41,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* 浏览器预览：放一张假桌面，方便看效果 */
+/* Browser preview: a fake desktop to show the effects against */
 body.demo {
   background:
     radial-gradient(1200px 700px at 20% 15%, #2a3550 0%, transparent 60%),
@@ -80,12 +80,13 @@ body.demo .fake-taskbar {
   pointer-events: none;
 }
 
-/* ---------------- 边缘流光 ---------------- */
+/* ---------------- Edge glow ---------------- */
 
 /*
- * 一张锥形渐变贴图在环形遮罩后面旋转，整圈颜色天然连续。
- * 遮罩自下而上合成：先用两层实心块相减得到贴边的实线环，再叠上四条朝内淡出的柔光。
- * 柔光在拐角处是"叠加"而不是"相加"，所以拐角是圆润过渡，不会出现亮块或接缝。
+ * A conic-gradient texture rotates behind a ring mask, so the colour is continuous all the way round.
+ * The mask is composited bottom-up: two solid layers are excluded to get the solid edge line, then four
+ * soft glows fading inward are added on top. At the corners the glows overlap rather than sum, so the
+ * corners blend smoothly with no bright spots or seams.
  */
 .edge {
   position: absolute;
@@ -120,7 +121,7 @@ body.demo .fake-taskbar {
   will-change: transform;
 }
 
-/* ---------------- 小精灵 ---------------- */
+/* ---------------- Orb ---------------- */
 
 #orb {
   --halo: rgba(150, 125, 255, 0.6);
@@ -212,7 +213,7 @@ body.demo .fake-taskbar {
     opacity: 0.7;
   }
 }
-/* 忙碌时绕着转的两段光弧 */
+/* Two arcs of light that circle the orb while busy */
 .orb-arc {
   position: absolute;
   left: -25px;
@@ -299,7 +300,7 @@ body.demo .fake-taskbar {
   background: var(--amber);
 }
 
-/* ---------------- 面板通用 ---------------- */
+/* ---------------- Panels (shared) ---------------- */
 
 .panel {
   position: fixed;
@@ -314,8 +315,7 @@ body.demo .fake-taskbar {
   will-change: transform, opacity;
 }
 .panel::before,
-.deck::before,
-.typing::before {
+.deck::before {
   content: "";
   position: absolute;
   left: 0;
@@ -364,24 +364,17 @@ body.demo .fake-taskbar {
   background: linear-gradient(100deg, #ff5a6e, #ff7ab6);
 }
 
-/* ---------------- 协助码 ---------------- */
+/* ---------------- Assist code ---------------- */
 
 .code-card {
-  width: 330px;
-  padding: 20px 22px 16px;
+  padding: 18px 20px;
   text-align: center;
-}
-.eyebrow {
-  margin: 0;
-  font-size: 13px;
-  letter-spacing: 0.12em;
-  color: var(--ink-2);
 }
 .code {
   display: flex;
   justify-content: center;
   gap: 6px;
-  margin: 12px 0 10px;
+  margin: 0;
   font-family: var(--mono);
   font-size: 40px;
   font-weight: 700;
@@ -405,18 +398,8 @@ body.demo .fake-taskbar {
     transform: translateY(16px) scale(0.8);
   }
 }
-.hint {
-  margin: 4px 0 0;
-  font-size: 15px;
-  font-weight: 600;
-}
-.assure {
-  margin: 8px 0 0;
-  font-size: 12px;
-  color: var(--ink-3);
-}
 
-/* ---------------- 菜单 ---------------- */
+/* ---------------- Menu ---------------- */
 
 .menu {
   width: 260px;
@@ -435,7 +418,7 @@ body:not([data-state="connected"]) #btn-end {
   display: none;
 }
 
-/* ---------------- 同意 ---------------- */
+/* ---------------- Consent ---------------- */
 
 .ask {
   width: 400px;
@@ -510,7 +493,7 @@ body:not([data-state="connected"]) #btn-end {
   font-size: 16px;
 }
 
-/* ---------------- 光效图元 ---------------- */
+/* ---------------- Light primitives ---------------- */
 
 .t-aurora {
   --b1: rgba(255, 122, 182, 0.78);
@@ -656,7 +639,7 @@ body:not([data-state="connected"]) #btn-end {
   box-shadow: 0 0 10px rgba(179, 107, 255, 0.7);
 }
 
-/* 描边框 */
+/* Outline */
 .ol {
   position: absolute;
   border-radius: 11px;
@@ -721,7 +704,7 @@ body:not([data-state="connected"]) #btn-end {
   background: radial-gradient(circle, #fff 0 25%, rgba(255, 255, 255, 0.5) 45%, transparent 70%);
 }
 
-/* ---------------- 工作面板（终端 + 文件卡片） ---------------- */
+/* ---------------- Work panel (terminal + file cards) ---------------- */
 
 .deck {
   position: absolute;
@@ -957,10 +940,17 @@ body:not([data-state="connected"]) #btn-end {
   background: var(--aurora);
 }
 
+/* Padding scrolls away with the content, which would push text against the panel's top edge.
+   So the clip edge itself is inset with margin, and the top padding area is a fade:
+   unscrolled, the first line sits below the fade and is fully clear; lines scrolling up fade out
+   instead of being cut off. */
 .term-body {
   flex: 1;
+  min-height: 0;
   overflow: hidden;
-  padding: 0 18px 16px;
+  margin: 8px 0 16px;
+  padding: 18px 18px 0;
+  mask-image: linear-gradient(to bottom, transparent, #000 18px);
   font-family: var(--mono);
   font-size: 12.5px;
   line-height: 1.5;
@@ -1018,93 +1008,6 @@ body:not([data-state="connected"]) #btn-end {
     transform: scaleX(0.2);
     opacity: 0.5;
   }
-}
-
-/* ---------------- 打字条和按键 ---------------- */
-
-.typing {
-  position: absolute;
-  display: flex;
-  align-items: center;
-  max-width: 380px;
-  min-height: 42px;
-  padding: 10px 16px 9px;
-  border-radius: 14px;
-  overflow: hidden;
-  background: var(--glass);
-  box-shadow:
-    0 12px 36px rgba(0, 0, 0, 0.45),
-    0 0 0 1px var(--line);
-  font-family: var(--mono);
-  font-size: 15px;
-}
-.typing.ok::before {
-  background: var(--green);
-}
-.typing.bad::before {
-  background: var(--red);
-}
-.typing-text {
-  white-space: pre;
-  overflow: hidden;
-}
-.typing-text .ch {
-  display: inline-block;
-  white-space: pre;
-}
-.keys {
-  position: absolute;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  translate: -50% -50%;
-}
-.combo {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-.plus {
-  color: #fff;
-  font-weight: 700;
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
-}
-.cap {
-  position: relative;
-  isolation: isolate;
-  display: inline-block;
-  min-width: 42px;
-  padding: 8px 12px 9px;
-  border-radius: 10px;
-  overflow: hidden;
-  text-align: center;
-  font-size: 15px;
-  font-weight: 600;
-  color: #fff;
-  background: #1b1d2b;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.16),
-    0 4px 0 #0b0c14,
-    0 10px 20px rgba(0, 0, 0, 0.45);
-  transition: transform 0.09s ease-out;
-}
-/* 按下时亮起的渐变：盖在键帽上的一层，只变透明度 */
-.cap::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background: linear-gradient(120deg, var(--g1), var(--g2), var(--g3));
-  opacity: 0;
-  transition: opacity 0.12s ease-out;
-}
-.cap.down {
-  transform: translateY(3px);
-}
-.cap.down::before {
-  opacity: 1;
 }
 
 @media (prefers-reduced-motion: reduce) {

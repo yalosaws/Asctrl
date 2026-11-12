@@ -1,22 +1,22 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>远程协助</title>
+    <title>Remote Assist</title>
     <link rel="stylesheet" href="/src/styles.css" />
     <script type="module" src="/src/main.ts"></script>
   </head>
 
   <body data-state="connecting">
-    <!-- 边缘流光 -->
+    <!-- Edge glow -->
     <div id="frames" class="layer"></div>
-    <!-- 屏幕上的标记：描边框、瞄准圈、光迹 -->
+    <!-- On-screen marks: outlines, aim rings, light trails -->
     <div id="marks" class="layer"></div>
-    <!-- 工作面板、打字条、按键 -->
+    <!-- Work panel -->
     <div id="cards" class="layer"></div>
 
-    <!-- 小精灵：锚点在球心，位置由脚本写 transform -->
+    <!-- Orb: anchored at its centre, position written to transform by script -->
     <div id="orb">
       <div class="orb-tail"></div>
       <div class="orb-pres">
@@ -31,53 +31,50 @@
             </div>
           </div>
         </div>
-        <button id="orb-hit" aria-label="远程协助"></button>
-        <span class="orb-tag" id="admin-tag" hidden>管理员</span>
+        <button id="orb-hit" aria-label="Remote Assist"></button>
+        <span class="orb-tag" id="admin-tag" hidden>Admin</span>
       </div>
     </div>
 
-    <!-- 协助码 -->
+    <!-- Assist code: digits only -->
     <div class="panel code-card" id="code-card" hidden>
-      <p class="eyebrow">你的协助码</p>
       <div class="code" id="code" aria-live="polite"></div>
-      <p class="hint">把这 6 个数字告诉帮你修电脑的人</p>
-      <p class="assure">对方连接前会先问你是否同意 · 随时可以结束</p>
     </div>
 
-    <!-- 悬停小菜单 -->
+    <!-- Hover menu -->
     <div class="panel menu" id="menu" hidden>
       <div class="menu-actions">
-        <button class="btn danger" id="btn-end">结束协助</button>
-        <button class="btn ghost" id="btn-quit">退出程序</button>
+        <button class="btn danger" id="btn-end">End session</button>
+        <button class="btn ghost" id="btn-quit">Quit</button>
       </div>
     </div>
 
-    <!-- 同意 -->
+    <!-- Consent -->
     <div class="panel ask" id="consent" role="dialog" aria-modal="true" aria-labelledby="consent-title" hidden>
-      <h2 id="consent-title"><b id="consent-name"></b> <span id="consent-ask">想远程协助你的电脑</span></h2>
-      <p class="sheet-sub" id="consent-sub">允许后，对方可以：</p>
+      <h2 id="consent-title"><b id="consent-name"></b> <span id="consent-ask">wants to help with your computer remotely</span></h2>
+      <p class="sheet-sub" id="consent-sub">If you allow it, they can:</p>
       <ul class="perm" id="perm-consent">
-        <li>看到你的屏幕</li>
-        <li>操作鼠标和键盘</li>
-        <li>运行命令、传输文件来修复问题</li>
+        <li>See your screen</li>
+        <li>Use your mouse and keyboard</li>
+        <li>Run commands and transfer files to fix problems</li>
       </ul>
       <ul class="perm" id="perm-admin" hidden>
-        <li>修复系统文件、管理系统服务</li>
-        <li>安装或卸载软件</li>
-        <li>修改系统设置</li>
+        <li>Repair system files and manage services</li>
+        <li>Install or uninstall software</li>
+        <li>Change system settings</li>
       </ul>
       <ul class="perm" id="perm-reboot" hidden>
-        <li>先保存好正在写的文档、关掉要用的网页</li>
-        <li>电脑会在十几秒后重启</li>
-        <li>重启后这个程序会自动打开，协助码不变</li>
+        <li>Save any open documents and close pages you need first</li>
+        <li>The computer will restart in a few seconds</li>
+        <li>This app reopens after the restart with the same code</li>
       </ul>
-      <p class="sheet-note" id="admin-note" hidden>点允许后会弹出 Windows 的确认窗口，请点「是」，程序会自动重新打开</p>
-      <p class="sheet-note" id="reboot-note" hidden>重启后如果要输入开机密码，请照常登录，登录后对方会重新连接</p>
+      <p class="sheet-note" id="admin-note" hidden>After you click Allow, Windows will ask for confirmation. Click "Yes" and the app will reopen by itself.</p>
+      <p class="sheet-note" id="reboot-note" hidden>If Windows asks for your password after the restart, sign in as usual and they will reconnect.</p>
       <div class="timer"><div class="timer-bar" id="timer-bar"></div></div>
-      <p class="timer-text"><span id="timer-sec">120</span> 秒后自动拒绝</p>
+      <p class="timer-text">Declining automatically in <span id="timer-sec">120</span> s</p>
       <div class="actions">
-        <button class="btn ghost" id="btn-deny">拒绝</button>
-        <button class="btn primary" id="btn-allow">允许</button>
+        <button class="btn ghost" id="btn-deny">Deny</button>
+        <button class="btn primary" id="btn-allow">Allow</button>
       </div>
     </div>
   </body>

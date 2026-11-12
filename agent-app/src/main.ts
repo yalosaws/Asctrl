@@ -1,4 +1,4 @@
-// 被控端界面：没有窗口，只有一颗会动的光球。所有界面元素都浮在透明的全屏悬浮层上。
+// Agent UI: no window, just a moving orb of light. Every UI element floats on a transparent fullscreen overlay.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -31,14 +31,14 @@ let lastCode = "";
 let entered = false;
 let consentTimer: number | undefined;
 
-// ---------------- 协助码 ----------------
+// ---------------- Assist code ----------------
 
 function renderCode(code: string) {
   if (code === lastCode) return;
   lastCode = code;
   const box = $("code");
   box.replaceChildren();
-  box.setAttribute("aria-label", `协助码 ${code.split("").join(" ")}`);
+  box.setAttribute("aria-label", `Assist code ${code.split("").join(" ")}`);
   [...code].forEach((d, i) => {
     if (i === 3) box.append(Object.assign(document.createElement("span"), { className: "gap" }));
     const el = document.createElement("span");
@@ -49,10 +49,10 @@ function renderCode(code: string) {
   });
 }
 
-// ---------------- 面板的显示与位置 ----------------
+// ---------------- Panel visibility and position ----------------
 
-// 面板挨着小精灵：位置写在 translate 上，出现/消失的缩放写在 transform 上，两者互不干扰。
-// 尺寸只在显示时量一次，小精灵移动时不再读布局。
+// Panels sit next to the orb: position goes on `translate`, the show/hide scale on `transform`, so they don't interfere.
+// Size is measured once when shown; layout is never read while the orb moves.
 const PANELS: [HTMLElement, "left" | "below"][] = [
   [codeCard, "left"],
   [menu, "left"],
@@ -78,7 +78,7 @@ function placePanel(p: HTMLElement, prefer: "left" | "below") {
   x = snap(Math.min(Math.max(x, work.x + 12), work.x + work.w - w - 12));
   y = snap(Math.min(Math.max(y, work.y + 12), work.y + work.h - h - 12));
   p.style.translate = `${x}px ${y}px`;
-  // 缩放的原点指向小精灵，面板看起来是从它身上展开的
+  // Scale origin points at the orb, so the panel appears to unfold from it
   p.style.transformOrigin = `${o.x - x}px ${o.y - y}px`;
 }
 
@@ -108,7 +108,7 @@ function showPanel(p: HTMLElement, on: boolean, interactive = false) {
   if (interactive) hit(p, on);
 }
 
-// ---------------- 悬停菜单 ----------------
+// ---------------- Hover menu ----------------
 
 let menuTimer: number | undefined;
 function openMenu() {
@@ -131,12 +131,12 @@ const quitBtn = $<HTMLButtonElement>("btn-quit");
 let quitArmed = false;
 function resetQuit() {
   quitArmed = false;
-  quitBtn.textContent = "退出程序";
+  quitBtn.textContent = "Quit";
 }
 quitBtn.addEventListener("click", async () => {
   if (!quitArmed) {
     quitArmed = true;
-    quitBtn.textContent = "再点一次退出";
+    quitBtn.textContent = "Click again to quit";
     return;
   }
   showPanel(menu, false, true);
@@ -153,13 +153,13 @@ $("btn-end").addEventListener("click", () => {
   else render({ state: "ready", code: lastCode });
 });
 
-// ---------------- 同意 ----------------
+// ---------------- Consent ----------------
 
 type Ask = "consent" | "admin" | "reboot";
 const ASK_TEXT: Record<Ask, [string, string]> = {
-  consent: ["想远程协助你的电脑", "允许后，对方可以："],
-  admin: ["需要管理员权限", "允许后，对方还可以："],
-  reboot: ["需要重启你的电脑", "点允许之前请注意："],
+  consent: ["wants to help with your computer remotely", "If you allow it, they can:"],
+  admin: ["needs administrator access", "If you allow it, they can also:"],
+  reboot: ["needs to restart your computer", "Before you click Allow:"],
 };
 
 function showConsent(name: string, timeoutSec: number, kind: Ask) {
@@ -207,7 +207,7 @@ async function respond(allow: boolean) {
 $("btn-allow").addEventListener("click", () => respond(true));
 $("btn-deny").addEventListener("click", () => respond(false));
 
-// ---------------- 状态机 ----------------
+// ---------------- State machine ----------------
 
 function render(s: Status) {
   state = s.state;
@@ -261,7 +261,7 @@ function render(s: Status) {
   }
 }
 
-// ---------------- 出场 ----------------
+// ---------------- Entrance ----------------
 
 async function entrance() {
   const c = center(primary().work);
@@ -272,7 +272,7 @@ async function entrance() {
   ripple(c, { size: 90, ms: 950, to: 3 });
   await sleep(1200);
   entered = true;
-  // 出场期间状态可能已经变了，按当前状态归位
+  // The state may have changed during the entrance; settle according to the current one
   if (state === "ready") {
     orb.goTo(home(), "slow");
     await sleep(650);
@@ -280,7 +280,7 @@ async function entrance() {
   } else if (state === "connecting" || state === "offline") orb.goTo(home(), "slow");
 }
 
-// ---------------- 启动 ----------------
+// ---------------- Boot ----------------
 
 async function fetchGeo() {
   let info: OverlayInfo | null = null;
@@ -298,10 +298,10 @@ async function boot() {
   await fetchGeo();
   orb.place(center(primary().work));
   hit(orbHit, true);
-  // 可交互区域：布局没变时这次查询几乎不花时间
+  // Interactive regions: this query costs almost nothing when the layout has not changed
   window.setInterval(syncHits, 100);
 
-  // 显示器插拔、改分辨率、改缩放后重新铺一遍
+  // Re-lay out after monitors are plugged/unplugged or resolution/scaling changes
   let relayout: number | undefined;
   let lastLayout = 0;
   const onGeoChange = () => {

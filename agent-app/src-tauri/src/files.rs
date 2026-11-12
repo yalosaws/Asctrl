@@ -1,6 +1,6 @@
-//! 远程文件的读、写、改、列目录、按名字找、按内容搜。
-//! 自动识别编码：UTF-8（带不带 BOM）、UTF-16，否则当作系统 ANSI 编码（中文系统是 GBK）。
-//! 写回时保持原来的编码。
+//! Remote file read, write, edit, directory listing, find by name, and search by content.
+//! Encoding is detected automatically: UTF-8 (with or without BOM), UTF-16, otherwise the system ANSI code page.
+//! Writes keep the original encoding.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ impl Enc {
             Enc::Utf8Bom => "UTF-8 BOM",
             Enc::Utf16Le => "UTF-16 LE",
             Enc::Utf16Be => "UTF-16 BE",
-            Enc::Ansi => "ANSI(GBK)",
+            Enc::Ansi => "ANSI (system code page)",
         }
     }
 
@@ -41,7 +41,7 @@ impl Enc {
             "utf8bom" => Enc::Utf8Bom,
             "utf16" | "utf16le" | "unicode" => Enc::Utf16Le,
             "ansi" | "gbk" | "default" => Enc::Ansi,
-            other => return Err(format!("不支持的编码：{other}（可选 utf8 / utf8bom / utf16le / ansi）")),
+            other => return Err(format!("Unsupported encoding: {other} (use utf8 / utf8bom / utf16le / ansi)")),
         }))
     }
 }
@@ -71,7 +71,7 @@ fn ansi_encode(s: &str) -> Vec<u8> {
     }
 }
 
-/// 看起来像二进制文件（有 NUL 字节且不是 UTF-16）
+/// Looks like a binary file (has NUL bytes and is not UTF-16)
 fn looks_binary(b: &[u8]) -> bool {
     b.iter().take(8192).any(|&c| c == 0)
 }
@@ -87,7 +87,7 @@ pub fn decode(b: &[u8]) -> Result<(String, Enc), String> {
         return Ok((String::from_utf16_lossy(&u), if le { Enc::Utf16Le } else { Enc::Utf16Be }));
     }
     if looks_binary(b) {
-        return Err("这是二进制文件，不能当文本读。需要的话用 download_file 取回".into());
+        return Err("This is a binary file and can't be read as text. Use download_file to fetch it if needed".into());
     }
     match std::str::from_utf8(b) {
         Ok(s) => Ok((s.to_string(), Enc::Utf8)),
@@ -106,14 +106,14 @@ pub fn encode(s: &str, enc: Enc) -> Vec<u8> {
 }
 
 fn read_text(path: &Path) -> Result<(String, Enc), String> {
-    let m = std::fs::metadata(path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    let m = std::fs::metadata(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     if m.is_dir() {
-        return Err(format!("{} 是文件夹，用 list_dir 查看", path.display()));
+        return Err(format!("{} is a folder; use list_dir", path.display()));
     }
     if m.len() > MAX_READ {
-        return Err(format!("文件太大（{} MB），用 search_files 搜内容或 download_file 取回", m.len() / 1024 / 1024));
+        return Err(format!("File is too large ({} MB); use search_files to search it or download_file to fetch it", m.len() / 1024 / 1024));
     }
-    let b = std::fs::read(path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    let b = std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     decode(&b)
 }
 
@@ -122,29 +122,29 @@ pub fn read(path: &Path, offset: usize, limit: usize) -> Result<String, String> 
     let lines: Vec<&str> = text.split('\n').collect();
     let total = if text.ends_with('\n') { lines.len() - 1 } else { lines.len() };
     let start = offset.max(1);
-    let mut out = format!("{}（{}，共 {total} 行）\n", path.display(), enc.name());
+    let mut out = format!("{} ({}, {total} lines)\n", path.display(), enc.name());
     if total == 0 {
-        out.push_str("(空文件)");
+        out.push_str("(empty file)");
         return Ok(out);
     }
     if start > total {
-        return Err(format!("offset {start} 超过文件总行数 {total}"));
+        return Err(format!("offset {start} is past the end of the file ({total} lines)"));
     }
     let end = (start - 1 + limit).min(total);
     for (i, l) in lines[start - 1..end].iter().enumerate() {
         let l = l.strip_suffix('\r').unwrap_or(l);
         let shown: String = l.chars().take(MAX_LINE).collect();
-        let cut = if l.chars().count() > MAX_LINE { "…(本行已截断)" } else { "" };
+        let cut = if l.chars().count() > MAX_LINE { "… (line truncated)" } else { "" };
         let _ = writeln!(out, "{:>6}\t{shown}{cut}", start + i);
     }
     if end < total {
-        let _ = write!(out, "…还有 {} 行，用 offset={} 继续读", total - end, end + 1);
+        let _ = write!(out, "… {} more lines; continue with offset={}", total - end, end + 1);
     }
     Ok(out)
 }
 
 pub fn write(path: &Path, content: &str, enc: Option<Enc>) -> Result<String, String> {
-    // 不指定编码时：已有文件沿用原编码，新文件用 UTF-8
+    // No encoding given: existing files keep theirs, new files use UTF-8
     let enc = match enc {
         Some(e) => e,
         None => std::fs::read(path).ok().and_then(|b| decode(&b).ok()).map(|(_, e)| e).unwrap_or(Enc::Utf8),
@@ -153,32 +153,32 @@ pub fn write(path: &Path, content: &str, enc: Option<Enc>) -> Result<String, Str
         let _ = std::fs::create_dir_all(dir);
     }
     let bytes = encode(content, enc);
-    std::fs::write(path, &bytes).map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
-    Ok(format!("已写入 {}（{}，{} 字节）", path.display(), enc.name(), bytes.len()))
+    std::fs::write(path, &bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    Ok(format!("Wrote {} ({}, {} bytes)", path.display(), enc.name(), bytes.len()))
 }
 
 pub fn edit(path: &Path, old: &str, new: &str, replace_all: bool) -> Result<String, String> {
     if old.is_empty() {
-        return Err("oldText 不能为空".into());
+        return Err("oldText must not be empty".into());
     }
     if old == new {
-        return Err("oldText 和 newText 一样，没有要改的".into());
+        return Err("oldText and newText are identical; nothing to change".into());
     }
     let (text, enc) = read_text(path)?;
-    // 文件是 CRLF 换行而传进来的是 \n 时，自动换成 \r\n
+    // If the file uses CRLF but the input uses \n, convert to \r\n
     let crlf = text.contains("\r\n");
     let fix = |s: &str| if crlf && !s.contains('\r') { s.replace('\n', "\r\n") } else { s.to_string() };
     let (old, new) = (fix(old), fix(new));
     let n = text.matches(&old).count();
     if n == 0 {
-        return Err("文件里找不到 oldText（要和文件内容完全一致，包括空格和缩进）。先 read_file 确认".into());
+        return Err("oldText was not found in the file (it must match exactly, including spaces and indentation). Check with read_file first".into());
     }
     if n > 1 && !replace_all {
-        return Err(format!("oldText 在文件里出现了 {n} 次。多带几行上下文让它唯一，或者传 replaceAll: true"));
+        return Err(format!("oldText appears {n} times in the file. Include more context to make it unique, or pass replaceAll: true"));
     }
     let out = if replace_all { text.replace(&old, &new) } else { text.replacen(&old, &new, 1) };
-    std::fs::write(path, encode(&out, enc)).map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
-    Ok(format!("已修改 {}，替换了 {} 处（{}）", path.display(), if replace_all { n } else { 1 }, enc.name()))
+    std::fs::write(path, encode(&out, enc)).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    Ok(format!("Edited {}: {} replacement(s) ({})", path.display(), if replace_all { n } else { 1 }, enc.name()))
 }
 
 fn fmt_time(t: SystemTime) -> String {
@@ -205,7 +205,7 @@ fn fmt_size(n: u64) -> String {
 }
 
 pub fn list_dir(path: &Path) -> Result<String, String> {
-    let rd = std::fs::read_dir(path).map_err(|e| format!("打开 {} 失败：{e}", path.display()))?;
+    let rd = std::fs::read_dir(path).map_err(|e| format!("Failed to open {}: {e}", path.display()))?;
     let mut items: Vec<(bool, String, u64, String)> = rd
         .filter_map(Result::ok)
         .map(|e| {
@@ -218,18 +218,18 @@ pub fn list_dir(path: &Path) -> Result<String, String> {
         .collect();
     items.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
     let total = items.len();
-    let mut out = format!("{}（{total} 项）\n", path.display());
+    let mut out = format!("{} ({total} items)\n", path.display());
     for (is_dir, name, size, time) in items.iter().take(1000) {
-        let s = if *is_dir { "<文件夹>".to_string() } else { fmt_size(*size) };
+        let s = if *is_dir { "<DIR>".to_string() } else { fmt_size(*size) };
         let _ = writeln!(out, "{time:<16}  {s:>10}  {name}{}", if *is_dir { "\\" } else { "" });
     }
     if total > 1000 {
-        let _ = write!(out, "…只显示前 1000 项");
+        let _ = write!(out, "… showing the first 1000 items only");
     }
     Ok(out)
 }
 
-/// 通配符匹配（* 和 ?），不区分大小写
+/// Wildcard match (* and ?), case-insensitive
 fn wildcard(p: &[char], s: &[char]) -> bool {
     let (mut pi, mut si, mut star, mut mark) = (0, 0, None, 0);
     while si < s.len() {
@@ -254,7 +254,7 @@ fn wildcard(p: &[char], s: &[char]) -> bool {
 pub struct Matcher(Vec<Vec<char>>);
 
 impl Matcher {
-    /// 多个模式用 ; 或 , 分隔，例如 "*.log;*.txt"
+    /// Separate multiple patterns with ; or , e.g. "*.log;*.txt"
     pub fn new(pattern: &str) -> Matcher {
         Matcher(
             pattern
@@ -275,7 +275,7 @@ impl Matcher {
     }
 }
 
-/// 递归遍历文件（跳过符号链接 / 目录联接，避免死循环）
+/// Walk files recursively (skipping symlinks / junctions to avoid loops)
 fn walk(root: &Path, depth: usize, f: &mut dyn FnMut(&Path, &std::fs::Metadata) -> bool) {
     let Ok(rd) = std::fs::read_dir(root) else { return };
     for e in rd.filter_map(Result::ok) {
@@ -298,7 +298,7 @@ fn walk(root: &Path, depth: usize, f: &mut dyn FnMut(&Path, &std::fs::Metadata) 
 
 pub fn find(root: &Path, pattern: &str, max: usize) -> Result<String, String> {
     if !root.is_dir() {
-        return Err(format!("{} 不是文件夹", root.display()));
+        return Err(format!("{} is not a folder", root.display()));
     }
     let m = Matcher::new(pattern);
     let mut hits: Vec<(PathBuf, u64, SystemTime)> = vec![];
@@ -314,18 +314,18 @@ pub fn find(root: &Path, pattern: &str, max: usize) -> Result<String, String> {
         true
     });
     hits.sort_by(|a, b| b.2.cmp(&a.2));
-    let mut out = format!("在 {} 下找到 {} 个{}（按修改时间从新到旧）\n", root.display(), hits.len(), if more { "以上" } else { "" });
+    let mut out = format!("Found {}{} under {} (newest first)\n", hits.len(), if more { "+" } else { "" }, root.display());
     for (p, size, t) in &hits {
         let _ = writeln!(out, "{:<16}  {:>10}  {}", fmt_time(*t), fmt_size(*size), p.display());
     }
     if more {
-        let _ = write!(out, "…结果太多，只显示 {max} 个。缩小范围或加大 maxResults");
+        let _ = write!(out, "… too many results; showing {max}. Narrow the search or raise maxResults");
     }
     Ok(out)
 }
 
 pub fn search(root: &Path, pattern: &str, glob: &str, ignore_case: bool, max: usize, context: usize) -> Result<String, String> {
-    let re = regex::RegexBuilder::new(pattern).case_insensitive(ignore_case).build().map_err(|e| format!("正则表达式有误：{e}"))?;
+    let re = regex::RegexBuilder::new(pattern).case_insensitive(ignore_case).build().map_err(|e| format!("Invalid regular expression: {e}"))?;
     let m = Matcher::new(glob);
     let mut out = String::new();
     let (mut hits, mut files, mut more) = (0usize, 0usize, false);
@@ -367,12 +367,12 @@ pub fn search(root: &Path, pattern: &str, glob: &str, ignore_case: bool, max: us
             scan(root, &meta);
         }
         Ok(_) => walk(root, 40, &mut scan),
-        Err(e) => return Err(format!("打开 {} 失败：{e}", root.display())),
+        Err(e) => return Err(format!("Failed to open {}: {e}", root.display())),
     }
     if hits == 0 {
-        return Ok(format!("在 {} 下没有找到匹配「{pattern}」的内容", root.display()));
+        return Ok(format!("No matches for \"{pattern}\" under {}", root.display()));
     }
-    let head = format!("{hits} 处匹配，{files} 个文件{}\n", if more { "（已到上限，还有更多）" } else { "" });
+    let head = format!("{hits} matches in {files} files{}\n", if more { " (limit reached; there are more)" } else { "" });
     Ok(head + &out)
 }
 

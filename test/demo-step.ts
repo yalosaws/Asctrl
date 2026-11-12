@@ -1,6 +1,6 @@
-// 手动演示用：连上被控端，按顺序执行 JSON 里的步骤，截图存到 test/out/。
-// 用法：node test/demo-step.ts <relayUrl> <code> '<json 步骤数组>'   （或 @steps.json）
-//   步骤：{ "tool": "click", "args": {...} } 或 { "wait": 毫秒 }
+// Manual demo: connect to an agent, run the steps from JSON in order, save screenshots to test/out/.
+// Usage: node test/demo-step.ts <relayUrl> <code> '<json array of steps>'   (or @steps.json)
+//   Step: { "tool": "click", "args": {...} } or { "wait": ms }
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { TechClient } from "../src/console/tech-client.ts";
@@ -11,7 +11,7 @@ const steps: Array<{ tool?: ToolName; args?: Record<string, unknown>; wait?: num
   json.startsWith("@") ? readFileSync(json.slice(1), "utf8") : json,
 );
 
-const tech = new TechClient(relay, "演示");
+const tech = new TechClient(relay, "Demo");
 await tech.connect(code);
 mkdirSync("test/out", { recursive: true });
 for (const s of steps) {
@@ -23,7 +23,7 @@ for (const s of steps) {
   console.log(`${r.ok ? "✔" : "✘"} ${s.tool} ${r.text ?? r.error ?? ""}`.trim());
   if (r.image && s.save) {
     writeFileSync(`test/out/${s.save}`, Buffer.from(r.image.data, "base64"));
-    console.log(`  截图已保存 test/out/${s.save}`);
+    console.log(`  Screenshot saved to test/out/${s.save}`);
   }
 }
 tech.disconnect();

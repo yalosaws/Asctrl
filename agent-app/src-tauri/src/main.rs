@@ -1,4 +1,4 @@
-// 发布版不弹出黑色控制台窗口
+// No black console window in release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {

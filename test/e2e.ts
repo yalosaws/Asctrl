@@ -1,6 +1,6 @@
-// 端到端测试：本机起中继 + 被控端（自动同意），控制端依次调用每个工具。
-// 用法：npm test                      测 Node 版被控端
-//       npm test -- --app <exe 路径>  测图形界面版被控端（需要 debug 编译）
+// End-to-end test: starts a local relay + an agent (auto-accept), then the tech client calls every tool in turn.
+// Usage: npm test                      tests the Node agent
+//        npm test -- --app <exe path>  tests the GUI agent (needs a debug build)
 
 import { spawn } from "node:child_process";
 import { writeFileSync, mkdirSync } from "node:fs";
@@ -10,6 +10,15 @@ import { TechClient } from "../src/console/tech-client.ts";
 const PORT = 18787;
 const CODE = "123456";
 const relay = startRelay(PORT);
+
+// Non-ASCII sample text. It is test data on purpose: it exercises UTF-8, UTF-16 and the
+// system ANSI code page (GBK on Chinese Windows), which plain ASCII would not.
+const HELLO = "你好";
+const LINE1 = "第一行";
+const LINE3 = "第三行";
+const ANSI_TEXT = "中文测试";
+const DISK_FULL = "磁盘已满";
+const UPLOAD_NAME = "上传.txt";
 
 const appIdx = process.argv.indexOf("--app");
 const appExe = appIdx >= 0 ? process.argv[appIdx + 1] : undefined;
@@ -33,17 +42,17 @@ function check(name: string, cond: boolean, detail = "") {
 }
 
 try {
-  await new Promise((r) => setTimeout(r, 1500)); // 等被控端注册
+  await new Promise((r) => setTimeout(r, 1500)); // wait for the agent to register
 
   const bad = new TechClient(`ws://localhost:${PORT}`);
   await bad.connect("000000").then(
-    () => check("错误连接码被拒绝", false),
-    (e) => check("错误连接码被拒绝", true, e.message),
+    () => check("wrong code is rejected", false),
+    (e) => check("wrong code is rejected", true, e.message),
   );
 
-  const tech = new TechClient(`ws://localhost:${PORT}`, "测试员");
+  const tech = new TechClient(`ws://localhost:${PORT}`, "Tester");
   const host = await tech.connect(CODE);
-  check("配对成功", !!host, host);
+  check("paired", !!host, host);
 
   const info = await tech.call("system_info");
   check("system_info", info.ok && !!info.text?.includes("OS"), info.text?.slice(0, 80).replace(/\s+/g, " "));
@@ -51,8 +60,8 @@ try {
   const procs = await tech.call("list_processes", { top: 5 });
   check("list_processes", procs.ok && !!procs.text?.includes("Name"));
 
-  const ps = await tech.call("run_powershell", { script: "Write-Output '你好 asctrl'; 1+1" });
-  check("run_powershell 中文输出", ps.ok && !!ps.text?.includes("你好 asctrl") && !!ps.text?.includes("2"), ps.text);
+  const ps = await tech.call("run_powershell", { script: `Write-Output '${HELLO} asctrl'; 1+1` });
+  check("run_powershell non-ASCII output", ps.ok && !!ps.text?.includes(`${HELLO} asctrl`) && !!ps.text?.includes("2"), ps.text);
 
   const log = await tech.call("event_log", { hours: 24, max: 3 });
   check("event_log", log.ok);
@@ -66,133 +75,134 @@ try {
   }
 
   if (appExe) {
-    // ---- 只有图形界面版支持的能力 ----
-    check("截图返回尺寸说明", !!shot.text?.includes("×"), shot.text);
+    // ---- Only the GUI agent supports these ----
+    check("screenshot reports its size", /\d+x\d+/.test(shot.text ?? ""), shot.text);
 
     await tech.call("run_powershell", { script: "Set-Location $env:TEMP; $asctrlVar = 'kept'" });
     const keep = await tech.call("run_powershell", { script: "\"$((Get-Location).Path)|$asctrlVar\"" });
-    check("会话保留目录和变量", keep.ok && /Temp\|kept/i.test(keep.text ?? ""), keep.text);
+    check("session keeps directory and variables", keep.ok && /Temp\|kept/i.test(keep.text ?? ""), keep.text);
 
     await tech.call("reset_shell");
     const fresh = await tech.call("run_powershell", { script: "\"[$asctrlVar]\"" });
-    check("reset_shell 清空会话", fresh.ok && fresh.text?.trim() === "[]", fresh.text);
+    check("reset_shell clears the session", fresh.ok && fresh.text?.trim() === "[]", fresh.text);
 
-    const content = `asctrl 文件测试 ${Date.now()}`;
+    const content = `asctrl file test ${HELLO} ${Date.now()}`;
     const up = await tech.call("upload_file", {
-      path: "%TEMP%\\asctrl-e2e\\上传.txt",
+      path: `%TEMP%\\asctrl-e2e\\${UPLOAD_NAME}`,
       data: Buffer.from(content).toString("base64"),
     });
     check("upload_file", up.ok, up.text ?? up.error);
-    const down = await tech.call("download_file", { path: "%TEMP%\\asctrl-e2e\\上传.txt" });
+    const down = await tech.call("download_file", { path: `%TEMP%\\asctrl-e2e\\${UPLOAD_NAME}` });
     const back = down.file ? Buffer.from(down.file.data, "base64").toString() : "";
-    check("download_file 内容一致", down.ok && back === content && down.file?.name === "上传.txt", down.error);
+    check("download_file round-trips", down.ok && back === content && down.file?.name === UPLOAD_NAME, down.error);
     await tech.call("run_powershell", { script: "Remove-Item -Recurse -Force $env:TEMP\\asctrl-e2e" });
 
     const out = await tech.call("click", { x: 99999, y: 10 });
-    check("超出截图范围的点击被拒绝", !out.ok && !!out.error?.includes("超出"), out.error);
+    check("click outside the screenshot is rejected", !out.ok && !!out.error?.includes("outside"), out.error);
 
     const badKey = await tech.call("press_keys", { keys: "ctrl+notakey" });
-    check("不认识的按键被拒绝", !badKey.ok, badKey.error);
+    check("unknown key is rejected", !badKey.ok, badKey.error);
 
     const shift = await tech.call("press_keys", { keys: "shift" });
-    check("press_keys（单按 Shift）", shift.ok, shift.error);
+    check("press_keys (Shift alone)", shift.ok, shift.error);
 
-    // ---- 看 ----
+    // ---- Viewing ----
     const zoom = await tech.call("zoom", { x0: 0, y0: 0, x1: 200, y1: 100 });
-    check("zoom 放大区域", zoom.ok && !!zoom.image?.data && !!zoom.text?.includes("放大"), zoom.text ?? zoom.error);
+    check("zoom into a region", zoom.ok && !!zoom.image?.data && !!zoom.text?.includes("Zoomed"), zoom.text ?? zoom.error);
     const one = await tech.call("screenshot", { maxWidth: 800, display: 1 });
-    check("screenshot 指定显示器", one.ok && !!one.text?.includes("1 号显示器"), one.text ?? one.error);
+    check("screenshot of one display", one.ok && !!one.text?.includes("display #1"), one.text ?? one.error);
     const none = await tech.call("screenshot", { display: 16 });
-    check("不存在的显示器被拒绝", !none.ok, none.error);
+    check("missing display is rejected", !none.ok, none.error);
     const cur = await tech.call("cursor_position");
     check("cursor_position", cur.ok && /\(\d+, \d+\)/.test(cur.text ?? ""), cur.text ?? cur.error);
     const wins = await tech.call("list_windows");
-    check("list_windows", wins.ok && /个窗口/.test(wins.text ?? ""), wins.text?.split("\n")[0] ?? wins.error);
-    const noWin = await tech.call("focus_window", { title: "不存在的窗口-asctrl" });
-    check("focus_window 找不到时报错", !noWin.ok, noWin.error);
+    check("list_windows", wins.ok && /\d+ windows/.test(wins.text ?? ""), wins.text?.split("\n")[0] ?? wins.error);
+    const noWin = await tech.call("focus_window", { title: "no-such-window-asctrl" });
+    check("focus_window errors when not found", !noWin.ok, noWin.error);
     const badHold = await tech.call("hold_key", { keys: "notakey", seconds: 0.1 });
-    check("hold_key 不认识的按键被拒绝", !badHold.ok, badHold.error);
+    check("hold_key rejects unknown keys", !badHold.ok, badHold.error);
     const sym = await tech.call("press_keys", { keys: "shift+/" });
-    check("press_keys 支持符号键", sym.ok, sym.error);
+    check("press_keys supports symbol keys", sym.ok, sym.error);
 
-    // ---- 文件 ----
+    // ---- Files ----
     const dir = "%TEMP%\\asctrl-e2e-files";
-    const w1 = await tech.call("write_file", { path: `${dir}\\a.txt`, content: "第一行\r\nfoo = 1\r\n第三行\r\n" });
-    check("write_file 新建（UTF-8）", w1.ok && !!w1.text?.includes("UTF-8"), w1.text ?? w1.error);
+    const w1 = await tech.call("write_file", { path: `${dir}\\a.txt`, content: `${LINE1}\r\nfoo = 1\r\n${LINE3}\r\n` });
+    check("write_file creates (UTF-8)", w1.ok && !!w1.text?.includes("UTF-8"), w1.text ?? w1.error);
     const r1 = await tech.call("read_file", { path: `${dir}\\a.txt` });
-    check("read_file 带行号", r1.ok && /\s+2\tfoo = 1/.test(r1.text ?? ""), r1.error);
+    check("read_file has line numbers", r1.ok && /\s+2\tfoo = 1/.test(r1.text ?? ""), r1.error);
     const e1 = await tech.call("edit_file", { path: `${dir}\\a.txt`, oldText: "foo = 1\n", newText: "foo = 2\n" });
     const r2 = await tech.call("read_file", { path: `${dir}\\a.txt`, offset: 2, limit: 1 });
-    check("edit_file 适配 CRLF", e1.ok && !!r2.text?.includes("foo = 2") && !r2.text?.includes("第三行"), e1.error ?? r2.text);
-    const e2 = await tech.call("edit_file", { path: `${dir}\\a.txt`, oldText: "行", newText: "X" });
-    check("edit_file 多处匹配时要求 replaceAll", !e2.ok && !!e2.error?.includes("2 次"), e2.error);
-    const w2 = await tech.call("write_file", { path: `${dir}\\gbk.bat`, content: "echo 中文测试\r\n", encoding: "ansi" });
+    check("edit_file adapts to CRLF", e1.ok && !!r2.text?.includes("foo = 2") && !r2.text?.includes(LINE3), e1.error ?? r2.text);
+    // LINE1 and LINE3 share their last character, so it appears twice
+    const e2 = await tech.call("edit_file", { path: `${dir}\\a.txt`, oldText: LINE1.slice(-1), newText: "X" });
+    check("edit_file requires replaceAll on multiple matches", !e2.ok && !!e2.error?.includes("2 times"), e2.error);
+    const w2 = await tech.call("write_file", { path: `${dir}\\gbk.bat`, content: `echo ${ANSI_TEXT}\r\n`, encoding: "ansi" });
     const r3 = await tech.call("read_file", { path: `${dir}\\gbk.bat` });
-    check("ANSI(GBK) 写入后能正确读回", w2.ok && !!r3.text?.includes("ANSI") && !!r3.text?.includes("echo 中文测试"), r3.text ?? r3.error);
-    await tech.call("write_file", { path: `${dir}\\sub\\u16.log`, content: "error: 磁盘已满\n", encoding: "utf16le" });
-    const e3 = await tech.call("edit_file", { path: `${dir}\\sub\\u16.log`, oldText: "已满", newText: "正常" });
+    check("ANSI (GBK) write reads back correctly", w2.ok && !!r3.text?.includes("ANSI") && !!r3.text?.includes(`echo ${ANSI_TEXT}`), r3.text ?? r3.error);
+    await tech.call("write_file", { path: `${dir}\\sub\\u16.log`, content: `error: ${DISK_FULL}\n`, encoding: "utf16le" });
+    const e3 = await tech.call("edit_file", { path: `${dir}\\sub\\u16.log`, oldText: DISK_FULL.slice(2), newText: "OK" });
     const r4 = await tech.call("read_file", { path: `${dir}\\sub\\u16.log` });
-    check("UTF-16 文件修改后保持编码", e3.ok && !!r4.text?.includes("UTF-16 LE") && !!r4.text?.includes("磁盘正常"), r4.text ?? e3.error);
+    check("UTF-16 file keeps its encoding after edit", e3.ok && !!r4.text?.includes("UTF-16 LE") && !!r4.text?.includes(`${DISK_FULL.slice(0, 2)}OK`), r4.text ?? e3.error);
     const ls = await tech.call("list_dir", { path: dir });
     check("list_dir", ls.ok && !!ls.text?.includes("sub\\") && !!ls.text?.includes("a.txt"), ls.error);
     const ff = await tech.call("find_files", { path: dir, pattern: "*.log;*.bat" });
-    check("find_files 递归 + 多模式", ff.ok && !!ff.text?.includes("u16.log") && !!ff.text?.includes("gbk.bat"), ff.text ?? ff.error);
-    const sf = await tech.call("search_files", { path: dir, pattern: "磁盘|中文", context: 0 });
-    check("search_files 跨编码搜索", sf.ok && !!sf.text?.startsWith("2 处匹配"), sf.text ?? sf.error);
+    check("find_files recursive + multiple patterns", ff.ok && !!ff.text?.includes("u16.log") && !!ff.text?.includes("gbk.bat"), ff.text ?? ff.error);
+    const sf = await tech.call("search_files", { path: dir, pattern: `${DISK_FULL.slice(0, 2)}|${ANSI_TEXT.slice(0, 2)}`, context: 0 });
+    check("search_files across encodings", sf.ok && !!sf.text?.startsWith("2 matches"), sf.text ?? sf.error);
     const bin = await tech.call("read_file", { path: "%WINDIR%\\notepad.exe" });
-    check("二进制文件不当文本读", !bin.ok && !!bin.error?.includes("二进制"), bin.error);
+    check("binary file is not read as text", !bin.ok && !!bin.error?.includes("binary"), bin.error);
 
-    // ---- 剪贴板（测完还原） ----
+    // ---- Clipboard (restored afterwards) ----
     const before = await tech.call("read_clipboard");
-    const mark = `asctrl 剪贴板 ${Date.now()}`;
+    const mark = `asctrl clipboard ${HELLO} ${Date.now()}`;
     await tech.call("write_clipboard", { text: mark });
     const clip = await tech.call("read_clipboard");
-    check("剪贴板读写", clip.ok && clip.text?.trim() === mark, clip.text ?? clip.error);
+    check("clipboard read/write", clip.ok && clip.text?.trim() === mark, clip.text ?? clip.error);
     if (before.ok && before.text && !before.text.startsWith("[") && !before.text.startsWith("(")) {
       await tech.call("write_clipboard", { text: before.text });
     }
 
-    // ---- 后台任务 ----
+    // ---- Background jobs ----
     const job = await tech.call("run_powershell", {
       background: true,
-      script: "Write-Output '开始'; Start-Sleep -Seconds 2; Write-Output '完成'; exit 3",
+      script: "Write-Output 'started'; Start-Sleep -Seconds 2; Write-Output 'finished'; exit 3",
     });
-    const jobId = Number(/任务编号 (\d+)/.exec(job.text ?? "")?.[1]);
-    check("后台任务启动", job.ok && jobId > 0, job.text ?? job.error);
+    const jobId = Number(/as job (\d+)/.exec(job.text ?? "")?.[1]);
+    check("background job starts", job.ok && jobId > 0, job.text ?? job.error);
     await new Promise((r) => setTimeout(r, 4000));
     const jo = await tech.call("job_output", { jobId });
-    check("后台任务输出和退出码", jo.ok && !!jo.text?.includes("完成") && !!jo.text?.includes("退出码 3"), jo.text);
+    check("background job output and exit code", jo.ok && !!jo.text?.includes("finished") && !!jo.text?.includes("exit code 3"), jo.text);
     const jo2 = await tech.call("job_output", { jobId });
-    check("job_output 只返回新输出", jo2.ok && !jo2.text?.includes("开始"), jo2.text);
+    check("job_output returns only new output", jo2.ok && !jo2.text?.includes("started"), jo2.text);
     const long = await tech.call("run_powershell", { background: true, script: "ping -n 30 127.0.0.1" });
-    const longId = Number(/任务编号 (\d+)/.exec(long.text ?? "")?.[1]);
+    const longId = Number(/as job (\d+)/.exec(long.text ?? "")?.[1]);
     await new Promise((r) => setTimeout(r, 1500));
     const stop = await tech.call("stop_job", { jobId: longId });
     await new Promise((r) => setTimeout(r, 1000));
     const list = await tech.call("job_output");
-    check("stop_job 停止长任务", stop.ok && new RegExp(`\\[${longId}\\] 已结束`).test(list.text ?? ""), list.text);
+    check("stop_job stops a long job", stop.ok && new RegExp(`\\[${longId}\\] Finished`).test(list.text ?? ""), list.text);
 
-    // ---- 重启续连（只登记再取消，不真的重启） ----
+    // ---- Resume after restart (register then cancel; no real restart) ----
     const prep = await tech.call("restart_computer", { prepareOnly: true });
     const reg = await tech.call("run_powershell", {
       script: "(Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce').AsctrlResume",
     });
-    check("restart_computer prepareOnly 登记自启动", prep.ok && !!reg.text?.includes(`--code ${CODE}`), reg.text);
+    check("restart_computer prepareOnly registers auto-start", prep.ok && !!reg.text?.includes(`--code ${CODE}`), reg.text);
     const cancel = await tech.call("restart_computer", { cancel: true });
     const reg2 = await tech.call("run_powershell", {
       script: "[bool](Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce').AsctrlResume",
     });
-    check("restart_computer cancel 清除登记", cancel.ok && reg2.text?.trim() === "False", reg2.text);
+    check("restart_computer cancel clears the entry", cancel.ok && reg2.text?.trim() === "False", reg2.text);
 
     await tech.call("run_powershell", { script: "Remove-Item -Recurse -Force $env:TEMP\\asctrl-e2e-files" });
   }
 
   tech.disconnect();
 } catch (e) {
-  check("未预期的异常", false, String(e));
+  check("unexpected exception", false, String(e));
 } finally {
   agent.kill();
   relay.close();
-  console.log(failed ? `\n${failed} 项失败` : "\n全部通过");
+  console.log(failed ? `\n${failed} failed` : "\nAll passed");
   process.exit(failed ? 1 : 0);
 }

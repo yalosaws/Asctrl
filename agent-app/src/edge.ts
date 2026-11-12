@@ -1,7 +1,8 @@
-// 边缘流光：AI 接管期间，每块屏幕四周有一圈流动的渐变光。
-// 整圈光是同一张锥形渐变贴图在一个环形遮罩后面旋转，所以颜色沿着四条边和四个拐角
-// 天然是连续的，没有拼接。贴图只画一次（一张小画布，由显卡拉伸），之后只有旋转这一个
-// transform 在动；空闲几秒后旋转会停下来，不再产生帧。
+// Edge glow: while the AI is in control, a ring of flowing gradient light runs around every screen.
+// The whole ring is one conic-gradient texture rotating behind a ring mask, so the colour is naturally
+// continuous along all four edges and corners, with no seams. The texture is drawn once (a small canvas
+// stretched by the GPU); after that only the rotation transform animates, run by the compositor at a
+// constant speed for as long as control lasts: no speed changes, no pauses.
 
 import { center, home, monitors, type R } from "./geo";
 import { orb } from "./orb";
@@ -12,9 +13,9 @@ const stage = document.getElementById("frames") as HTMLDivElement;
 
 interface Edge {
   root: HTMLDivElement;
-  /** 常亮的一圈：3 像素实线 + 朝内淡出的柔光 */
+  /** Always-on ring: 3px solid line + soft glow fading inward */
   ring: HTMLDivElement;
-  /** 更宽更亮的一圈，只在有动作时闪一下 */
+  /** Wider, brighter ring that flashes only when an action happens */
   flare: HTMLDivElement;
   spins: Animation[];
 }
@@ -22,11 +23,10 @@ interface Edge {
 let edges: Edge[] = [];
 let shown = false;
 let busy: Promise<void> = Promise.resolve();
-let restTimer: number | undefined;
 
 const LOOP = ["#5b8cff", "#b36bff", "#ff7ab6", "#ffb86b", "#5be0c8", "#5b8cff"];
-/** 转一圈的时间 */
-const TURN_MS = 16000;
+/** Time for one full turn (constant speed) */
+const TURN_MS = 7000;
 
 let texture: HTMLCanvasElement | null = null;
 function gradientTexture() {
@@ -45,10 +45,13 @@ function spinner(host: HTMLElement, mon: R): Animation {
   const cv = el("canvas", "edge-spin", host);
   cv.width = cv.height = 512;
   cv.getContext("2d")!.drawImage(gradientTexture(), 0, 0);
-  // 一个能盖住整块屏幕对角线的正方形，绕屏幕中心转
+  // A square large enough to cover the screen's diagonal, rotating around the screen centre
   const d = Math.ceil(Math.hypot(mon.w, mon.h)) + 4;
   Object.assign(cv.style, { width: `${d}px`, height: `${d}px`, left: `${(mon.w - d) / 2}px`, top: `${(mon.h - d) / 2}px` });
-  return cv.animate([{ transform: "rotate(0turn)" }, { transform: "rotate(1turn)" }], { duration: TURN_MS, iterations: Infinity });
+  // Linear, constant speed; all screens and both layers share one start time so the colours always line up
+  const a = cv.animate([{ transform: "rotate(0turn)" }, { transform: "rotate(1turn)" }], { duration: TURN_MS, iterations: Infinity, easing: "linear" });
+  a.startTime = 0;
+  return a;
 }
 
 function make(mon: R): Edge {
@@ -59,26 +62,7 @@ function make(mon: R): Edge {
   return { root, ring, flare, spins: [spinner(ring, mon), spinner(flare, mon)] };
 }
 
-function eachSpin(fn: (a: Animation) => void) {
-  for (const e of edges) e.spins.forEach(fn);
-}
-
-/** 有动作时转得快一些，停下来几秒后暂停 */
-export function setActive(on: boolean) {
-  window.clearTimeout(restTimer);
-  if (!shown) return;
-  if (on) {
-    eachSpin((a) => {
-      a.updatePlaybackRate(2.2);
-      a.play();
-    });
-  } else {
-    eachSpin((a) => a.updatePlaybackRate(0.8));
-    restTimer = window.setTimeout(() => eachSpin((a) => a.pause()), 9000);
-  }
-}
-
-/** AI 开始控制：小精灵飞到主屏中间绽开，一圈涟漪向外扩散，扩到屏幕边缘时整圈光亮起 */
+/** AI takes control: the orb flies to the middle of the primary screen and blooms; a ripple spreads out and the ring lights up when it reaches the edges */
 export function expand(): Promise<void> {
   busy = busy.then(async () => {
     if (shown) return;
@@ -103,18 +87,16 @@ export function expand(): Promise<void> {
     }
     await Promise.all(ins);
     orb.goTo(home(), "normal");
-    setActive(false);
     await sleep(500);
   });
   return busy;
 }
 
-/** 结束控制：整圈光向外退出屏幕，小精灵亮一下 */
+/** Control ends: the ring exits outward and the orb flashes */
 export function collapse(): Promise<void> {
   busy = busy.then(async () => {
     if (!shown) return;
     shown = false;
-    window.clearTimeout(restTimer);
     await Promise.all(edges.map((e) => done(play(e.root, [{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(1.05)" }], { duration: 600, easing: EASE.inOut }))));
     clear();
     orb.bump(1.1);
@@ -124,20 +106,19 @@ export function collapse(): Promise<void> {
   return busy;
 }
 
-/** 有工具开始执行时，整圈光亮一下、变厚一下 */
+/** When a tool starts, the ring brightens and thickens briefly */
 export function pulse() {
   for (const e of edges) play(e.flare, [{ opacity: 0.9 }, { opacity: 0 }], { duration: 900, easing: EASE.out });
 }
 
 export const isShown = () => shown;
 
-/** 显示器布局变了：按新的尺寸把流光重新铺一遍 */
+/** Monitor layout changed: rebuild the glow at the new sizes */
 export function relayout() {
   if (!shown) return;
   clear();
   edges = monitors.map((m) => make(m.bounds));
   for (const e of edges) e.ring.style.opacity = "1";
-  setActive(false);
 }
 
 function clear() {

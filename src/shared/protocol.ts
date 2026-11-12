@@ -1,5 +1,5 @@
-// 三方（被控端 agent / 中继 relay / 控制端 tech）之间的 WebSocket 消息格式。
-// 所有消息都是 JSON 文本帧。
+// WebSocket message format between the three parties (agent / relay / tech).
+// Every message is a JSON text frame.
 
 export type ToolName =
   | "screenshot"
@@ -8,7 +8,7 @@ export type ToolName =
   | "event_log"
   | "run_powershell"
   | "reset_shell"
-  // 以下只有图形界面被控端（agent-app）支持
+  // The following are supported only by the GUI agent (agent-app)
   | "click"
   | "scroll"
   | "drag"
@@ -38,16 +38,16 @@ export type ToolName =
   | "job_output"
   | "stop_job";
 
-// ---- 握手阶段 ----
+// ---- Handshake ----
 
-/** agent -> relay：注册，带上屏幕上显示给用户的连接码 */
+/** agent -> relay: register, with the code shown to the user on screen */
 export interface AgentHello {
   type: "agent_hello";
   code: string;
   hostname: string;
 }
 
-/** tech -> relay：请求连接某个连接码 */
+/** tech -> relay: ask to connect to a code */
 export interface TechHello {
   type: "tech_hello";
   code: string;
@@ -55,25 +55,25 @@ export interface TechHello {
   token?: string;
 }
 
-/** relay -> agent：有技术员请求连接，需要用户同意 */
+/** relay -> agent: a technician wants to connect; the user must consent */
 export interface ConsentRequest {
   type: "consent_request";
   techName: string;
 }
 
-/** agent -> relay：用户的决定 */
+/** agent -> relay: the user's decision */
 export interface ConsentReply {
   type: "consent_reply";
   allow: boolean;
 }
 
-/** relay -> tech：配对成功 */
+/** relay -> tech: paired */
 export interface Paired {
   type: "paired";
   hostname: string;
 }
 
-/** relay -> 任一方：出错或对方断开 */
+/** relay -> either side: an error, or the other side disconnected */
 export interface ErrorMsg {
   type: "error";
   message: string;
@@ -83,9 +83,9 @@ export interface PeerLeft {
   type: "peer_left";
 }
 
-// ---- 配对后，relay 原样转发以下消息 ----
+// ---- Once paired, the relay forwards these messages unchanged ----
 
-/** tech -> agent：调用一个工具 */
+/** tech -> agent: call a tool */
 export interface ToolCall {
   type: "call";
   id: string;
@@ -93,16 +93,16 @@ export interface ToolCall {
   args: Record<string, unknown>;
 }
 
-/** agent -> tech：工具结果 */
+/** agent -> tech: tool result */
 export interface ToolResult {
   type: "result";
   id: string;
   ok: boolean;
-  /** 文本结果 */
+  /** Text result */
   text?: string;
-  /** 图片结果（base64） */
+  /** Image result (base64) */
   image?: { data: string; mimeType: string };
-  /** 文件结果（download_file，base64） */
+  /** File result (download_file, base64) */
   file?: { name: string; data: string };
   error?: string;
 }

@@ -1,5 +1,5 @@
-//! 被控端后台：连接中继、处理用户同意、执行工具，并把状态推给界面。
-//! 协议与 ../../src/shared/protocol.ts 一致。
+//! Agent backend: connects to the relay, handles user consent, runs tools, and pushes state to the UI.
+//! The protocol matches ../../src/shared/protocol.ts.
 
 mod files;
 mod input;
@@ -18,20 +18,20 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
-/// 等用户点"允许"的最长时间
+/// How long to wait for the user to click "Allow"
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Default)]
 struct AgentState {
     code: Mutex<String>,
-    /// 协助码是启动参数指定的（例如提权重启后），撞码时不换码而是重试
+    /// The code was given on the command line (e.g. after an elevated restart); on a collision, retry instead of picking a new one
     fixed_code: bool,
     tech_name: Mutex<Option<String>>,
-    /// 等待用户回答的问题（连接同意 / 管理员同意）
+    /// Question awaiting the user's answer (connection consent / admin consent)
     answer: Mutex<Option<oneshot::Sender<bool>>>,
-    /// 用户点了"结束协助"
+    /// The user clicked "End session"
     kick: Notify,
-    /// 最近一次状态，界面刚加载时用来补齐
+    /// Latest status, replayed to the UI when it first loads
     status: Mutex<Value>,
     ctx: tools::Ctx,
 }
@@ -45,7 +45,7 @@ fn random_code() -> String {
     format!("{:06}", rand::random_range(0..1_000_000))
 }
 
-/// 中继地址：启动参数 > 环境变量 > exe 旁边的 relay.txt > 编译时指定 > 本机
+/// Relay URL: command-line flag > environment variable > relay.txt next to the exe > compile-time value > localhost
 fn relay_url() -> String {
     if let Some(u) = arg("--relay").or_else(|| std::env::var("ASCTRL_RELAY_URL").ok()) {
         return u;
@@ -69,7 +69,7 @@ fn is_elevated() -> bool {
     unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() }
 }
 
-/// 以管理员身份重新启动自己，保持同一个协助码。会弹出 UAC 窗口，用户点"否"时返回 false。
+/// Restart this program as administrator, keeping the same code. Shows a UAC prompt; returns false if the user clicks "No".
 fn relaunch_elevated(code: &str) -> bool {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -91,7 +91,7 @@ fn activity(app: &AppHandle, text: String) {
     let _ = app.emit("activity", json!({ "text": text }));
 }
 
-/// 悬浮层一直在最上面，这里只是确保它可见
+/// The overlay is always on top; this just makes sure it is visible
 fn bring_to_front(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -99,7 +99,7 @@ fn bring_to_front(app: &AppHandle) {
     }
 }
 
-/// 发给界面的参数：去掉大块数据，长文本截断
+/// Arguments sent to the UI: large data removed, long text truncated
 fn fx_args(args: &Value) -> Value {
     let mut a = args.clone();
     if let Some(o) = a.as_object_mut() {
@@ -120,12 +120,12 @@ fn fx_text(out: &tools::Output) -> String {
     t.chars().take(6000).collect()
 }
 
-/// 会动鼠标的工具：执行期间暂停悬浮层的交互，免得点到小精灵身上
+/// Tools that move the mouse: pause overlay interaction while they run so they don't hit the orb
 fn moves_mouse(tool: &str) -> bool {
     matches!(tool, "click" | "scroll" | "drag" | "mouse_move" | "mouse_down" | "mouse_up")
 }
 
-/// 弹出一个问题让用户回答，超时算拒绝
+/// Ask the user a question; a timeout counts as a refusal
 async fn ask_user(app: &AppHandle, status: Value) -> bool {
     let (otx, orx) = oneshot::channel::<bool>();
     *app.state::<AgentState>().answer.lock().unwrap() = Some(otx);
@@ -174,7 +174,7 @@ async fn connect_once(app: &AppHandle) -> Result<(), String> {
     let (ws, _) = tokio_tungstenite::connect_async(relay_url()).await.map_err(|e| e.to_string())?;
     let (mut sink, mut stream) = ws.split();
 
-    // 所有发出的消息都走这个通道，读和写互不阻塞
+    // Every outgoing message goes through this channel so reads and writes never block each other
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let writer = tokio::spawn(async move {
         while let Some(s) = rx.recv().await {
@@ -193,11 +193,11 @@ async fn connect_once(app: &AppHandle) -> Result<(), String> {
     let result = loop {
         tokio::select! {
             _ = st.kick.notified() => {
-                activity(app, "你结束了协助".into());
+                activity(app, "You ended the session".into());
                 break Ok(());
             }
             msg = stream.next() => match msg {
-                None => break Err("与服务器的连接断开了".into()),
+                None => break Err("Lost the connection to the server".into()),
                 Some(Err(e)) => break Err(e.to_string()),
                 Some(Ok(WsMsg::Text(t))) => {
                     if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
@@ -232,7 +232,7 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
                 if allow {
                     *st.tech_name.lock().unwrap() = Some(tech.clone());
                     set_status(&app, connected_status(&app));
-                    activity(&app, format!("你允许了 {tech} 连接"));
+                    activity(&app, format!("You allowed {tech} to connect"));
                 } else {
                     let code = st.code.lock().unwrap().clone();
                     set_status(&app, json!({ "state": "ready", "code": code }));
@@ -279,7 +279,7 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
             st.answer.lock().unwrap().take();
             let who = st.tech_name.lock().unwrap().take();
             if let Some(who) = who {
-                activity(app, format!("{who} 已断开"));
+                activity(app, format!("{who} disconnected"));
             }
             let code = st.code.lock().unwrap().clone();
             set_status(app, json!({ "state": "ready", "code": code }));
@@ -287,7 +287,7 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
             tauri::async_runtime::spawn(async move { app.state::<AgentState>().ctx.reset().await });
         }
         Some("error") => {
-            // 多半是协助码撞了：随机码就换一个；指定码（刚提权重启）就等旧进程退出后重试
+            // Most likely a code collision: pick a new random code; with a fixed code (just restarted elevated), wait for the old process to exit and retry
             if !st.fixed_code {
                 *st.code.lock().unwrap() = random_code();
             }
@@ -300,28 +300,28 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
 
 async fn request_admin(app: AppHandle, tx: mpsc::UnboundedSender<String>, id: String) {
     if is_elevated() {
-        return reply_text(&tx, &id, true, "已经是管理员权限");
+        return reply_text(&tx, &id, true, "Already running as administrator");
     }
     let tech = app.state::<AgentState>().tech_name.lock().unwrap().clone().unwrap_or_default();
-    activity(&app, "请求管理员权限".into());
+    activity(&app, "Requested administrator access".into());
     let allow = ask_user(&app, json!({ "state": "admin", "techName": tech, "timeoutSec": CONSENT_TIMEOUT.as_secs() })).await;
     set_status(&app, connected_status(&app));
     if !allow {
-        activity(&app, "你拒绝了管理员权限".into());
-        return reply_text(&tx, &id, false, "对方拒绝了管理员权限");
+        activity(&app, "You declined administrator access".into());
+        return reply_text(&tx, &id, false, "The user declined administrator access");
     }
 
     let code = app.state::<AgentState>().code.lock().unwrap().clone();
     let ok = tokio::task::spawn_blocking(move || relaunch_elevated(&code)).await.unwrap_or(false);
     if !ok {
-        activity(&app, "Windows 确认窗口被取消".into());
-        return reply_text(&tx, &id, false, "对方在 Windows 确认窗口里点了「否」，仍是普通权限");
+        activity(&app, "The Windows confirmation was cancelled".into());
+        return reply_text(&tx, &id, false, "The user clicked \"No\" in the Windows confirmation; still running without admin rights");
     }
     reply_text(
         &tx,
         &id,
         true,
-        "对方已同意，程序正在以管理员身份重启。约 5 秒后用同一个协助码重新 connect，对方需要再点一次允许。",
+        "The user agreed; the app is restarting as administrator. In about 5 seconds, connect again with the same code; the user will need to click Allow once more.",
     );
     tokio::time::sleep(Duration::from_millis(500)).await;
     app.exit(0);
@@ -330,7 +330,7 @@ async fn request_admin(app: AppHandle, tx: mpsc::UnboundedSender<String>, id: St
 const RUN_ONCE: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
 const RUN_ONCE_NAME: &str = "AsctrlResume";
 
-/// 登记"下次登录时自动打开一次本程序，用同一个协助码"
+/// Register "open this program once at next sign-in, with the same code"
 fn arm_resume(code: &str) -> Result<(), String> {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
     use windows::core::HSTRING;
@@ -347,7 +347,7 @@ fn arm_resume(code: &str) -> Result<(), String> {
             (data.len() * 2) as u32,
         )
     };
-    if r.is_ok() { Ok(()) } else { Err(format!("写入开机启动项失败：{r:?}")) }
+    if r.is_ok() { Ok(()) } else { Err(format!("Failed to write the startup entry: {r:?}")) }
 }
 
 fn disarm_resume() {
@@ -367,65 +367,65 @@ async fn shutdown_exe(args: &[&str]) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!("shutdown 失败（{}）", out.status.code().unwrap_or(-1)))
+        Err(format!("shutdown failed ({})", out.status.code().unwrap_or(-1)))
     }
 }
 
-/// 重启电脑：先问用户，登记重启后自动打开（协助码不变），然后倒计时重启
+/// Restart the computer: ask the user, register auto-open after restart (same code), then count down and restart
 async fn restart_computer(app: AppHandle, tx: mpsc::UnboundedSender<String>, id: String, args: Value) {
     let flag = |k: &str| args.get(k).and_then(Value::as_bool).unwrap_or(false);
     let code = app.state::<AgentState>().code.lock().unwrap().clone();
 
     if flag("cancel") {
-        activity(&app, "取消了重启".into());
+        activity(&app, "Restart cancelled".into());
         disarm_resume();
         let r = shutdown_exe(&["/a"]).await;
-        return reply_text(&tx, &id, true, if r.is_ok() { "已取消重启" } else { "当前没有待执行的重启，已清除自动打开的登记" });
+        return reply_text(&tx, &id, true, if r.is_ok() { "Restart cancelled" } else { "No restart was pending; the auto-open entry has been cleared" });
     }
 
     if flag("prepareOnly") {
-        activity(&app, "设置了重启后自动打开协助程序".into());
+        activity(&app, "Set the assist app to open after restart".into());
         return match arm_resume(&code) {
             Ok(()) => reply_text(
                 &tx,
                 &id,
                 true,
-                &format!("已登记：下次登录后会自动打开协助程序，协助码仍是 {code}。电脑重启（例如安装程序要求重启、或请对方手动重启）后用同一个协助码 connect。"),
+                &format!("Registered: the assist app will open automatically at next sign-in, with code {code}. After the computer restarts (e.g. an installer asks for it, or the user restarts manually), connect with the same code."),
             ),
             Err(e) => reply_text(&tx, &id, false, &e),
         };
     }
 
     let tech = app.state::<AgentState>().tech_name.lock().unwrap().clone().unwrap_or_default();
-    activity(&app, "请求重启电脑".into());
+    activity(&app, "Requested a restart".into());
     let allow = ask_user(&app, json!({ "state": "reboot", "techName": tech, "timeoutSec": CONSENT_TIMEOUT.as_secs() })).await;
     set_status(&app, connected_status(&app));
     if !allow {
-        activity(&app, "你拒绝了重启".into());
-        return reply_text(&tx, &id, false, "对方拒绝了重启（可能还有没保存的东西）");
+        activity(&app, "You declined the restart".into());
+        return reply_text(&tx, &id, false, "The user declined the restart (they may have unsaved work)");
     }
     if let Err(e) = arm_resume(&code) {
         return reply_text(&tx, &id, false, &e);
     }
     let delay = args.get("delaySec").and_then(Value::as_u64).unwrap_or(15).clamp(5, 600);
-    let msg = format!("远程协助：电脑将在 {delay} 秒后重启，重启后协助程序会自动打开。");
+    let msg = format!("Remote Assist: the computer will restart in {delay} seconds. The assist app will open again afterwards.");
     let d = delay.to_string();
     if let Err(e) = shutdown_exe(&["/r", "/t", &d, "/c", &msg]).await {
         disarm_resume();
         return reply_text(&tx, &id, false, &e);
     }
-    activity(&app, format!("电脑将在 {delay} 秒后重启"));
+    activity(&app, format!("Restarting in {delay} seconds"));
     reply_text(
         &tx,
         &id,
         true,
         &format!(
-            "对方已同意，电脑将在 {delay} 秒后重启（restart_computer cancel=true 可取消）。重启并登录后程序会自动打开，协助码仍是 {code}。通常 1~3 分钟后用同一个协助码 connect，对方需要再点一次允许；如果对方电脑有登录密码，要等对方登录进桌面。"
+            "The user agreed; the computer restarts in {delay} seconds (restart_computer cancel=true cancels it). After restart and sign-in the app opens automatically with code {code}. Usually connect with the same code after 1-3 minutes; the user will need to click Allow again. If the computer has a sign-in password, wait until the user reaches the desktop."
         ),
     );
 }
 
-// ---- 给界面调用的命令 ----
+// ---- Commands called by the UI ----
 
 #[tauri::command]
 fn get_status(st: State<AgentState>) -> Value {
@@ -481,5 +481,5 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("启动失败");
+        .expect("failed to start");
 }

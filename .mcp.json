@@ -6,7 +6,7 @@
       "env": {
         "RELAY_URL": "ws://124.222.182.40:8787",
         "RELAY_TOKEN": "${ASCTRL_RELAY_TOKEN:-}",
-        "TECH_NAME": "技术员"
+        "TECH_NAME": "Technician"
       }
     }
   }
