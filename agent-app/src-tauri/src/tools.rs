@@ -1,6 +1,6 @@
 //! Tools the agent can run. The system_info / list_processes / event_log scripts match the Node version in src/agent/tools.ts.
 
-use crate::{capture, files, input, jobs, jobs::Jobs, powershell, shell::Shell, winmgr};
+use crate::{capture, files, input, jobs, jobs::Jobs, powershell, shell::Shell, uia, winmgr};
 use base64::Engine;
 use serde::Serialize;
 use serde_json::Value;
@@ -252,8 +252,13 @@ async fn blocking(f: impl FnOnce() -> Result<String, String> + Send + 'static) -
     }
 }
 
+/// There is one real mouse and keyboard: calls that drive them run one at a time, so two clicks sent in
+/// parallel can't interleave (one moving the pointer while the other presses). Element actions don't take it.
+static REAL_INPUT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Run a blocking input operation on a background thread, then pause briefly so the UI can refresh
 async fn input_op(f: impl FnOnce() -> Result<(), String> + Send + 'static, done: String) -> Output {
+    let _turn = REAL_INPUT.lock().await;
     match tokio::task::spawn_blocking(f).await {
         Ok(Ok(())) => {
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -443,6 +448,61 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 Ok(format!("{} windows (front to back, handle in brackets):\n{}", ws.len(), lines.join("\n")))
             })
             .await
+        }
+        "list_elements" => {
+            let handle = args.get("handle").and_then(Value::as_i64).map(|h| h as isize);
+            let title = str_arg(args, "title").to_string();
+            let query = str_arg(args, "query").to_string();
+            let max = int_arg(args, "maxResults", 300, 1, 2000) as usize;
+            let offscreen = args.get("includeOffscreen").and_then(Value::as_bool).unwrap_or(false);
+            let g = *ctx.geom.lock().unwrap();
+            blocking(move || {
+                let hwnd = if handle.is_some() || !title.trim().is_empty() { winmgr::find(handle, &title)? } else { uia::foreground() };
+                uia::list(hwnd, &query, max, offscreen, &|x, y| g.and_then(|g| g.screen_to_shot(x, y)))
+            })
+            .await
+        }
+        "element_action" => {
+            let batch = args.get("actions").and_then(Value::as_array);
+            let items: Vec<(u64, String, String)> = match batch {
+                Some(list) => list.iter().map(element_item).collect(),
+                None => vec![element_item(args)],
+            };
+            if items.is_empty() || items.len() > 20 {
+                return fail("Give 1 to 20 actions");
+            }
+            let changes = items.iter().any(|i| i.1 != "text");
+            // Each action on its own thread, all at once: UI Automation calls are independent
+            let runs = items.into_iter().map(|(id, action, value)| tokio::task::spawn_blocking(move || uia::act(id as usize, &action, &value)));
+            let results: Vec<Result<String, String>> =
+                futures_util::future::join_all(runs).await.into_iter().map(|r| r.unwrap_or_else(|e| Err(e.to_string()))).collect();
+            if changes && results.iter().any(Result::is_ok) {
+                // Let the program react before anything looks at the screen again
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+            if batch.is_none() {
+                return match results.into_iter().next() {
+                    Some(Ok(s)) => text(s),
+                    Some(Err(e)) => fail(e),
+                    None => fail("No result"),
+                };
+            }
+            let failed = results.iter().filter(|r| r.is_err()).count();
+            // One line per action, in the order given; fx.ts reads the ✓ / ✗ marks
+            let lines: Vec<String> = results
+                .iter()
+                .enumerate()
+                .map(|(i, r)| match r {
+                    Ok(s) => format!("{}. ✓ {}", i + 1, s),
+                    Err(e) => format!("{}. ✗ {}", i + 1, e),
+                })
+                .collect();
+            let mut o = text(lines.join("\n"));
+            if failed > 0 {
+                o.ok = false;
+                o.error = Some(format!("{failed} of {} actions failed:\n{}", results.len(), o.text.take().unwrap_or_default()));
+            }
+            o
         }
         "focus_window" => {
             let handle = args.get("handle").and_then(Value::as_i64).map(|h| h as isize);
@@ -699,17 +759,45 @@ fn rect_json(r: (i32, i32, i32, i32)) -> Value {
     serde_json::json!([r.0, r.1, r.2 - r.0, r.3 - r.1])
 }
 
+/// (id, action, value) of one element action, from the call itself or one entry of its `actions`
+fn element_item(v: &Value) -> (u64, String, String) {
+    (v.get("id").and_then(Value::as_u64).unwrap_or(0), str_arg(v, "action").to_string(), str_arg(v, "value").to_string())
+}
+
 /// Before a tool runs: where it will click, where it will drag to, which window it acts on
 pub fn fx_before(ctx: &Ctx, tool: &str, args: &Value) -> Value {
     use serde_json::json;
     let pt = |kx: &str, ky: &str| to_screen(ctx, args, kx, ky).ok().map(|(x, y)| json!([x, y]));
     let cur = || input::cursor_pos().ok().map(|(x, y)| json!([x, y]));
     match tool {
-        "click" | "scroll" | "mouse_move" => json!({ "at": pt("x", "y") }),
+        // A click has no controls to go by (often a game drawing its own board): frame the window it lands in
+        "click" => {
+            let at = to_screen(ctx, args, "x", "y").ok();
+            let zone = at.and_then(|(x, y)| winmgr::top_window_at(x, y)).and_then(winmgr::rect_of).map(rect_json);
+            json!({ "at": at.map(|(x, y)| json!([x, y])), "zone": zone, "zoneIsWindow": true })
+        }
+        "scroll" | "mouse_move" => json!({ "at": pt("x", "y") }),
         "mouse_down" | "mouse_up" => json!({ "at": pt("x", "y").or_else(cur) }),
         "drag" => json!({ "from": pt("fromX", "fromY"), "to": pt("toX", "toY") }),
         "zoom" => json!({ "from": pt("x0", "y0"), "to": pt("x1", "y1") }),
         "type_text" | "press_keys" | "hold_key" => json!({ "at": cur() }),
+        // The orb goes to the control instead of the mouse: the user's pointer stays where it is
+        // One virtual cursor per control, flying out of the orb; the user's pointer stays where it is.
+        // null keeps the index of an action that has nothing to point at (text, or an unknown id)
+        "element_action" => {
+            let items: Vec<(u64, String, String)> = match args.get("actions").and_then(Value::as_array) {
+                Some(list) => list.iter().map(element_item).collect(),
+                None => vec![element_item(args)],
+            };
+            let marks: Vec<Option<((i32, i32, i32, i32), String)>> =
+                items.iter().map(|(id, action, _)| uia::mark_of(*id as usize).filter(|_| action != "text")).collect();
+            let targets: Vec<Value> = marks.iter().map(|m| m.as_ref().map_or(Value::Null, |((l, t, r, b), _)| json!([(l + r) / 2, (t + b) / 2]))).collect();
+            let labels: Vec<Value> = marks.iter().map(|m| m.as_ref().map_or(Value::Null, |(_, tag)| json!(tag))).collect();
+            // The controls' own bounds, so the overlay can frame the area being worked on
+            // One fixed frame around everything operable in that window, drawn once for all its actions
+            let area = uia::work_area();
+            json!({ "targets": targets, "labels": labels, "zone": area.map(|(r, _)| rect_json(r)), "zoneIsWindow": area.is_some_and(|(_, w)| w) })
+        }
         "focus_window" => {
             let handle = args.get("handle").and_then(Value::as_i64).map(|h| h as isize);
             match winmgr::find(handle, str_arg(args, "title")) {

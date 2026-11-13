@@ -8,8 +8,13 @@ const layer = document.getElementById("marks") as HTMLDivElement;
 
 export type Tone = "aurora" | "warm" | "mint" | "red";
 
-function at(cls: string, p: Pt, tone: Tone = "aurora") {
+/** A mark at p, coloured by a tone, or by any CSS colour when given */
+function at(cls: string, p: Pt, tone: Tone = "aurora", color?: string) {
   const m = el("div", `${cls} t-${tone}`, layer);
+  if (color) {
+    m.style.setProperty("--b1", `color-mix(in srgb, ${color} 85%, transparent)`);
+    m.style.setProperty("--b2", `color-mix(in srgb, ${color} 38%, transparent)`);
+  }
   m.style.left = `${p.x}px`;
   m.style.top = `${p.y}px`;
   return m;
@@ -23,15 +28,15 @@ function setRect(b: HTMLElement, r: R) {
 }
 
 /** A soft glow blooms from the centre */
-export function bloom(p: Pt, o: { size?: number; ms?: number; tone?: Tone; delay?: number } = {}) {
-  const b = at("bloom", p, o.tone);
+export function bloom(p: Pt, o: { size?: number; ms?: number; tone?: Tone; color?: string; delay?: number } = {}) {
+  const b = at("bloom", p, o.tone, o.color);
   b.style.setProperty("--s", `${o.size ?? 150}px`);
   void playOut(b, [{ transform: "scale(.12)", opacity: 1 }, { transform: "scale(1)", opacity: 0 }], { duration: o.ms ?? 680, delay: o.delay ?? 0 });
 }
 
 /** A thin ring spreads outward (contracts when from > to) */
-export function ripple(p: Pt, o: { size?: number; ms?: number; from?: number; to?: number; delay?: number; tone?: Tone } = {}) {
-  const r = at("ripple", p, o.tone);
+export function ripple(p: Pt, o: { size?: number; ms?: number; from?: number; to?: number; delay?: number; tone?: Tone; color?: string } = {}) {
+  const r = at("ripple", p, o.tone, o.color);
   r.style.setProperty("--s", `${o.size ?? 40}px`);
   const from = o.from ?? 0.35;
   const to = o.to ?? 1.9;
@@ -151,8 +156,9 @@ export class Outline {
   readonly el: HTMLDivElement;
   r: R;
 
-  constructor(r: R, cls = "") {
-    this.r = snapRect(grow(r, 3));
+  /** pad: how far outside r the ring box starts; the ring is 2.5 wide, so less than that overlaps r's edge */
+  constructor(r: R, cls = "", pad = 3) {
+    this.r = snapRect(grow(r, pad));
     this.el = el("div", `ol ${cls}`, layer);
     setRect(this.el, this.r);
     el("i", "ol-glow", this.el);

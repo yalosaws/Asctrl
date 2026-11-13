@@ -27,6 +27,8 @@ export type ToolName =
   | "hold_key"
   | "list_windows"
   | "focus_window"
+  | "list_elements"
+  | "element_action"
   | "open_app"
   | "read_clipboard"
   | "write_clipboard"

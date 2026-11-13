@@ -92,7 +92,9 @@ The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-rel
 | Commands | `run_powershell` ✅ | Runs in a persistent session (directory and variables carry over); `background: true` runs without the timeout |
 | | `job_output` / `stop_job` | Background job progress and new output / stop it (with child processes) |
 | | `reset_shell` | Reset the PowerShell session |
-| Mouse | `click` | Single / double / triple click, left / middle / right, optionally holding ctrl, shift, etc. |
+| Controls | `list_elements` | A window's controls (buttons, boxes, checkboxes, menus, list items, text) as numbered text via UI Automation, with state and centre on the screenshot |
+| | `element_action` | Operate a listed control without the mouse: click, toggle, select, expand / collapse, set_value, focus, scroll, read text. `actions` runs up to 20 at once in parallel. The user's pointer never moves; the orb frames the work area and flings a coloured virtual cursor at each control |
+| Mouse | `click` | Single / double / triple click, left / middle / right, optionally holding ctrl, shift, etc. Real mouse actions run one at a time |
 | | `mouse_move` / `mouse_down` / `mouse_up` | Hover; press, move and release step by step for fine drags |
 | | `mouse_look` | Relative mouse motion in raw counts, for turning first-person game cameras |
 | | `drag` / `scroll` | Drag; vertical or horizontal scroll |

@@ -5,6 +5,7 @@
 
 import { center, home, monitorAt, monitors, primary, pt, rect, type Pt, type R } from "./geo";
 import { orb } from "./orb";
+import { Cursor } from "./cursor";
 import { bloom, capture, dart, hold, Outline, ripple, streaks, strand, sweep, type Tone } from "./light";
 import { breathe, pulse } from "./edge";
 import { closeCard, deckRect, fillEntries, fillLines, openCard, progress, scan, skeleton, termEnd, termStart, type Card } from "./panel";
@@ -19,8 +20,6 @@ export interface FxEvent {
   ok?: boolean;
   text?: string;
 }
-
-const marks = document.getElementById("marks") as HTMLDivElement;
 
 const str = (v: unknown) => (typeof v === "string" ? v : v === undefined || v === null ? "" : String(v));
 const num = (v: unknown, d = 0) => (typeof v === "number" && Number.isFinite(v) ? v : d);
@@ -46,7 +45,8 @@ function release(ok = true, delay = 1500) {
   if (!ok) orb.setMood("error");
   window.clearTimeout(homeTimer);
   homeTimer = window.setTimeout(() => {
-    if (active > 0) return;
+    // While a work area is framed the orb waits over it; it goes home when the frame goes
+    if (active > 0 || zone) return;
     orb.setMood("idle");
     orb.goTo(home(), "slow");
   }, ok ? delay : delay + 1200);
@@ -127,43 +127,109 @@ async function zoomEnd(e: FxEvent) {
 
 let holdMark: HTMLElement | null = null;
 const TONE = (b: string): Tone => (b === "right" ? "warm" : b === "middle" ? "mint" : "aurora");
-const aims = new Map<string, HTMLElement>();
 
-function clickStart(e: FxEvent) {
-  const p = pt(e.geo?.at);
-  if (!p) return;
-  const tone = TONE(str(e.args?.button));
-  const from = { ...orb.pos };
-  near(p);
-  // A beam shoots from the orb to the target, then settles into an aim ring
-  ready.set(
-    e.id,
-    dart(from, p, { tone }).then(() => {
-      const aim = el("div", `aim t-${tone}`, marks);
-      aim.style.left = `${p.x}px`;
-      aim.style.top = `${p.y}px`;
-      aims.set(e.id, aim);
-      play(aim, [{ transform: "scale(2.4)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }], { spring: SPRING.snap });
-    }),
-  );
+/** Virtual cursors out for each call, by action index (an action with nothing to point at has none) */
+const sent = new Map<string, (Cursor | null)[]>();
+
+// ---- Work zone: the area being operated on, framed while the orb works there ----
+
+/** Room left around the controls inside the frame, and the smallest frame drawn */
+const ZONE_PAD = 14;
+const ZONE_MIN = { w: 120, h: 64 };
+
+let zone: { r: R; ol: Outline; timer?: number } | null = null;
+
+function union(a: R, b: R): R {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y };
 }
 
-async function clickEnd(e: FxEvent) {
-  const p = pt(e.geo?.at);
-  await whenReady(e.id);
-  const aim = aims.get(e.id);
-  aims.delete(e.id);
-  if (!p) return void aim?.remove();
-  const tone = TONE(str(e.args?.button));
-  if (!e.ok) {
-    if (aim) void fadeOut(aim, 400, { transform: "scale(1.6)" });
-    ripple(p, { size: 36, tone: "red" });
-    return;
+/** Rectangles together, padded, at least ZONE_MIN, and inside their monitor */
+function zoneOf(rs: R[]): R {
+  let r = rs.reduce(union);
+  r = { x: r.x - ZONE_PAD, y: r.y - ZONE_PAD, w: r.w + ZONE_PAD * 2, h: r.h + ZONE_PAD * 2 };
+  if (r.w < ZONE_MIN.w) r = { ...r, x: r.x - (ZONE_MIN.w - r.w) / 2, w: ZONE_MIN.w };
+  if (r.h < ZONE_MIN.h) r = { ...r, y: r.y - (ZONE_MIN.h - r.h) / 2, h: ZONE_MIN.h };
+  const m = monitorAt(center(r)).bounds;
+  const x = Math.max(m.x + 2, r.x);
+  const y = Math.max(m.y + 2, r.y);
+  return { x, y, w: Math.min(m.x + m.w - 2, r.x + r.w) - x, h: Math.min(m.y + m.h - 2, r.y + r.h) - y };
+}
+
+/** Where the orb waits: centred above the zone, or below it when there is no room above, or inside its top edge */
+function zoneSpot(r: R): Pt {
+  const work = monitorAt(center(r)).work;
+  const x = Math.min(work.x + work.w - 30, Math.max(work.x + 30, r.x + r.w / 2));
+  if (r.y - 34 >= work.y + 24) return { x, y: r.y - 34 };
+  if (r.y + r.h + 34 <= work.y + work.h - 24) return { x, y: r.y + r.h + 34 };
+  return { x, y: r.y + 30 };
+}
+
+/**
+ * Frame the area being worked on (where all the window's operable controls are) and bring the orb over it.
+ * The frame is drawn once and stays put while actions keep landing in it; it is only redrawn when the work
+ * moves to a different area. Resolves once the orb is in place.
+ */
+function frameZone(r: R, hug = false): Promise<void> {
+  const same = (a: R, b: R) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.w - b.w) + Math.abs(a.h - b.h) < 8;
+  if (zone) window.clearTimeout(zone.timer);
+  if (zone && !same(zone.r, r)) {
+    void zone.ol.out("fade", 300);
+    zone = null;
   }
-  if (aim) void fadeOut(aim, 260, { transform: "scale(.5)" });
-  const n = Math.max(1, Math.min(3, num(e.args?.count, 1)));
-  bloom(p, { size: 130, ms: 620, tone });
-  for (let i = 0; i < n; i++) ripple(p, { size: 34, ms: 560, to: 1.9 + i * 0.35, tone, delay: i * 130 });
+  // Around a whole window the ring overlaps its edge by 1.5 px (the ring is 2.5 wide), so rounding to device
+  // pixels can never open a gap between them; around a group of controls it has room
+  if (!zone) zone = { r, ol: new Outline(r, "", hug ? 1 : 3).popIn().trace(560) };
+  const spot = zoneSpot(zone.r);
+  const far = Math.hypot(orb.pos.x - spot.x, orb.pos.y - spot.y) > 24;
+  orb.goTo(spot, "fast");
+  return far ? sleep(360) : Promise.resolve();
+}
+
+/** Let the frame go a while after the last action in it (long enough to span the pause between steps), then send the orb home */
+function unframeLater(ms = 8000) {
+  const z = zone;
+  if (!z) return;
+  window.clearTimeout(z.timer);
+  z.timer = window.setTimeout(() => {
+    if (zone !== z) return;
+    void z.ol.out("fade", 420);
+    zone = null;
+    if (active > 0) return;
+    orb.setMood("idle");
+    orb.goTo(home(), "slow");
+  }, ms);
+}
+
+/** Clicks and element actions: the orb frames the area, flies over it, then sends a virtual cursor to each target */
+function dispatchStart(e: FxEvent) {
+  const targets = Array.isArray(e.geo?.targets) ? (e.geo.targets as unknown[]).map(pt) : [pt(e.geo?.at)];
+  if (!targets.some(Boolean)) return;
+  // The agent says where the work area is (all operable controls, or the window a click lands in);
+  // failing that, frame just the targets
+  const given = rect(e.geo?.zone);
+  const inPlace = given && e.geo?.zoneIsWindow === true ? frameZone(given, true) : frameZone(given ? zoneOf([given]) : zoneOf(targets.flatMap((p) => (p ? [{ x: p.x, y: p.y, w: 0, h: 0 }] : []))));
+  // The orb spins up on the way and flings each cursor off its rim as its colour comes round
+  orb.whirl(1000 + targets.length * 120);
+  const cursors = targets.map((p) => (p ? new Cursor() : null));
+  sent.set(e.id, cursors);
+  const labels = Array.isArray(e.geo?.labels) ? (e.geo.labels as unknown[]) : [];
+  ready.set(e.id, inPlace.then(() => Promise.all(cursors.map((c, i) => c?.go(targets[i]!, str(labels[i]))))).then(() => {}));
+}
+
+async function dispatchEnd(e: FxEvent) {
+  await whenReady(e.id);
+  const cursors = sent.get(e.id) ?? [];
+  sent.delete(e.id);
+  // A batch reports each action on its own line ("2. ✗ …"), so only the ones that failed flash red
+  const failed = new Set<number>();
+  for (const m of (e.text ?? "").matchAll(/^(\d+)\. ✗/gm)) failed.add(Number(m[1]) - 1);
+  const batch = Array.isArray(e.args?.actions);
+  const count = Math.max(1, Math.min(3, num(e.args?.count, 1)));
+  const whole = !e.ok && failed.size === 0; // the call failed before any action ran
+  cursors.forEach((c, i) => c && void c.finish(batch && !whole ? !failed.has(i) : !!e.ok, count));
+  unframeLater();
 }
 
 function moveStart(e: FxEvent) {
@@ -454,14 +520,15 @@ const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
 export function fxStart(e: FxEvent) {
   started.set(e.id, { args: e.args, geo: e.geo });
   // Screenshots only breathe the edge at the end; listing windows changes nothing and draws nothing
-  if (e.tool === "screenshot" || e.tool === "list_windows") return;
+  if (e.tool === "screenshot" || e.tool === "list_windows" || e.tool === "list_elements") return;
   attend();
   pulse();
   switch (e.tool) {
     case "zoom":
       return zoomStart(e);
     case "click":
-      return clickStart(e);
+    case "element_action":
+      return dispatchStart(e);
     case "mouse_move":
       return moveStart(e);
     case "mouse_down":
@@ -496,7 +563,7 @@ export function fxEnd(ev: FxEvent) {
   const e: FxEvent = { ...ev, args: ev.args ?? st?.args ?? {}, geo: { ...(st?.geo ?? {}), ...(ev.geo ?? {}) } };
   const ok = !!e.ok;
   // Never woke the orb at start, so there is nothing to release
-  if (e.tool === "list_windows") return;
+  if (e.tool === "list_windows" || e.tool === "list_elements") return;
   switch (e.tool) {
     case "screenshot":
       // Screenshots only breathe the edge; they never woke the orb, so there is nothing to release
@@ -505,7 +572,8 @@ export function fxEnd(ev: FxEvent) {
       void zoomEnd(e);
       break;
     case "click":
-      void clickEnd(e);
+    case "element_action":
+      void dispatchEnd(e);
       break;
     case "focus_window":
       void winEnd(e);

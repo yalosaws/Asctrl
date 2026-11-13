@@ -78,8 +78,8 @@ async function forward(tool: ToolName, args: Record<string, unknown>): Promise<R
 }
 
 /** Mouse and keyboard actions: by default take a screenshot afterwards so the result is visible */
-async function act(tool: ToolName, args: Record<string, unknown> & { screenshot?: boolean }): Promise<Reply> {
-  const { screenshot = true, ...rest } = args;
+async function act(tool: ToolName, args: Record<string, unknown> & { screenshot?: boolean }, shotByDefault = true): Promise<Reply> {
+  const { screenshot = shotByDefault, ...rest } = args;
   const r = await forward(tool, rest);
   if (r.isError || !screenshot) return r;
   const shot = await forward("screenshot", { maxWidth: lastMaxWidth, display: lastDisplay });
@@ -319,7 +319,10 @@ server.registerTool(
 server.registerTool(
   "click",
   {
-    description: "Click on the remote screen. Coordinates are pixels on the latest screenshot.",
+    description:
+      "Click on the remote screen by moving the user's real mouse pointer. Coordinates are pixels on the latest screenshot. " +
+      "For buttons, boxes, menus and lists in ordinary programs, prefer list_elements + element_action: they don't take over the user's mouse. " +
+      "Use click for games, canvases, remote desktops, or when element_action says it can't.",
     inputSchema: {
       x: coord("x"),
       y: coord("y"),
@@ -465,6 +468,60 @@ server.registerTool(
     },
   },
   (a) => act("focus_window", a),
+);
+
+// ---------- Controls (UI Automation): operate programs without the mouse ----------
+
+const elementVerb = z.enum(["click", "toggle", "select", "expand", "collapse", "set_value", "focus", "scroll", "scroll_into_view", "text"]);
+
+server.registerTool(
+  "list_elements",
+  {
+    description:
+      "List the controls of a window (buttons, text boxes, checkboxes, menus, list and tree items, tabs, links, text) as text, numbered for element_action. " +
+      "Each line: [id] Type \"name\" value=\"…\" (state) {what it supports} @(x,y centre on the latest screenshot). " +
+      "Much cheaper than a screenshot for finding and reading things, and works without one. Defaults to the window in front. " +
+      "Ids are valid until the next list_elements. Programs that draw their own UI (games, remote desktops, some canvases) show little or nothing; use screenshot + click there.",
+    inputSchema: {
+      handle: z.number().int().optional().describe("Window handle from list_windows; default the window in front"),
+      title: z.string().optional().describe("Or a title / program-name keyword"),
+      query: z.string().optional().describe("Only list controls whose line contains this text (case-insensitive), e.g. a button label or 'Edit'"),
+      maxResults: z.number().int().min(1).max(2000).optional().describe("Default 300"),
+      includeOffscreen: z.boolean().optional().describe("Also list controls scrolled out of view; default false"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  (a) => forward("list_elements", a),
+);
+
+server.registerTool(
+  "element_action",
+  {
+    description:
+      "Operate a control from list_elements directly through Windows UI Automation. The user's mouse and keyboard focus are not touched (except action focus), " +
+      "and it works even when the window is partly covered. Actions: click (default; presses buttons, links and menu items, or toggles / selects / expands whatever the control is), " +
+      "toggle, select, expand, collapse, set_value (fills a text box or slider with value, replacing its content), focus, " +
+      "scroll (value up / down / left / right, add :page for a page, e.g. down:page), scroll_into_view, text (returns the control's full text, e.g. a document or a long message). " +
+      "Parallel: pass actions (up to 20) instead of id/action/value to run several at the same time, e.g. fill every field of a form or tick several boxes in one call; " +
+      "they run concurrently in no set order, so steps that depend on each other (open a menu, then pick an item) need separate calls. " +
+      "No screenshot afterwards by default: check the result with list_elements (cheap) or pass screenshot: true.",
+    inputSchema: {
+      id: z.number().int().min(1).optional().describe("The number in brackets from list_elements"),
+      action: elementVerb.optional(),
+      value: z.string().optional().describe("For set_value: the new content. For scroll: the direction"),
+      actions: z
+        .array(z.object({ id: z.number().int().min(1), action: elementVerb.optional(), value: z.string().optional() }))
+        .min(1)
+        .max(20)
+        .optional()
+        .describe("Several actions to run at the same time, instead of id/action/value"),
+      screenshot: z.boolean().optional().describe("Take a screenshot after the action; default false"),
+    },
+  },
+  (a) =>
+    a.id === undefined && !a.actions
+      ? Promise.resolve({ content: [{ type: "text" as const, text: "Give id, or actions" }], isError: true })
+      : act("element_action", a, false),
 );
 
 server.registerTool(

@@ -97,6 +97,17 @@ export async function runDemo(h: Hooks) {
     await sleep(800);
     await s("press_keys", { keys: "ctrl+s" }, {}, 600);
     await sleep(1200);
+    // Several controls at once: one virtual cursor each, the third one fails
+    const f = (x: number, y: number) => [b[0] + b[2] * x, b[1] + b[3] * y];
+    await s(
+      "element_action",
+      { actions: [{ id: 3 }, { id: 4, action: "toggle" }, { id: 7 }, { id: 9, action: "set_value", value: "8.8.8.8" }] },
+      { targets: [f(0.25, 0.3), f(0.7, 0.3), f(0.3, 0.7), f(0.75, 0.75)], labels: ["Wi-Fi", "Metered connection", "Advanced", "Preferred DNS"] },
+      700,
+      false,
+      "1. ✓ Clicked [3]\n2. ✓ [4] is now checked\n3. ✗ [7] can't be clicked without the mouse\n4. ✓ Set [9] to \"8.8.8.8\"",
+    );
+    await sleep(1600);
     await s("run_powershell", { script: "Get-NetAdapter | Select Name, Status, LinkSpeed" }, {}, 1900, true, NET);
     await sleep(1400);
     await s("run_powershell", { script: "ipconfig /flushdns" }, {}, 1200, true, "Windows IP Configuration\n\nSuccessfully flushed the DNS Resolver Cache.");

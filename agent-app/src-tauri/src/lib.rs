@@ -9,6 +9,7 @@ mod overlay;
 mod powershell;
 mod shell;
 mod tools;
+mod uia;
 mod winmgr;
 
 use futures_util::{SinkExt, StreamExt};

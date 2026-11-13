@@ -88,15 +88,22 @@ fn check_target(at: Option<(i32, i32)>) -> Result<(), String> {
     if let Some((x, y)) = at {
         targets.push(unsafe { WindowFromPoint(POINT { x, y }) });
     }
-    for hwnd in targets {
-        if let Some((true, name)) = window_elevated(hwnd) {
-            return Err(format!(
-                "{name} is running as administrator, so Windows blocks mouse and keyboard input to it from the assist app. \
-                 Call request_admin (the user approves), then connect again with the same code, and retry."
-            ));
-        }
+    targets.into_iter().try_for_each(|h| elevation_block(h, "mouse and keyboard input to it"))
+}
+
+/// Err when `hwnd` belongs to an elevated program and this one is not: Windows (UIPI) blocks input and
+/// UI Automation from a non-elevated program to it. `what` names what is blocked.
+pub fn elevation_block(hwnd: HWND, what: &str) -> Result<(), String> {
+    if token_elevated(unsafe { GetCurrentProcess() }) == Some(true) {
+        return Ok(());
     }
-    Ok(())
+    match window_elevated(hwnd) {
+        Some((true, name)) => Err(format!(
+            "{name} is running as administrator, so Windows blocks {what} from the assist app. \
+             Call request_admin (the user approves), then connect again with the same code, and retry."
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn key(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {

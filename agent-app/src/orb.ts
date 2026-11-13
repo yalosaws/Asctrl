@@ -9,6 +9,11 @@ export type Mood = "idle" | "ready" | "work" | "focus" | "ask" | "happy" | "erro
 /** Spin speed of the orb in each mood */
 const SPIN: Record<Mood, number> = { idle: 0.6, ready: 1, work: 2.8, focus: 1.7, ask: 1.1, happy: 1.6, error: 0.5, offline: 0 };
 
+/** One turn of the colour wheel at speed 1 */
+const SPIN_MS = 5200;
+/** Spin speed while flinging cursors out (about 0.4 s a turn) */
+const WHIRL = 12;
+
 const q = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
 class Orb {
@@ -19,9 +24,13 @@ class Orb {
   private halo = q<HTMLDivElement>(".orb-halo");
   private tail = q<HTMLDivElement>(".orb-tail");
   private spin = q<HTMLDivElement>(".orb-core").animate([{ transform: "rotate(0turn)" }, { transform: "rotate(1turn)" }], {
-    duration: 5200,
+    duration: SPIN_MS,
     iterations: Infinity,
   });
+  /** Spin speed right now; eases toward the mood's speed, or toward WHIRL while whirling */
+  private rate = SPIN.idle;
+  private whirlUntil = 0;
+  private ramping = false;
 
   pos: Pt = { x: -200, y: -200 };
   vel: Pt = { x: 0, y: 0 };
@@ -44,7 +53,7 @@ class Orb {
     const was = this.mood;
     this.mood = m;
     this.el.dataset.mood = m;
-    this.spin.updatePlaybackRate(SPIN[m]);
+    this.ramp();
     if (m === "error" && was !== "error") {
       play(this.bumper, [{ transform: "translateX(0)" }, { transform: "translateX(-7px)" }, { transform: "translateX(6px)" }, { transform: "translateX(-3px)" }, { transform: "translateX(0)" }], {
         duration: 380,
@@ -101,6 +110,36 @@ class Orb {
   bump(strength = 1) {
     play(this.bumper, [{ transform: `scale(${1 + 0.3 * strength})` }, { transform: "scale(1)" }], { spring: SPRING.bounce, fill: "none" });
     play(this.halo, [{ opacity: 1, transform: `scale(${1 + 0.45 * strength})` }, { opacity: 0.55, transform: "scale(1)" }], { duration: 620, fill: "none" });
+  }
+
+  /** Spin up hard for a while (to fling something out), then wind back down to the mood's speed */
+  whirl(ms = 900) {
+    this.whirlUntil = Math.max(this.whirlUntil, performance.now() + ms);
+    this.ramp();
+  }
+
+  /** Where the colour wheel is turned to, in degrees clockwise */
+  get turn(): number {
+    const t = Number(this.spin.currentTime ?? 0);
+    return (((t / SPIN_MS) % 1) + 1) % 1 * 360;
+  }
+
+  /** Ease the spin speed toward its goal; only runs while the speed is changing */
+  private ramp() {
+    if (this.ramping) return;
+    this.ramping = true;
+    onFrame((dt) => {
+      const whirling = performance.now() < this.whirlUntil;
+      const goal = whirling ? WHIRL : SPIN[this.mood];
+      // Quick to spin up, slower to wind down
+      this.rate += (goal - this.rate) * Math.min(1, dt * (whirling ? 9 : 3.5));
+      if (!whirling && Math.abs(goal - this.rate) < 0.02) this.rate = goal;
+      this.spin.updatePlaybackRate(this.rate);
+      if (!whirling && this.rate === goal) {
+        this.ramping = false;
+        return false;
+      }
+    });
   }
 
   setBusy(on: boolean) {
