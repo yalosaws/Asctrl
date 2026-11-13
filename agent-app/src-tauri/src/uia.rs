@@ -384,11 +384,10 @@ pub fn act(id: usize, action: &str, value: &str) -> Result<String, String> {
     let auto = automation()?;
     // A stale element (its window closed or the control was rebuilt) fails here with a clear message
     unsafe { el.CurrentProcessId() }.map_err(|_| format!("Element [{id}] no longer exists; call list_elements again"))?;
-    if let Ok(h) = unsafe { el.CurrentNativeWindowHandle() } {
-        if !h.is_invalid() {
+    if let Ok(h) = unsafe { el.CurrentNativeWindowHandle() }
+        && !h.is_invalid() {
             crate::input::elevation_block(h, "operating its controls")?;
         }
-    }
     match action {
         "" | "click" | "invoke" => {
             if let Some(p) = pattern::<IUIAutomationInvokePattern>(&el, UIA_InvokePatternId) {
@@ -412,12 +411,11 @@ pub fn act(id: usize, action: &str, value: &str) -> Result<String, String> {
                 unsafe { p.Collapse() }.map_err(|e| fail("Collapse", e))?;
                 return Ok(format!("Collapsed [{id}]"));
             }
-            if let Some(p) = pattern::<IUIAutomationLegacyIAccessiblePattern>(&el, UIA_LegacyIAccessiblePatternId) {
-                if unsafe { p.CurrentDefaultAction() }.is_ok_and(|a| !a.is_empty()) {
+            if let Some(p) = pattern::<IUIAutomationLegacyIAccessiblePattern>(&el, UIA_LegacyIAccessiblePatternId)
+                && unsafe { p.CurrentDefaultAction() }.is_ok_and(|a| !a.is_empty()) {
                     unsafe { p.DoDefaultAction() }.map_err(|e| fail("Click", e))?;
                     return Ok(format!("Clicked [{id}] (default action)"));
                 }
-            }
             Err(format!("[{id}] can't be clicked without the mouse; use click at its @(x,y) instead"))
         }
         "toggle" => {

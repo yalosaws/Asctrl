@@ -110,11 +110,10 @@ fn fx_args(args: &Value) -> Value {
     if let Some(o) = a.as_object_mut() {
         o.remove("data");
         for v in o.values_mut() {
-            if let Some(t) = v.as_str() {
-                if t.chars().count() > 4000 {
+            if let Some(t) = v.as_str()
+                && t.chars().count() > 4000 {
                     *v = json!(t.chars().take(4000).collect::<String>());
                 }
-            }
         }
     }
     a
@@ -224,11 +223,10 @@ async fn connect_once(app: &AppHandle) -> Result<(), String> {
                 None => break Err("Lost the connection to the server".into()),
                 Some(Err(e)) => break Err(e.to_string()),
                 Some(Ok(WsMsg::Text(t))) => {
-                    if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
-                        if let Err(e) = handle(app, &tx, v) {
+                    if let Ok(v) = serde_json::from_str::<Value>(t.as_str())
+                        && let Err(e) = handle(app, &tx, v) {
                             break Err(e);
                         }
-                    }
                 }
                 Some(Ok(_)) => {}
             }

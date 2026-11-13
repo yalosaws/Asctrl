@@ -89,7 +89,7 @@ pub fn decode(b: &[u8]) -> Result<(String, Enc), String> {
     if b.starts_with(&[0xFF, 0xFE]) || b.starts_with(&[0xFE, 0xFF]) {
         let le = b[0] == 0xFF;
         let u: Vec<u16> =
-            b[2..].chunks_exact(2).map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) }).collect();
+            b[2..].as_chunks::<2>().0.iter().map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) }).collect();
         return Ok((String::from_utf16_lossy(&u), if le { Enc::Utf16Le } else { Enc::Utf16Be }));
     }
     if looks_binary(b) {
@@ -326,11 +326,10 @@ fn walk(root: &Path, depth: usize, f: &mut dyn FnMut(&Path, &std::fs::Metadata) 
             if depth > 0 && !walk(&p, depth - 1, f) {
                 return false;
             }
-        } else if let Ok(m) = e.metadata() {
-            if !f(&p, &m) {
+        } else if let Ok(m) = e.metadata()
+            && !f(&p, &m) {
                 return false;
             }
-        }
     }
     true
 }
@@ -352,7 +351,7 @@ pub fn find(root: &Path, pattern: &str, max: usize) -> Result<String, String> {
         }
         true
     });
-    hits.sort_by(|a, b| b.2.cmp(&a.2));
+    hits.sort_by_key(|h| std::cmp::Reverse(h.2));
     let mut out = format!("Found {}{} under {} (newest first)\n", hits.len(), if more { "+" } else { "" }, root.display());
     for (p, size, t) in &hits {
         let _ = writeln!(out, "{:<16}  {:>10}  {}", fmt_time(*t), fmt_size(*size), p.display());
@@ -437,7 +436,7 @@ fn du_dir(path: &Path, depth: usize, per_level: usize, s: &mut DuScan) -> DuDir 
         }
     }
     if depth > 0 {
-        subs.sort_by(|a, b| b.size.cmp(&a.size));
+        subs.sort_by_key(|s| std::cmp::Reverse(s.size));
         for c in subs.drain(per_level.min(subs.len())..) {
             d.rest.0 += 1;
             d.rest.1 += c.size;

@@ -180,7 +180,7 @@ pub fn setup(app: &AppHandle) {
                 }
             }
             // Fallback: another topmost window may cover it without a foreground change, so re-raise every 0.3 s
-            if tick % 10 == 0 {
+            if tick.is_multiple_of(10) {
                 raise();
             }
         }

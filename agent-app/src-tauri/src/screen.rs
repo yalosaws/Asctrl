@@ -24,7 +24,7 @@ pub fn print(area: Area) -> Option<Print> {
     let w = (area.width / STEP).clamp(1, 1600);
     let h = ((area.height as i64 * w as i64 / area.width.max(1) as i64) as i32).max(1);
     let bgra = capture::pixels(area, w, h, false).ok()?;
-    let px = bgra.chunks_exact(4).map(|p| ((p[0] as u32 + 2 * p[1] as u32 + p[2] as u32) / 4) as u8).collect();
+    let px = bgra.as_chunks::<4>().0.iter().map(|p| ((p[0] as u32 + 2 * p[1] as u32 + p[2] as u32) / 4) as u8).collect();
     Some(Print { area, w, h, px })
 }
 

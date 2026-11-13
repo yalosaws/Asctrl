@@ -211,11 +211,10 @@ impl Jobs {
 
     pub fn stop_all(&mut self) {
         for (_, j) in self.map.drain() {
-            if j.exit.lock().unwrap().is_none() {
-                if let Some(pid) = j.pid {
+            if j.exit.lock().unwrap().is_none()
+                && let Some(pid) = j.pid {
                     kill_tree(pid);
                 }
-            }
         }
     }
 }

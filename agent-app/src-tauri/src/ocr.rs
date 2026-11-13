@@ -51,8 +51,8 @@ pub fn read(area: Area) -> Result<Vec<Line>, String> {
     let engine = engine()?;
     let max = OcrEngine::MaxImageDimension().unwrap_or(10000) as i32;
     // Small regions are enlarged: the engine reads text best at 20+ pixels tall
-    let up = if (area.width as i64 * area.height as i64) < 900 * 700 { 2.0 } else { 1.0 };
-    let k = (up as f64).min(max as f64 / area.width.max(area.height) as f64);
+    let up: f64 = if (area.width as i64 * area.height as i64) < 900 * 700 { 2.0 } else { 1.0 };
+    let k = up.min(max as f64 / area.width.max(area.height) as f64);
     let (w, h) = (((area.width as f64 * k) as i32).max(1), ((area.height as f64 * k) as i32).max(1));
     let px = capture::pixels(area, w, h, true)?;
     let ocr = |e: windows::core::Error| format!("OCR failed: {}", e.message());

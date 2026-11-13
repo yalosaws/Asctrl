@@ -111,6 +111,16 @@ pub fn find(handle: Option<isize>, query: &str) -> Result<HWND, String> {
         .ok_or(format!("No window whose title or program name contains \"{query}\"; try list_windows first"))
 }
 
+/// We run in the background, and Windows keeps a background process from bringing windows to the front.
+/// A simulated Alt press counts as the user's input, which lifts that lock for us.
+fn unlock_foreground() {
+    let alt = |flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_MENU, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+    };
+    unsafe { SendInput(&[alt(KEYBD_EVENT_FLAGS(0)), alt(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32) };
+}
+
 pub fn act(h: HWND, action: &str) -> Result<String, String> {
     unsafe {
         match action {
@@ -118,12 +128,7 @@ pub fn act(h: HWND, action: &str) -> Result<String, String> {
                 if IsIconic(h).as_bool() {
                     let _ = ShowWindow(h, SW_RESTORE);
                 }
-                // A background process can't just take focus: simulate an Alt press first so Windows allows SetForegroundWindow
-                let alt = |flags| INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_MENU, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
-                };
-                SendInput(&[alt(KEYBD_EVENT_FLAGS(0)), alt(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32);
+                unlock_foreground();
                 let _ = BringWindowToTop(h);
                 if !SetForegroundWindow(h).as_bool() {
                     return Err("Windows refused to switch windows (the target may be running as administrator)".into());
@@ -161,16 +166,10 @@ pub fn act(h: HWND, action: &str) -> Result<String, String> {
 pub fn open(target: &str, args: &str, cwd: &str) -> Result<Option<isize>, String> {
     let before: std::collections::HashSet<isize> = list().iter().map(|w| w.handle).collect();
     let fg0 = foreground();
-    // We run in the background, so Windows would normally keep the new program's window behind the current one.
-    // A simulated Alt press lets us hand the foreground on, and AllowSetForegroundWindow passes that right to the launched program.
-    unsafe {
-        let alt = |flags| INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_MENU, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
-        };
-        SendInput(&[alt(KEYBD_EVENT_FLAGS(0)), alt(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32);
-        let _ = AllowSetForegroundWindow(ASFW_ANY);
-    }
+    // Otherwise the new program's window would open behind the current one: take the right to set the
+    // foreground, and pass it on to the program being launched
+    unlock_foreground();
+    let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
     let t = HSTRING::from(target);
     let a = HSTRING::from(args);
     let d = HSTRING::from(cwd);
@@ -210,11 +209,10 @@ pub fn open(target: &str, args: &str, cwd: &str) -> Result<Option<isize>, String
     // Let it settle: windows often resize or replace a splash screen right after appearing
     std::thread::sleep(std::time::Duration::from_millis(500));
     let h = came_up().or(found).filter(|&h| rect_of(h).is_some());
-    if let Some(h) = h {
-        if foreground() != h {
+    if let Some(h) = h
+        && foreground() != h {
             let _ = act(HWND(h as *mut _), "focus");
         }
-    }
     Ok(h)
 }
 
