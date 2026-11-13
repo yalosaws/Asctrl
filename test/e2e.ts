@@ -3,9 +3,11 @@
 //        npm test -- --app <exe path>  tests the GUI agent (needs a debug build)
 
 import { spawn } from "node:child_process";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { startRelay } from "../src/relay/server.ts";
-import { TechClient } from "../src/console/tech-client.ts";
+import { TechClient, readLocalInfo } from "../src/console/tech-client.ts";
 
 const PORT = 18787;
 const CODE = "123456";
@@ -23,10 +25,14 @@ const UPLOAD_NAME = "上传.txt";
 const appIdx = process.argv.indexOf("--app");
 const appExe = appIdx >= 0 ? process.argv[appIdx + 1] : undefined;
 
+// This run's driver writes its address to its own file, so a driver the user already has running is left alone
+const localFile = path.join(tmpdir(), `asctrl-e2e-local-${process.pid}.json`);
+process.env.ASCTRL_LOCAL_FILE = localFile;
+
 const agent = appExe
-  ? spawn(appExe, [], {
+  ? spawn(appExe, ["--code", CODE, "--relay", `ws://localhost:${PORT}`], {
       stdio: ["ignore", "pipe", "inherit"],
-      env: { ...process.env, ASCTRL_RELAY_URL: `ws://localhost:${PORT}`, ASCTRL_CODE: CODE },
+      env: { ...process.env, ASCTRL_CODE: CODE },
     })
   : spawn(
       process.execPath,
@@ -85,7 +91,7 @@ try {
 
   if (appExe) {
     // ---- Only the GUI agent supports these ----
-    check("screenshot reports its size", /Screenshot \d+x\d+/.test(shot.text ?? ""), shot.text);
+    check("screenshot reports its size", /Screenshot .*\d+x\d+/.test(shot.text ?? ""), shot.text);
     const jpg = Buffer.from(shot.image!.data, "base64");
     check("screenshot is a JPEG", jpg[0] === 0xff && jpg[1] === 0xd8 && jpg.length > 2000, `${jpg.length} bytes`);
 
@@ -128,7 +134,7 @@ try {
     const badKey = await tech.call("press_keys", { keys: "ctrl+notakey" });
     check("unknown key is rejected", !badKey.ok, badKey.error);
 
-    const shift = await tech.call("press_keys", { keys: "shift" });
+    const shift = await tech.call("press_keys", { keys: "shift", after: "none" });
     check("press_keys (Shift alone)", shift.ok, shift.error);
 
     // ---- Viewing ----
@@ -138,17 +144,24 @@ try {
     check("screenshot of one display", one.ok && !!one.text?.includes("display #1"), one.text ?? one.error);
     const none = await tech.call("screenshot", { display: 16 });
     check("missing display is rejected", !none.ok, none.error);
-    const cur = await tech.call("cursor_position");
-    check("cursor_position", cur.ok && /\(\d+, \d+\)/.test(cur.text ?? ""), cur.text ?? cur.error);
+    // Reading the window in front can only fail for a window that runs as administrator
+    const obs = await tech.call("observe", { max: 5 });
+    check("observe names the window in front and the pointer", (obs.ok && /In front|No window/.test(obs.text ?? "") && /Pointer @/.test(obs.text ?? "")) || /administrator/.test(obs.error ?? ""), (obs.text ?? obs.error)?.split("\n")[0]);
+    const noRef = await tech.call("click", { target: "e999999" });
+    check("an unknown reference is rejected", !noRef.ok && /no e999999/.test(noRef.error ?? ""), noRef.error);
+    const both = await tech.call("click", { target: "OK", x: 1, y: 1 });
+    check("target and x,y together are rejected", !both.ok, both.error);
     const wins = await tech.call("list_windows");
     check("list_windows", wins.ok && /\d+ windows/.test(wins.text ?? ""), wins.text?.split("\n")[0] ?? wins.error);
-    const noWin = await tech.call("focus_window", { title: "no-such-window-asctrl" });
+    const noWin = await tech.call("focus_window", { window: "no-such-window-asctrl" });
     check("focus_window errors when not found", !noWin.ok, noWin.error);
-    const badHold = await tech.call("hold_key", { keys: "notakey", seconds: 0.1 });
-    check("hold_key rejects unknown keys", !badHold.ok, badHold.error);
-    const noLook = await tech.call("mouse_look", {});
-    check("mouse_look rejects an empty move", !noLook.ok, noLook.error);
-    const sym = await tech.call("press_keys", { keys: "shift+/" });
+    const badHold = await tech.call("press_keys", { keys: "notakey", holdSec: 0.1 });
+    check("press_keys rejects unknown keys when holding", !badHold.ok, badHold.error);
+    const badSeq = await tech.call("press_keys", { keys: "shift notakey" });
+    check("a key sequence with an unknown key presses nothing", !badSeq.ok && /Unknown key/.test(badSeq.error ?? ""), badSeq.error);
+    const noLook = await tech.call("mouse", { action: "look" });
+    check("mouse look rejects an empty move", !noLook.ok, noLook.error);
+    const sym = await tech.call("press_keys", { keys: "shift+/", after: "none" });
     check("press_keys supports symbol keys", sym.ok, sym.error);
 
     // ---- Files ----
@@ -233,6 +246,31 @@ try {
     check("restart_computer cancel clears the entry", cancel.ok && reg2.text?.trim() === "False", reg2.text);
 
     await tech.call("run_powershell", { script: "Remove-Item -Recurse -Force $env:TEMP\\asctrl-e2e-files" });
+
+    // ---- The local link: straight to the driver on this machine, no relay ----
+    const info = readLocalInfo();
+    check("the driver publishes its local address", !!info && info.port > 0 && info.token.length >= 32, info ? `port ${info.port}` : "no file");
+    if (info) {
+      const local = new TechClient("unused", "Local tester");
+      await local.connectLocal(info).then(
+        () => check("one controller at a time: local is refused while the relay one drives", false),
+        (e) => check("one controller at a time: local is refused while the relay one drives", /already controlling/.test(e.message), e.message),
+      );
+      await new TechClient("unused").connectLocal({ ...info, token: "0".repeat(info.token.length) }).then(
+        () => check("a wrong local token is refused", false),
+        (e) => check("a wrong local token is refused", /Wrong token/.test(e.message), e.message),
+      );
+      tech.disconnect();
+      await new Promise((r) => setTimeout(r, 500));
+      const host = await local.connectLocal(info).catch((e) => String(e));
+      check("local link connects once the relay controller has left", local.connected && local.local, host);
+      const viaLocal = await local.call("run_powershell", { script: "'over the local link'" });
+      check("a tool call over the local link", viaLocal.ok && !!viaLocal.text?.includes("over the local link"), viaLocal.text ?? viaLocal.error);
+      local.disconnect();
+      await new Promise((r) => setTimeout(r, 500));
+      await tech.connect(CODE);
+      check("the relay controller can come back after the local one leaves", tech.connected);
+    }
   }
 
   const hanging = tech.call("run_powershell", { script: "Start-Sleep -Seconds 20" });
@@ -246,6 +284,7 @@ try {
 } finally {
   agent.kill();
   relay.close();
+  rmSync(localFile, { force: true });
   console.log(failed ? `\n${failed} failed` : "\nAll passed");
   process.exit(failed ? 1 : 0);
 }

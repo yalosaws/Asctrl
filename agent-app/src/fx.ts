@@ -599,6 +599,9 @@ function termCommand(e: FxEvent): string {
 
 // ---- Dispatch ----
 
+/** Tools that only look: they draw nothing and never wake the orb (a screenshot breathes the edge once, at the end) */
+const LOOKS = new Set(["screenshot", "observe", "find", "read_text", "list_windows"]);
+
 const TERM = new Set(["run_powershell", "system_info", "list_processes", "event_log", "job_output", "stop_job", "reset_shell"]);
 const FILE = new Set(["read_file", "write_file", "edit_file", "list_dir", "find_files", "search_files", "disk_usage", "upload_file", "download_file", "read_clipboard", "write_clipboard"]);
 
@@ -608,8 +611,8 @@ const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
 export function fxStart(e: FxEvent) {
   started.set(e.id, { args: e.args, geo: e.geo });
   toolStarted(e.tool);
-  // Screenshots only breathe the edge at the end; listing windows changes nothing and draws nothing
-  if (e.tool === "screenshot" || e.tool === "list_windows" || e.tool === "list_elements") return;
+  // Looking changes nothing and draws nothing
+  if (LOOKS.has(e.tool)) return;
   attend();
   pulse();
   switch (e.tool) {
@@ -630,17 +633,18 @@ export function fxStart(e: FxEvent) {
       return dragStart(e);
     case "type_text":
     case "press_keys":
-    case "hold_key":
     case "mouse_look":
-      // Typing, key presses and camera turns show nothing on screen
+    case "mouse":
+    case "set_value":
+    case "batch":
+    case "wait_for":
+      // Typing, key presses and camera turns show nothing on screen; actions that point at something
+      // send their own animation (a click, a drag…) once they know where it is
       return;
     case "focus_window":
       return winStart(e);
     case "open_app":
       return openAppStart();
-    case "cursor_position":
-      orb.setBusy(true);
-      return;
   }
   if (TERM.has(e.tool)) return termStart(e.id, termCommand(e));
   if (FILE.has(e.tool)) return fileStart(e);
@@ -658,12 +662,12 @@ export function fxEnd(ev: FxEvent) {
   const e: FxEvent = { ...ev, args: ev.args ?? st?.args ?? {}, geo: { ...(st?.geo ?? {}), ...(ev.geo ?? {}) } };
   const ok = !!e.ok;
   toolEnded(e.tool);
-  // Never woke the orb at start, so there is nothing to release
-  if (e.tool === "list_windows" || e.tool === "list_elements") return;
+  // Never woke the orb at start, so there is nothing to release. A look that took a picture breathes the edge.
+  if (LOOKS.has(e.tool)) {
+    if (e.tool === "screenshot" || e.geo?.shot) screenshotEnd(e);
+    return;
+  }
   switch (e.tool) {
-    case "screenshot":
-      // Screenshots only breathe the edge; they never woke the orb, so there is nothing to release
-      return screenshotEnd(e);
     case "zoom":
       void zoomEnd(e);
       break;
@@ -679,9 +683,6 @@ export function fxEnd(ev: FxEvent) {
       break;
     case "open_app":
       openAppEnd(e);
-      break;
-    case "cursor_position":
-      orb.setBusy(false);
       break;
     default:
       if (TERM.has(e.tool)) termEnd(e.id, ok, e.text ?? "");

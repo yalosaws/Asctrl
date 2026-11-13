@@ -1,4 +1,5 @@
-// Technician-side MCP server: lets Claude (Claude Code / Claude desktop) call tools on the remote computer directly.
+// MCP server: gives an AI (Claude Code, Claude desktop, any MCP client) eyes and hands on a computer through
+// the Asctrl driver — this computer directly, or a remote one through the relay with a 6-digit code.
 // Usage: configure `node src/console/mcp-server.ts` in your MCP client; RELAY_URL / RELAY_TOKEN / TECH_NAME env vars are optional.
 
 import { execFileSync } from "node:child_process";
@@ -40,27 +41,27 @@ function resolveRelayToken(): string | undefined {
   return undefined;
 }
 
-const client = new TechClient(
-  process.env.RELAY_URL ?? DEFAULT_RELAY_URL,
-  process.env.TECH_NAME ?? "Technician",
-  resolveRelayToken(),
-);
+const client = new TechClient(process.env.RELAY_URL ?? DEFAULT_RELAY_URL, process.env.TECH_NAME ?? "AI", resolveRelayToken());
 
-const server = new McpServer({ name: "asctrl", version: "0.1.0" });
+const INSTRUCTIONS = `Asctrl lets you see and operate a Windows computer. Work like this:
+
+1. connect (no arguments = this computer; a 6-digit code = a remote one).
+2. Look once. observe reads the window in front as text: every button, box, menu and list item with a reference like e12, plus text read off the pixels where a program draws its own UI. Take a screenshot when you need to see layout, images or colour.
+3. Act by target. Every action takes target — a reference ("e12") or simply the text the thing shows ("Save") — or x and y on the latest screenshot. References stay valid until the control goes away; you do not need to look again before each action.
+4. Read the reply instead of looking again. Each action says what it did, whether the screen reacted, and what changed among the window's controls (new ones come with references ready to use); a screenshot comes back only when text can't tell.
+
+Prefer set_value for forms (it fills, ticks, picks and verifies in one call), wait_for instead of guessing delays, and batch for a sequence you already know. If a reply says nothing changed, the action probably missed: look before repeating it. Never guess coordinates: use a target, or x and y you can see on the latest screenshot.`;
+
+const server = new McpServer({ name: "asctrl", version: "0.2.0" }, { instructions: INSTRUCTIONS });
 
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 type Reply = { content: Content[]; isError?: boolean };
 
-/** Width of the last screenshot: automatic screenshots after actions reuse it so the coordinate scale stays the same */
-let lastMaxWidth = 1600;
-/** Display of the last screenshot: automatic screenshots after actions reuse it */
-let lastDisplay = 0;
-
 function toContent(r: ToolResult): Reply {
   const content: Content[] = [];
-  if (r.image) content.push({ type: "image", data: r.image.data, mimeType: r.image.mimeType });
   if (r.text) content.push({ type: "text", text: r.text });
   if (!r.ok) content.push({ type: "text", text: `Failed: ${r.error ?? "unknown error"}` });
+  if (r.image) content.push({ type: "image", data: r.image.data, mimeType: r.image.mimeType });
   if (!content.length) content.push({ type: "text", text: "(no output)" });
   return { content, isError: !r.ok };
 }
@@ -68,6 +69,8 @@ function toContent(r: ToolResult): Reply {
 function errorReply(e: unknown): Reply {
   return { content: [{ type: "text", text: `Call failed: ${(e as Error).message ?? e}` }], isError: true };
 }
+
+const say = (text: string, isError = false): Reply => ({ content: [{ type: "text", text }], isError });
 
 async function forward(tool: ToolName, args: Record<string, unknown>): Promise<Reply> {
   try {
@@ -77,33 +80,7 @@ async function forward(tool: ToolName, args: Record<string, unknown>): Promise<R
   }
 }
 
-/** Mouse and keyboard actions: by default take a screenshot afterwards so the result is visible.
- *  The agent takes it in the same call once the screen has settled (`_shot`), saving a round trip;
- *  an older agent ignores `_shot`, and then it is fetched separately. */
-async function act(tool: ToolName, args: Record<string, unknown> & { screenshot?: boolean }, shotByDefault = true): Promise<Reply> {
-  const { screenshot = shotByDefault, ...rest } = args;
-  const r = await forward(tool, screenshot ? { ...rest, _shot: { maxWidth: lastMaxWidth, display: lastDisplay } } : rest);
-  if (!screenshot || r.content.some((c) => c.type === "image")) return r;
-  if (r.isError) return r;
-  const shot = await forward("screenshot", { maxWidth: lastMaxWidth, display: lastDisplay });
-  // The action itself succeeded. Reporting the whole call as failed because the follow-up screenshot
-  // didn't work would invite a retry, and the click or keystroke would happen twice.
-  if (shot.isError) return { content: [...r.content, { type: "text", text: "(the action succeeded, but the screenshot after it failed; call screenshot to see the result)" }] };
-  return { content: [...r.content, ...shot.content] };
-}
-
-const screenshotFlag = z.boolean().optional().describe("Take a screenshot after the action; default true");
-
-const watchArg = z
-  .object({ x0: z.number().min(0), y0: z.number().min(0), x1: z.number().min(0), y1: z.number().min(0) })
-  .optional()
-  .describe(
-    "Region (screenshot pixels) where the action shows its effect, e.g. a game board with its buttons. After the action only this region is " +
-      "watched until it settles, so a video, ad or clock elsewhere can't hold it up. Default: the whole window, leaving out parts that keep moving on their own",
-  );
-const coord = (what: string) => z.number().min(0).describe(`${what} (pixel coordinate on the latest screenshot)`);
-
-/** Code of the last successful connection, so request_admin can reconnect by itself */
+/** Code of the last relay connection, so request_admin can reconnect by itself */
 let lastCode = "";
 
 /** Connect to a code; if their app is not online yet, keep retrying for waitSec seconds */
@@ -113,16 +90,24 @@ async function connectWait(code: string, waitSec: number): Promise<Reply> {
     try {
       const host = await client.connect(code);
       lastCode = code;
-      return { content: [{ type: "text", text: `Connected to ${host}` }] };
+      return say(`Connected to ${host}. Start with observe (the window in front as text) or screenshot.`);
     } catch (e) {
       const msg = (e as Error).message;
       // Only "their app is not online yet" is worth retrying; other errors return immediately
       const offline = /No agent with this code|already connected|Connection closed|ECONNREFUSED/.test(msg);
-      if (!offline || Date.now() + 5000 > deadline) {
-        return { content: [{ type: "text", text: `Connection failed: ${msg}` }], isError: true };
-      }
+      if (!offline || Date.now() + 5000 > deadline) return say(`Connection failed: ${msg}`, true);
       await new Promise((r) => setTimeout(r, 5000));
     }
+  }
+}
+
+async function connectLocal(waitSec: number, notPid?: number): Promise<Reply> {
+  try {
+    const host = await client.connectLocalDriver({ waitMs: Math.max(20, waitSec) * 1000, notPid, launch: notPid === undefined });
+    lastCode = "";
+    return say(`Connected to this computer (${host}), directly. Start with observe (the window in front as text) or screenshot.`);
+  } catch (e) {
+    return say(`Connection failed: ${(e as Error).message}`, true);
   }
 }
 
@@ -130,48 +115,93 @@ server.registerTool(
   "connect",
   {
     description:
-      "Connect to a remote computer with the 6-digit code the user gives you. Connects right away; the user doesn't need to confirm. " +
-      "When reconnecting after a reboot, pass waitSec to keep retrying until their app is back online.",
+      "Connect to a computer. Without arguments: this computer, directly (the driver app is started if it is not running). " +
+      "With code: a remote computer showing that 6-digit code, through the relay; it connects right away. " +
+      "When reconnecting after a restart, pass waitSec to keep retrying until the driver is back.",
     inputSchema: {
-      code: z.string().regex(/^\d{6}$/).describe("6-digit assist code"),
-      waitSec: z.number().int().min(0).max(600).optional().describe("How many seconds to keep waiting if their app is not online yet; default 0 (don't wait)"),
+      code: z.string().regex(/^\d{6}$/).optional().describe("6-digit code shown on the remote computer; omit to use this computer"),
+      waitSec: z.number().int().min(0).max(600).optional().describe("How long to keep trying if the driver is not up yet; default 0 for a code, 20 for this computer"),
     },
   },
-  ({ code, waitSec = 0 }) => connectWait(code, waitSec),
+  ({ code, waitSec = 0 }) => (code ? connectWait(code, waitSec) : connectLocal(waitSec)),
 );
 
-server.registerTool("disconnect", { description: "Disconnect from the current remote computer." }, async () => {
+server.registerTool("disconnect", { description: "Disconnect from the current computer." }, async () => {
   client.disconnect();
-  return { content: [{ type: "text", text: "Disconnected" }] };
+  return say("Disconnected");
 });
 
-// ---------- Viewing ----------
+// ---------- Shared argument shapes ----------
+
+const coord = (what: string) => z.number().min(0).describe(`${what} (pixels on the latest screenshot, the same as the @(x,y) positions in replies)`);
+const target = z
+  .union([z.string().min(1), z.number().int().min(1)])
+  .describe('What to act on: a reference from observe or an earlier reply ("e12"), or the text the thing shows ("Save", "下一步", a file name). Text is matched against control names first, then read off the pixels');
+const windowArg = z.union([z.string().min(1), z.number().int()]).describe("Which window: part of its title or program name (notepad, chrome), or a handle from list_windows. Default: the window in front");
+const role = z.string().optional().describe("With a text target: only controls of this kind (button, edit, link, checkbox, radio, tab, menuitem, item, combobox, text)");
+const nth = z.number().int().min(1).max(200).optional().describe("With a text target that matches several things equally: which one, in reading order");
+const timeoutSec = z.number().min(0).max(30).optional().describe("With a text target: how long to wait for it to appear; default 1.5");
+const after = z
+  .enum(["auto", "none", "ui", "screenshot", "both"])
+  .optional()
+  .describe(
+    "What the reply shows of the result. auto (default): the changes among the window's controls when they can tell, else a screenshot. " +
+      "none: just what was done (fastest). ui: control changes. screenshot: an image. both",
+  );
+const watch = z
+  .object({ x0: z.number().min(0), y0: z.number().min(0), x1: z.number().min(0), y1: z.number().min(0) })
+  .optional()
+  .describe("Region (screenshot pixels) where the action shows its effect, e.g. a game board. Only it is watched for the screen settling, so a video or ad elsewhere can't hold the action up");
+/** Everything that points at something */
+const pointing = { target: target.optional(), x: coord("x").optional(), y: coord("y").optional(), window: windowArg.optional(), role, nth, timeoutSec };
+
+// ---------- Looking ----------
+
+server.registerTool(
+  "observe",
+  {
+    description:
+      "Read a window as text: its controls (buttons, text boxes, checkboxes, menus, list items, links, text) as a tree, each with a reference like [e12], its state and value, and its centre @(x,y). " +
+      "Open menus and drop-downs of the window are included. Where a program draws its own UI (games, canvases, remote desktops, some web pages), the text is read off the pixels instead. " +
+      "The reply also names the window in front and the other open windows. This is the one look that makes everything after it cheap: " +
+      "references stay valid as long as the control exists, and every action's reply tells you what changed. " +
+      "Much cheaper and more exact than a screenshot for finding and reading things; add image: true when you also need to see it.",
+    inputSchema: {
+      window: windowArg.optional(),
+      query: z.string().optional().describe("Only list controls whose line contains this (case-insensitive), e.g. a label, or a kind such as Edit"),
+      image: z.boolean().optional().describe("Also return a screenshot (of the window, when window is given); default false"),
+      ocr: z.boolean().optional().describe("Read text off the pixels too. Default: only when the controls say little. true adds text the controls don't mention (a canvas inside an ordinary window)"),
+      offscreen: z.boolean().optional().describe("Also list controls scrolled out of view; default false"),
+      max: z.number().int().min(1).max(2000).optional().describe("Most lines to list; default 150. Past it, plain text is left out before controls are"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  (a) => forward("observe", a),
+);
 
 server.registerTool(
   "screenshot",
   {
     description:
-      "Capture the remote computer's screen (JPEG). By default all displays are stitched together; with several displays, pass display to capture just one, more clearly. " +
-      "Coordinates for click/scroll/drag etc. refer to the latest screenshot. Use zoom when small text is hard to read.",
+      "Capture the screen as an image. x and y of later actions refer to the latest screenshot. By default the whole screen (all displays); " +
+      "window captures just one window (brought to the front if covered) and display just one display: both are sharper and cost less. " +
+      "Screenshots that come back with later actions use the same view. Use observe to read and find things; a screenshot to see layout, images, colour, or programs that draw their own UI.",
     inputSchema: {
+      window: windowArg.optional(),
+      display: z.number().int().min(0).max(16).optional().describe("Display number (from 1); 0 or omitted means all"),
       maxWidth: z.number().int().min(320).max(3840).optional().describe("Maximum width after scaling; default 1600"),
-      display: z.number().int().min(0).max(16).optional().describe("Display number (starting at 1); 0 or omitted means all"),
     },
     annotations: { readOnlyHint: true },
   },
-  (a) => {
-    if (a.maxWidth) lastMaxWidth = a.maxWidth;
-    if (a.display !== undefined) lastDisplay = a.display;
-    return forward("screenshot", { maxWidth: lastMaxWidth, display: lastDisplay });
-  },
+  (a) => forward("screenshot", a),
 );
 
 server.registerTool(
   "zoom",
   {
     description:
-      "Re-capture a rectangle of the latest screenshot at native resolution, to read small text, icons and error details. " +
-      "Arguments are coordinates on the latest screenshot; the zoomed image is for viewing only, and later click coordinates still refer to that screenshot.",
+      "Re-capture a rectangle of the latest screenshot at full resolution, to read small text, icons and details. " +
+      "The zoomed image is for reading only: x and y of later actions still refer to the screenshot.",
     inputSchema: {
       x0: coord("Top-left x"),
       y0: coord("Top-left y"),
@@ -185,166 +215,330 @@ server.registerTool(
 );
 
 server.registerTool(
-  "cursor_position",
-  { description: "Get the current mouse position (as coordinates on the latest screenshot).", annotations: { readOnlyHint: true } },
-  () => forward("cursor_position", {}),
+  "find",
+  {
+    description:
+      "Find where something is: every control in a window whose name or value contains the text (best match first, with references), " +
+      "and, where the program draws its own UI, every place the text appears on the pixels (with coordinates). Does not wait: wait_for does.",
+    inputSchema: {
+      text: z.string().min(1).describe("Text to look for (case and spacing ignored)"),
+      window: windowArg.optional(),
+      role,
+      ocr: z.boolean().optional().describe("Also search the pixels. Default: only when no control matches or the controls say little"),
+      max: z.number().int().min(1).max(200).optional().describe("Most matches to list; default 20"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  (a) => forward("find", a),
+);
+
+server.registerTool(
+  "read_text",
+  {
+    description:
+      "Read text. With target: the full content of one control (a document, a text box, a long message), untruncated. " +
+      "With window (or nothing: the window in front): all the text its controls show, in reading order. " +
+      "With a region x0,y0,x1,y1 or display: the text read off the pixels there (OCR), line by line with positions.",
+    inputSchema: {
+      target: target.optional(),
+      window: windowArg.optional(),
+      role,
+      nth,
+      x0: coord("Region top-left x").optional(),
+      y0: coord("Region top-left y").optional(),
+      x1: coord("Region bottom-right x").optional(),
+      y1: coord("Region bottom-right y").optional(),
+      display: z.number().int().min(0).max(16).optional().describe("Read a whole display off the pixels"),
+      source: z.enum(["auto", "controls", "ocr"]).optional().describe("For a window: controls (exact), ocr (the pixels), or auto (controls when they say enough); default auto"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  (a) => forward("read_text", a),
+);
+
+server.registerTool(
+  "list_windows",
+  {
+    description: "List the open windows, front to back: handle, program, title, state (in front, minimized, maximized, dialog of …) and position. Dialogs are listed too.",
+    annotations: { readOnlyHint: true },
+  },
+  () => forward("list_windows", {}),
 );
 
 server.registerTool(
   "wait_for",
   {
     description:
-      "Wait until something happens on the remote computer, and return the moment it does (polls about 8 times a second). Much faster and more reliable than wait with a guessed time. " +
-      "Give exactly one of: window (a window whose title or program name contains this appears), element (a control matching this appears in the window in front, " +
-      "or in handle/title; the reply is its list_elements listing, so its ids are ready for element_action), text (this text appears on screen, read by OCR; " +
-      "limit it with display, a region x0,y0,x1,y1, or handle/title), or stable: true (the screen stops changing, e.g. a page finished loading). " +
-      "Separate alternatives with |, e.g. 'Save As|另存为'. gone: true waits for it to disappear instead. Fails with what is in front when the time runs out.",
+      "Wait until something happens, and return the moment it does. Much faster and more reliable than waiting a guessed time. Give exactly one of: " +
+      "window (a window whose title or program name contains this appears), text (this text shows up in the window in front, or in within; among its controls or on its pixels), " +
+      "stable: true (the screen stops changing, e.g. a page finished loading), or seconds (a plain pause, when nothing else fits). " +
+      "Separate alternatives with |, e.g. 'Save As|另存为'. gone: true waits for the window or text to disappear instead. " +
+      "The reply lists the controls of what appeared, with references ready to use. Fails with what is in front when the time runs out.",
     inputSchema: {
       window: z.string().optional().describe("Title or program-name keyword(s), e.g. notepad, 'Settings|设置'"),
-      element: z.string().optional().describe("Text in a control's list_elements line, e.g. a button label, 'Edit'"),
-      text: z.string().optional().describe("Text to find on screen with OCR"),
+      text: z.string().optional().describe("Text to wait for"),
       stable: z.boolean().optional().describe("Wait for the screen to stop changing"),
-      gone: z.boolean().optional().describe("Wait for the window / control / text to disappear instead"),
-      handle: z.number().int().optional().describe("For element / text: the window to look in (from list_windows)"),
-      title: z.string().optional().describe("For element / text: or a title keyword of that window"),
-      display: z.number().int().min(0).max(16).optional().describe("For text: only this display"),
-      x0: coord("For text: region top-left x").optional(),
-      y0: coord("For text: region top-left y").optional(),
-      x1: coord("For text: region bottom-right x").optional(),
-      y1: coord("For text: region bottom-right y").optional(),
-      timeoutSec: z.number().min(0.5).max(120).optional().describe("Give up after this many seconds; default 10"),
-      screenshot: z.boolean().optional().describe("Take a screenshot when it happens; default false"),
+      seconds: z.number().min(0).max(60).optional().describe("Just wait this long"),
+      gone: z.boolean().optional().describe("Wait for the window / text to disappear instead"),
+      within: windowArg.optional().describe("For text / stable: the window to watch; default the window in front"),
+      ocr: z.boolean().optional().describe("For text: also read the pixels. Default: yes, at a slower pace than the controls"),
+      timeoutSec: z.number().min(0.2).max(300).optional().describe("Give up after this many seconds; default 10"),
+      after,
     },
     annotations: { readOnlyHint: true },
   },
-  (a) => act("wait_for", a, false),
+  (a) => forward("wait_for", a),
 );
 
-const ocrScope = {
-  display: z.number().int().min(0).max(16).optional().describe("Only this display (from 1); default all"),
-  handle: z.number().int().optional().describe("Only this window (handle from list_windows)"),
-  title: z.string().optional().describe("Or only the window whose title / program name contains this"),
-  x0: coord("Region top-left x").optional(),
-  y0: coord("Region top-left y").optional(),
-  x1: coord("Region bottom-right x").optional(),
-  y1: coord("Region bottom-right y").optional(),
-};
+// ---------- Acting ----------
 
 server.registerTool(
-  "find_text",
+  "click",
   {
     description:
-      "Read text on the remote screen with OCR (built into Windows) and say where it is, as @(x,y) on the latest screenshot. " +
-      "With text: every place that text appears (case and spacing ignored). Without: all lines of text, top to bottom. " +
-      "Works where list_elements sees nothing (games, canvases, remote desktops, many web pages), and is much cheaper than reading a screenshot. " +
-      "Limit it to a window, display or region for speed and accuracy.",
-    inputSchema: { text: z.string().optional().describe("Text to look for; omit to read everything"), ...ocrScope },
-    annotations: { readOnlyHint: true },
-  },
-  (a) => forward("find_text", a),
-);
-
-server.registerTool(
-  "click_text",
-  {
-    description:
-      "Find text on the remote screen with OCR and click it, in one step: a button label, menu item, link, file name. No screenshot needed first. " +
-      "A match that is the whole line (a label) wins over the same words inside a sentence. Prefer element_action for programs list_elements can read; " +
-      "use this for everything else. Reports whether the screen changed afterwards.",
+      "Click something: target (a reference like \"e12\", or the text it shows) or x and y on the latest screenshot. " +
+      "A control of an ordinary program is pressed directly through UI Automation — exact, works even when partly covered, and the user's pointer stays put; " +
+      "web pages, games, canvases and plain coordinates get a real mouse click (the control is scrolled into view and its window brought forward first). " +
+      "A click by x,y is refused, with a fresh screenshot, if another window has since appeared over that point or the window was moved away or resized; if the window only moved, the click moves with it. " +
+      "The reply says whether the screen reacted and what changed, so a miss shows at once.",
     inputSchema: {
-      text: z.string().min(1).describe("The text to click, e.g. 'OK', '下一步', 'Save'"),
-      occurrence: z.number().int().min(1).max(100).optional().describe("Which match, top to bottom, when it appears more than once; default 1"),
+      ...pointing,
       button: z.enum(["left", "right", "middle"]).optional().describe("Default left"),
-      count: z.number().int().min(1).max(3).optional().describe("2 = double-click"),
-      modifiers: z.string().optional().describe("Keys held while clicking, e.g. ctrl"),
-      ...ocrScope,
-      screenshot: screenshotFlag,
-      watch: watchArg,
+      count: z.number().int().min(1).max(3).optional().describe("2 = double-click, 3 = triple-click (selects a line); default 1"),
+      modifiers: z.string().optional().describe("Keys held while clicking, e.g. ctrl, shift, ctrl+shift"),
+      mode: z.enum(["auto", "mouse", "direct"]).optional().describe("auto (default) as described; mouse: always a real mouse click; direct: always through UI Automation, never the mouse"),
+      after,
+      watch,
     },
   },
-  (a) => act("click_text", a),
+  (a) => forward("click", a),
 );
 
-const stepTools = [
-  "click", "click_text", "scroll", "drag", "mouse_move", "mouse_down", "mouse_up", "mouse_look", "type_text", "press_keys", "hold_key",
-  "element_action", "list_elements", "focus_window", "open_app", "wait_for", "write_clipboard", "find_text", "wait",
-] as const;
+server.registerTool(
+  "type_text",
+  {
+    description:
+      "Type text. With target (or x,y): that field gets the focus first. Without: the text goes to whatever has the focus (window brings a window forward first). " +
+      "replace: true selects the field's whole content first, so the text replaces it; enter: true presses Enter afterwards. " +
+      "Any language works and the input method doesn't matter; characters on the keyboard are pressed as real keys, so games and web pages see them. " +
+      "Text over 200 characters is pasted (the clipboard is put back). The reply names the field that took the text and reads it back, so text that went to the wrong place or was changed shows at once. " +
+      "To fill a form field with a known value, set_value is surer.",
+    inputSchema: {
+      text: z.string().describe("The text; newlines press Enter"),
+      ...pointing,
+      replace: z.boolean().optional().describe("Replace the field's content instead of typing at the cursor; with empty text, clears the field"),
+      enter: z.boolean().optional().describe("Press Enter after typing"),
+      method: z.enum(["auto", "keys", "paste"]).optional().describe("auto (default): paste long text, type short text; keys: always keystrokes (fields that block pasting, games, remote desktops); paste: always paste"),
+      after,
+      watch,
+    },
+  },
+  (a) => forward("type_text", a),
+);
+
+server.registerTool(
+  "press_keys",
+  {
+    description:
+      "Press a key or combination, or several in a row separated by spaces: enter, esc, ctrl+s, alt+f4, win+r, 'ctrl+a delete', 'tab tab enter'. " +
+      "Keys go to the window in front (window brings one forward first); the reply names it. repeat presses the whole thing several times; holdSec holds one key or combination down.",
+    inputSchema: {
+      keys: z.string().describe("Key names joined with +; sequences separated by spaces. Names: ctrl shift alt win enter esc tab space backspace delete insert home end pageup pagedown up down left right f1-f24 a-z 0-9 and symbols"),
+      window: windowArg.optional().describe("Bring this window to the front first"),
+      repeat: z.number().int().min(1).max(100).optional().describe("Press it this many times; default 1"),
+      holdSec: z.number().min(0.05).max(10).optional().describe("Hold the key or combination this long before releasing"),
+      after,
+      watch,
+    },
+  },
+  (a) => forward("press_keys", a),
+);
+
+server.registerTool(
+  "set_value",
+  {
+    description:
+      "Make a control hold a value, whatever kind of control it is, and check that it does: a text box takes the text (replacing what was there); a checkbox or switch takes true / false; " +
+      "a combo box, list or tab strip takes the name of the item to pick; a slider or spinner a number; a radio button or list item \"selected\"; a tree item or section \"expanded\" / \"collapsed\". " +
+      "Idempotent: a box already ticked stays ticked. No mouse, no focus change; a field that won't take a value directly (many web pages) is typed into instead and read back. " +
+      "fields fills a whole form in one call. The surest way to fill forms and change settings.",
+    inputSchema: {
+      ...pointing,
+      value: z.union([z.string(), z.boolean(), z.number()]).optional().describe("What the control should hold"),
+      fields: z
+        .array(z.object({ target: target.optional(), x: z.number().optional(), y: z.number().optional(), value: z.union([z.string(), z.boolean(), z.number()]), role, nth, window: windowArg.optional() }))
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Several controls at once, instead of target and value: [{ target, value }, …]. Each is reported; the rest still run if one fails"),
+      after,
+    },
+  },
+  (a) => (a.fields || a.value !== undefined ? forward("set_value", a) : Promise.resolve(say("Give value (with target), or fields", true))),
+);
+
+server.registerTool(
+  "scroll",
+  {
+    description:
+      "Turn the mouse wheel over something: target or x,y, or — with neither — where the pointer is in the window in front. " +
+      "The reply says whether the view moved (if not, it is already at its end).",
+    inputSchema: {
+      ...pointing,
+      direction: z.enum(["up", "down", "left", "right"]).optional().describe("Default down"),
+      amount: z.number().int().min(1).max(100).optional().describe("Wheel notches; default 3 (about a third of a page in most programs)"),
+      after,
+      watch,
+    },
+  },
+  (a) => forward("scroll", a),
+);
+
+server.registerTool(
+  "drag",
+  {
+    description: "Press a mouse button on one thing, move to another and release: from / to (references or text) or fromX, fromY / toX, toY. Both ends are found before the button goes down.",
+    inputSchema: {
+      from: target.optional(),
+      to: target.optional(),
+      fromX: coord("Start x").optional(),
+      fromY: coord("Start y").optional(),
+      toX: coord("End x").optional(),
+      toY: coord("End y").optional(),
+      window: windowArg.optional(),
+      button: z.enum(["left", "right", "middle"]).optional().describe("Default left"),
+      seconds: z.number().min(0.05).max(10).optional().describe("How long the move takes; default 0.4. Slower helps programs that track the drag"),
+      after,
+      watch,
+    },
+  },
+  (a) => forward("drag", a),
+);
+
+server.registerTool(
+  "mouse",
+  {
+    description:
+      "Low-level mouse steps, for what click and drag can't express. move: hover over a target or x,y (tooltips, hover menus). " +
+      "down / up: press and release a button separately (optionally moving first), for fine drags with stops on the way. " +
+      "look: relative motion in raw counts (dx right, dy down), the only motion first-person game cameras follow; start with about 200 and adjust.",
+    inputSchema: {
+      action: z.enum(["move", "down", "up", "look"]),
+      ...pointing,
+      button: z.enum(["left", "right", "middle"]).optional().describe("For down / up; default left"),
+      dx: z.number().int().min(-20000).max(20000).optional().describe("For look: horizontal counts"),
+      dy: z.number().int().min(-20000).max(20000).optional().describe("For look: vertical counts"),
+      seconds: z.number().min(0).max(5).optional().describe("For look: spread the motion over this long; default 0.2"),
+      after,
+    },
+  },
+  (a) => forward("mouse", a),
+);
+
+server.registerTool(
+  "element_action",
+  {
+    description:
+      "Run one UI Automation action on a control, without the mouse, the keyboard focus or the window order being touched — it works on a window in the background, and on controls scrolled out of view. " +
+      "Actions: press (what a click would do), toggle, select, expand, collapse, focus, scroll_into_view, scroll (value up / down / left / right, add :page for a page, e.g. down:page). " +
+      "For everyday work click and set_value are simpler; use this to work behind the user's back or when you need exactly one of these.",
+    inputSchema: {
+      target,
+      action: z.enum(["press", "toggle", "select", "expand", "collapse", "focus", "scroll_into_view", "scroll"]).optional().describe("Default press"),
+      value: z.string().optional().describe("For scroll: the direction"),
+      window: windowArg.optional(),
+      role,
+      nth,
+      timeoutSec,
+      after,
+    },
+  },
+  (a) => forward("element_action", a),
+);
+
+const stepTools = ["click", "type_text", "press_keys", "set_value", "scroll", "drag", "mouse", "element_action", "focus_window", "open_app", "wait_for", "write_clipboard", "read_clipboard", "find", "read_text", "observe"] as const;
 
 server.registerTool(
   "batch",
   {
     description:
-      "Run several steps in one call, in order, stopping at the first failure: the fastest way to do a known sequence, " +
-      "e.g. open_app → wait_for the window → click_text a menu → type_text → press_keys ctrl+s → wait_for the Save dialog. " +
-      "Each step is { tool, ...that tool's arguments } for: " + stepTools.join(", ") + " (wait takes seconds). " +
+      "Run several steps in one call, in order, stopping at the first failure: the fastest way through a sequence you already know, " +
+      "e.g. open_app → wait_for its window → click a menu → type_text → press_keys ctrl+s → wait_for the Save dialog. " +
+      "Each step is { tool, ...that tool's arguments } for: " + stepTools.join(", ") + ". " +
       "Steps wait only until the screen settles, never a fixed time; put wait_for between steps that open something slowly. " +
-      "fast: true skips even that wait for input steps (click, type_text, press_keys…), so pages that animate every click don't hold each step up: " +
-      "use it for many inputs into a screen that stays put (a game board, a form), not when a step opens something the next one needs. " +
-      "Click coordinates refer to the latest screenshot, so only batch clicks whose targets you already know; prefer click_text, element_action and keys. " +
-      "watch frames the region every step waits on (a step's own watch overrides it). " +
-      "Returns one line per step (✓ / ✗ / skipped), plus a screenshot at the end unless screenshot: false.",
+      "fast: true skips even that for input steps, for many inputs into a screen that stays put (a game board, a grid of cells); not when a step opens something the next one needs. " +
+      "Prefer targets (text or references) over coordinates: a step can't see what the one before it brought up. " +
+      "Returns one line per step (✓ / ✗ / skipped) and one report of where things stand at the end.",
     inputSchema: {
-      steps: z.array(z.object({ tool: z.enum(stepTools) }).passthrough()).min(1).max(50),
+      steps: z.array(z.object({ tool: z.enum(stepTools) }).passthrough()).min(1).max(100),
       fast: z.boolean().optional().describe("Input steps don't wait for the screen to settle (about 25 ms each); it settles once at the end. Default false"),
-      screenshot: screenshotFlag,
-      watch: watchArg,
+      after,
+      watch,
     },
   },
-  (a) => act("batch", a),
+  (a) => forward("batch", a),
 );
 
+// ---------- Programs, windows, clipboard ----------
+
 server.registerTool(
-  "wait",
+  "open_app",
   {
-    description: "Wait a fixed number of seconds, then take a screenshot. Prefer wait_for, which returns as soon as the thing you are waiting for happens.",
-    inputSchema: { seconds: z.number().min(0.1).max(60).describe("Seconds to wait"), screenshot: screenshotFlag },
-    annotations: { readOnlyHint: true },
-  },
-  async ({ seconds, screenshot = true }) => {
-    await new Promise((r) => setTimeout(r, seconds * 1000));
-    if (!screenshot) return { content: [{ type: "text", text: `Waited ${seconds} s` }] };
-    return forward("screenshot", { maxWidth: lastMaxWidth, display: lastDisplay });
-  },
-);
-
-server.registerTool(
-  "system_info",
-  { description: "Basic info about the remote computer: OS version, uptime, CPU, memory, free disk space.", annotations: { readOnlyHint: true } },
-  () => forward("system_info", {}),
-);
-
-server.registerTool(
-  "list_processes",
-  {
-    description: "List processes on the remote computer by memory use.",
-    inputSchema: { top: z.number().int().min(1).max(200).optional().describe("How many to show; default 30") },
-    annotations: { readOnlyHint: true },
-  },
-  (a) => forward("list_processes", a),
-);
-
-server.registerTool(
-  "event_log",
-  {
-    description: "Read errors and warnings from the remote computer's Windows event log.",
+    description:
+      "Open a program, file, folder or URL as if double-clicked: notepad, control, taskmgr, ms-settings:display, C:\\Users\\xx\\Desktop\\report.docx, https://example.com. " +
+      "Waits for its window, brings it to the front, and lists its controls with references. Runs with the user's current privileges.",
     inputSchema: {
-      log: z.enum(["System", "Application"]).optional().describe("Default System"),
-      hours: z.number().int().min(1).max(720).optional().describe("How many recent hours; default 24"),
-      max: z.number().int().min(1).max(200).optional().describe("Maximum entries; default 30"),
+      target: z.string().describe("Program name, path, URL, or a link such as ms-settings:"),
+      args: z.string().optional().describe("Command-line arguments"),
+      cwd: z.string().optional().describe("Working directory"),
+      timeoutSec: z.number().min(0).max(60).optional().describe("How long to wait for its window; default 5"),
+      after,
     },
-    annotations: { readOnlyHint: true },
   },
-  (a) => forward("event_log", a),
+  (a) => forward("open_app", a),
 );
 
-// ---------- Commands ----------
+server.registerTool(
+  "focus_window",
+  {
+    description:
+      "Switch to a window, or minimize / maximize / restore / close / move it. action move (or just giving x, y, width, height) places and sizes it, e.g. to put two windows side by side.",
+    inputSchema: {
+      window: windowArg,
+      action: z.enum(["focus", "minimize", "maximize", "restore", "close", "move"]).optional().describe("Default focus"),
+      x: z.number().optional().describe("For move: left edge, in screenshot pixels"),
+      y: z.number().optional().describe("For move: top edge"),
+      width: z.number().min(1).optional().describe("For move: new width, in screenshot pixels"),
+      height: z.number().min(1).optional().describe("For move: new height"),
+      after,
+    },
+  },
+  (a) => forward("focus_window", a),
+);
+
+server.registerTool(
+  "read_clipboard",
+  { description: "Read the clipboard: its text, the list of copied files, or a note that it holds an image.", annotations: { readOnlyHint: true } },
+  () => forward("read_clipboard", {}),
+);
+
+server.registerTool(
+  "write_clipboard",
+  {
+    description: "Put text on the clipboard; paste it afterwards with press_keys ctrl+v.",
+    inputSchema: { text: z.string() },
+  },
+  (a) => forward("write_clipboard", a),
+);
+
+// ---------- Shell and system ----------
 
 server.registerTool(
   "run_powershell",
   {
     description:
-      "Run a PowerShell script on the remote computer and return its output. Commands run in one persistent session, so the current directory and variables carry over (starting in the user's home). " +
-      "Commands that need interactive input can't run. The command is shown on the user's screen. Explain and confirm with the technician before changing the system or deleting files. " +
+      "Run a PowerShell script on the computer and return its output. Commands run in one persistent session, so the current directory and variables carry over (starting in the user's home). " +
+      "Often the fastest and surest way to do something that has a command: files, processes, services, settings, installs. Commands that need interactive input can't run. " +
       "For commands that may take more than a few minutes (sfc /scannow, DISM, Windows Update, large copies, installers), use background: true and check progress with job_output.",
     inputSchema: {
       script: z.string().describe("PowerShell script"),
@@ -352,7 +546,7 @@ server.registerTool(
       background: z
         .boolean()
         .optional()
-        .describe("Run in the background in a separate PowerShell and return a job id immediately; does not share the session's directory or variables. Stopped when the technician disconnects"),
+        .describe("Run in the background in a separate PowerShell and return a job id immediately; does not share the session's directory or variables. Stopped when you disconnect"),
     },
     annotations: { destructiveHint: true },
   },
@@ -378,36 +572,62 @@ server.registerTool(
   (a) => forward("stop_job", a),
 );
 
+server.registerTool("reset_shell", { description: "Reset the PowerShell session (clears the current directory and variables, stops background jobs)." }, () => forward("reset_shell", {}));
+
 server.registerTool(
-  "reset_shell",
-  { description: "Reset the remote PowerShell session (clears the current directory and variables)." },
-  () => forward("reset_shell", {}),
+  "system_info",
+  { description: "Basic info about the computer: OS version, uptime, CPU, memory, free disk space.", annotations: { readOnlyHint: true } },
+  () => forward("system_info", {}),
+);
+
+server.registerTool(
+  "list_processes",
+  {
+    description: "List processes by memory use.",
+    inputSchema: { top: z.number().int().min(1).max(200).optional().describe("How many to show; default 30") },
+    annotations: { readOnlyHint: true },
+  },
+  (a) => forward("list_processes", a),
+);
+
+server.registerTool(
+  "event_log",
+  {
+    description: "Read errors and warnings from the Windows event log.",
+    inputSchema: {
+      log: z.enum(["System", "Application"]).optional().describe("Default System"),
+      hours: z.number().int().min(1).max(720).optional().describe("How many recent hours; default 24"),
+      max: z.number().int().min(1).max(200).optional().describe("Maximum entries; default 30"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  (a) => forward("event_log", a),
 );
 
 server.registerTool(
   "request_admin",
   {
     description:
-      "Request administrator access. The user clicks Allow in the app, then \"Yes\" in the Windows confirmation; the app then restarts as administrator " +
+      "Request administrator rights. The user clicks Allow in the app, then \"Yes\" in the Windows confirmation; the driver then restarts as administrator " +
       "and this tool reconnects to it automatically (takes about 5-15 seconds). " +
       "Call it whenever the task needs admin rights: repairing system files, managing services, installing software, " +
-      "or when a mouse/keyboard tool reports that the target window runs as administrator (Windows blocks input to it until the app is elevated).",
+      "or when a tool reports that the target window runs as administrator (Windows blocks input to it until the driver is elevated).",
   },
   async () => {
     const code = lastCode;
+    const wasLocal = client.local;
+    const oldPid = client.localPid;
     const r = await forward("request_admin", {});
     const text = r.content.find((c) => c.type === "text")?.text ?? "";
-    if (r.isError || !/restarting as administrator/.test(text) || !code) return r;
+    if (r.isError || !/restarting as administrator/.test(text) || (!code && !wasLocal)) return r;
     // Give the old process time to exit, so the reconnect reaches the new elevated one
-    await new Promise((res) => setTimeout(res, 3000));
-    const c = await connectWait(code, 90);
+    await new Promise((res) => setTimeout(res, 2000));
+    const c = wasLocal ? await connectLocal(90, oldPid) : await connectWait(code, 90);
     if (c.isError) {
-      return {
-        content: [...r.content, ...c.content, { type: "text", text: `Reconnect with connect (code ${code}, waitSec: 60).` }],
-        isError: true,
-      };
+      const how = wasLocal ? "connect (waitSec: 60)" : `connect (code ${code}, waitSec: 60)`;
+      return { content: [...r.content, ...c.content, { type: "text", text: `Reconnect with ${how}.` }], isError: true };
     }
-    return { content: [...r.content, { type: "text", text: "Reconnected; now running as administrator." }] };
+    return { content: [...r.content, { type: "text", text: "Reconnected; now running as administrator. References from before are gone: observe again." }] };
   },
 );
 
@@ -415,7 +635,7 @@ server.registerTool(
   "restart_computer",
   {
     description:
-      "Restart the remote computer. The user is asked to agree in the app first (and reminded to save files), then it counts down and restarts; after restart and sign-in the assist app opens automatically with the same code. " +
+      "Restart the computer. The user is asked to agree in the app first (and reminded to save files), then it counts down and restarts; after restart and sign-in the driver opens automatically with the same code. " +
       "Then reconnect with connect (waitSec: 300 recommended). " +
       "prepareOnly: only register \"open automatically at next sign-in\" without restarting (for installers that restart, or a manual restart by the user); cancel: cancel a pending restart.",
     inputSchema: {
@@ -428,272 +648,15 @@ server.registerTool(
   (a) => forward("restart_computer", a),
 );
 
-// ---------- Mouse and keyboard ----------
-
-server.registerTool(
-  "click",
-  {
-    description:
-      "Click on the remote screen by moving the user's real mouse pointer. Coordinates are pixels on the latest screenshot. " +
-      "For buttons, boxes, menus and lists in ordinary programs, prefer list_elements + element_action: they don't take over the user's mouse. " +
-      "Use click for games, canvases, remote desktops, or when element_action says it can't; to click a visible label, click_text needs no coordinates. " +
-      "The reply says whether the window under the click changed, so a miss shows without a screenshot.",
-    inputSchema: {
-      x: coord("x"),
-      y: coord("y"),
-      button: z.enum(["left", "right", "middle"]).optional().describe("Default left"),
-      count: z.number().int().min(1).max(3).optional().describe("Number of clicks: 2 = double-click, 3 = triple-click (selects a line); default 1"),
-      modifiers: z.string().optional().describe("Keys held while clicking, e.g. ctrl, shift, ctrl+shift"),
-      screenshot: screenshotFlag,
-      watch: watchArg,
-    },
-  },
-  (a) => act("click", a),
-);
-
-server.registerTool(
-  "scroll",
-  {
-    description: "Move the mouse to a position, then scroll the wheel.",
-    inputSchema: {
-      x: coord("x"),
-      y: coord("y"),
-      amount: z.number().int().min(-50).max(50).optional().describe("Notches to scroll: positive down (right when horizontal), negative up (left); default 3"),
-      horizontal: z.boolean().optional().describe("Scroll horizontally"),
-      screenshot: screenshotFlag,
-    },
-  },
-  (a) => act("scroll", a),
-);
-
-server.registerTool(
-  "drag",
-  {
-    description: "Drag with the left mouse button from one point to another.",
-    inputSchema: {
-      fromX: coord("Start x"),
-      fromY: coord("Start y"),
-      toX: coord("End x"),
-      toY: coord("End y"),
-      screenshot: screenshotFlag,
-    },
-  },
-  (a) => act("drag", a),
-);
-
-server.registerTool(
-  "mouse_move",
-  {
-    description: "Move the mouse somewhere without clicking, to trigger hover tooltips or open hover menus.",
-    inputSchema: { x: coord("x"), y: coord("y"), screenshot: screenshotFlag },
-  },
-  (a) => act("mouse_move", a),
-);
-
-server.registerTool(
-  "mouse_look",
-  {
-    description:
-      "Move the mouse relative to where it is, like a physical mouse, in raw mouse counts. Use it to turn the camera in games " +
-      "(first-person views ignore mouse_move, which jumps the pointer to a position). Positive dx turns right, positive dy turns down; " +
-      "how far a count turns depends on the game's sensitivity, so start small (e.g. 200), check the screenshot, then adjust.",
-    inputSchema: {
-      dx: z.number().int().min(-20000).max(20000).optional().describe("Horizontal counts; default 0"),
-      dy: z.number().int().min(-20000).max(20000).optional().describe("Vertical counts; default 0"),
-      seconds: z.number().min(0).max(5).optional().describe("Spread the motion over this long; default 0.2"),
-      screenshot: screenshotFlag,
-    },
-  },
-  (a) => act("mouse_look", a),
-);
-
-const buttonArg = z.enum(["left", "right", "middle"]).optional().describe("Default left");
-
-server.registerTool(
-  "mouse_down",
-  {
-    description: "Press a mouse button and hold it (optionally moving first). Combine with mouse_move and mouse_up for fine drags, e.g. sliders or box selection.",
-    inputSchema: { x: coord("x").optional(), y: coord("y").optional(), button: buttonArg, screenshot: screenshotFlag },
-  },
-  (a) => act("mouse_down", a),
-);
-
-server.registerTool(
-  "mouse_up",
-  {
-    description: "Release a mouse button (optionally moving first).",
-    inputSchema: { x: coord("x").optional(), y: coord("y").optional(), button: buttonArg, screenshot: screenshotFlag },
-  },
-  (a) => act("mouse_up", a),
-);
-
-server.registerTool(
-  "type_text",
-  {
-    description:
-      "Type text at the current focus. Any language works and the user's input method doesn't matter. Newlines press Enter. Click the input box first if unsure where focus is. " +
-      "Characters on the keyboard are pressed as real keys, so games and web pages that read key codes see them (while an input method is in Chinese/Japanese/Korean mode, only digits are). " +
-      "Text over 200 characters is pasted through the clipboard (put back afterwards), which is many times faster; method keys forces keystrokes (for fields that block pasting, games, remote desktops).",
-    inputSchema: {
-      text: z.string().min(1),
-      method: z.enum(["auto", "keys", "paste"]).optional().describe("auto (default): paste long text, type short text; keys: always keystrokes; paste: always paste"),
-      screenshot: screenshotFlag,
-      watch: watchArg,
-    },
-  },
-  (a) => act("type_text", a),
-);
-
-server.registerTool(
-  "press_keys",
-  {
-    description:
-      "Press a key or key combination, e.g. enter, esc, tab, ctrl+c, ctrl+shift+esc, win+r, alt+f4, f5. " +
-      "Keys go to the focused window; click the target window first if unsure where focus is.",
-    inputSchema: { keys: z.string().describe("Key names joined with +"), screenshot: screenshotFlag, watch: watchArg },
-  },
-  (a) => act("press_keys", a),
-);
-
-server.registerTool(
-  "hold_key",
-  {
-    description: "Hold a key or key combination for a while, then release it, e.g. hold shift for 3 seconds.",
-    inputSchema: {
-      keys: z.string().describe("Key names joined with +"),
-      seconds: z.number().min(0.05).max(10).optional().describe("Seconds to hold; default 1"),
-      screenshot: screenshotFlag,
-    },
-  },
-  (a) => act("hold_key", a),
-);
-
-// ---------- Windows, programs, clipboard ----------
-
-server.registerTool(
-  "list_windows",
-  {
-    description: "List open windows on the remote computer (title, program, minimized or not, centre on the screenshot), from front to back.",
-    annotations: { readOnlyHint: true },
-  },
-  () => forward("list_windows", {}),
-);
-
-server.registerTool(
-  "focus_window",
-  {
-    description:
-      "Switch to a window (or minimize / maximize / restore / close it). Use the handle from list_windows, or a keyword from the title or program name.",
-    inputSchema: {
-      handle: z.number().int().optional().describe("The number in brackets from list_windows"),
-      title: z.string().optional().describe("Title or program-name keyword, e.g. chrome, notepad, excel"),
-      action: z.enum(["focus", "minimize", "maximize", "restore", "close"]).optional().describe("Default focus"),
-      screenshot: screenshotFlag,
-    },
-  },
-  (a) => act("focus_window", a),
-);
-
-// ---------- Controls (UI Automation): operate programs without the mouse ----------
-
-const elementVerb = z.enum(["click", "toggle", "select", "expand", "collapse", "set_value", "focus", "scroll", "scroll_into_view", "text"]);
-
-server.registerTool(
-  "list_elements",
-  {
-    description:
-      "List the controls of a window (buttons, text boxes, checkboxes, menus, list and tree items, tabs, links, text) as text, numbered for element_action. " +
-      "Each line: [id] Type \"name\" value=\"…\" (state) {what it supports} @(x,y centre on the latest screenshot). " +
-      "Much cheaper than a screenshot for finding and reading things, and works without one. Defaults to the window in front. " +
-      "Ids are valid until the next list_elements. Programs that draw their own UI (games, remote desktops, some canvases) show little or nothing; use screenshot + click there.",
-    inputSchema: {
-      handle: z.number().int().optional().describe("Window handle from list_windows; default the window in front"),
-      title: z.string().optional().describe("Or a title / program-name keyword"),
-      query: z.string().optional().describe("Only list controls whose line contains this text (case-insensitive), e.g. a button label or 'Edit'"),
-      maxResults: z.number().int().min(1).max(2000).optional().describe("Default 300"),
-      includeOffscreen: z.boolean().optional().describe("Also list controls scrolled out of view; default false"),
-    },
-    annotations: { readOnlyHint: true },
-  },
-  (a) => forward("list_elements", a),
-);
-
-server.registerTool(
-  "element_action",
-  {
-    description:
-      "Operate a control from list_elements directly through Windows UI Automation. The user's mouse and keyboard focus are not touched (except action focus), " +
-      "and it works even when the window is partly covered. Actions: click (default; presses buttons, links and menu items, or toggles / selects / expands whatever the control is), " +
-      "toggle, select, expand, collapse, set_value (fills a text box or slider with value, replacing its content), focus, " +
-      "scroll (value up / down / left / right, add :page for a page, e.g. down:page), scroll_into_view, text (returns the control's full text, e.g. a document or a long message). " +
-      "Parallel: pass actions (up to 20) instead of id/action/value to run several at the same time, e.g. fill every field of a form or tick several boxes in one call; " +
-      "they run concurrently in no set order. Sequence: add sequence: true to run actions (up to 100) one after another in the order given, as fast as the controls take them " +
-      "(or intervalMs apart), e.g. keying a sum into a calculator; it stops at the first failure and skips the rest. Controls that only appear after a step " +
-      "(a menu that opens, a new dialog) have no id yet, so those still need separate calls with list_elements in between. " +
-      "No screenshot afterwards by default: check the result with list_elements (cheap) or pass screenshot: true.",
-    inputSchema: {
-      id: z.number().int().min(1).optional().describe("The number in brackets from list_elements"),
-      action: elementVerb.optional(),
-      value: z.string().optional().describe("For set_value: the new content. For scroll: the direction"),
-      actions: z
-        .array(z.object({ id: z.number().int().min(1), action: elementVerb.optional(), value: z.string().optional() }))
-        .min(1)
-        .max(100)
-        .optional()
-        .describe("Several actions instead of id/action/value: up to 20 at the same time, or up to 100 in order with sequence"),
-      sequence: z.boolean().optional().describe("Run actions one after another in the order given, stopping at the first failure; default false (all at once)"),
-      intervalMs: z.number().int().min(0).max(5000).optional().describe("With sequence: pause between steps in milliseconds; default 0 (as fast as possible)"),
-      screenshot: z.boolean().optional().describe("Take a screenshot after the action; default false"),
-    },
-  },
-  (a) =>
-    a.id === undefined && !a.actions
-      ? Promise.resolve({ content: [{ type: "text" as const, text: "Give id, or actions" }], isError: true })
-      : a.actions && !a.sequence && a.actions.length > 20
-        ? Promise.resolve({ content: [{ type: "text" as const, text: "Up to 20 actions at the same time; for more, pass sequence: true" }], isError: true })
-        : act("element_action", a, false),
-);
-
-server.registerTool(
-  "open_app",
-  {
-    description:
-      "Open a program, file, folder or URL as if double-clicked. E.g. notepad, control, taskmgr, ms-settings:display, " +
-      "C:\\Users\\xx\\Desktop\\report.docx, https://example.com. Runs with the user's current privileges.",
-    inputSchema: {
-      target: z.string().describe("Program name, path, URL, or a link such as ms-settings:"),
-      args: z.string().optional().describe("Command-line arguments"),
-      cwd: z.string().optional().describe("Working directory"),
-      screenshot: screenshotFlag,
-    },
-  },
-  (a) => act("open_app", a),
-);
-
-server.registerTool(
-  "read_clipboard",
-  { description: "Read the text on the remote computer's clipboard (or the list of copied files).", annotations: { readOnlyHint: true } },
-  () => forward("read_clipboard", {}),
-);
-
-server.registerTool(
-  "write_clipboard",
-  {
-    description: "Put text on the remote computer's clipboard; paste it afterwards with press_keys ctrl+v. Faster than type_text for long text.",
-    inputSchema: { text: z.string() },
-  },
-  (a) => forward("write_clipboard", a),
-);
-
 // ---------- Files ----------
 
-const remotePath = z.string().describe("Remote path; supports ~ and %ENV_VARS%; relative paths are resolved against the user's home");
+const remotePath = z.string().describe("Path on the computer; supports ~ and %ENV_VARS%; relative paths are resolved against the user's home");
 
 server.registerTool(
   "read_file",
   {
     description:
-      "Read a text file on the remote computer, with line numbers. Detects UTF-8 / UTF-16 / ANSI code-page encodings. Read large files in parts with offset and limit. " +
+      "Read a text file on the computer, with line numbers. Detects UTF-8 / UTF-16 / ANSI code-page encodings. Read large files in parts with offset and limit. " +
       "Good for logs, config files, hosts, scripts.",
     inputSchema: {
       path: remotePath,
@@ -708,7 +671,7 @@ server.registerTool(
 server.registerTool(
   "write_file",
   {
-    description: "Write a text file on the remote computer (overwrites it entirely, creates it and any folders if missing). Existing files keep their encoding by default. Prefer edit_file for small changes.",
+    description: "Write a text file on the computer (overwrites it entirely, creates it and any folders if missing). Existing files keep their encoding by default. Prefer edit_file for small changes.",
     inputSchema: {
       path: remotePath,
       content: z.string(),
@@ -723,7 +686,7 @@ server.registerTool(
   "edit_file",
   {
     description:
-      "Replace an exact piece of a remote text file, keeping its encoding and line endings. oldText must match the file exactly (check with read_file first, without line numbers) " +
+      "Replace an exact piece of a text file, keeping its encoding and line endings. oldText must match the file exactly (check with read_file first, without line numbers) " +
       "and appear only once; otherwise include more context or pass replaceAll.",
     inputSchema: {
       path: remotePath,
@@ -739,7 +702,7 @@ server.registerTool(
 server.registerTool(
   "list_dir",
   {
-    description: "List the contents of a remote folder (modified time, size, name).",
+    description: "List the contents of a folder (modified time, size, name).",
     inputSchema: { path: remotePath.optional().describe("Defaults to the user's home") },
     annotations: { readOnlyHint: true },
   },
@@ -749,7 +712,7 @@ server.registerTool(
 server.registerTool(
   "find_files",
   {
-    description: "Find files by name recursively in a remote folder. Supports * and ? wildcards; separate several with ; (e.g. *.log;*.dmp). Results are newest first.",
+    description: "Find files by name recursively in a folder. Supports * and ? wildcards; separate several with ; (e.g. *.log;*.dmp). Results are newest first.",
     inputSchema: {
       path: remotePath.describe("Folder to search from"),
       pattern: z.string().describe("File-name wildcard"),
@@ -763,7 +726,7 @@ server.registerTool(
 server.registerTool(
   "search_files",
   {
-    description: "Search file contents in a remote file or folder (regular expression). Detects encodings and skips binary files and files over 10 MB.",
+    description: "Search file contents in a file or folder (regular expression). Detects encodings and skips binary files and files over 10 MB.",
     inputSchema: {
       path: remotePath.describe("File or folder"),
       pattern: z.string().describe("Regular expression"),
@@ -799,10 +762,10 @@ server.registerTool(
 server.registerTool(
   "upload_file",
   {
-    description: "Upload a file from your computer to the remote computer (max 20 MB).",
+    description: "Copy a file from the machine this server runs on to the connected computer (max 20 MB). For a computer connected directly, an ordinary file copy does the same.",
     inputSchema: {
-      localPath: z.string().describe("File path on your side"),
-      remotePath: z.string().describe("Remote destination path; supports ~ and %ENV_VARS%; relative paths are resolved against the user's home"),
+      localPath: z.string().describe("File path on this side"),
+      remotePath: z.string().describe("Destination path on the computer; supports ~ and %ENV_VARS%; relative paths are resolved against the user's home"),
     },
   },
   async ({ localPath, remotePath }) => {
@@ -819,10 +782,10 @@ server.registerTool(
 server.registerTool(
   "download_file",
   {
-    description: "Download a file from the remote computer to yours (max 20 MB).",
+    description: "Copy a file from the connected computer to the machine this server runs on (max 20 MB).",
     inputSchema: {
-      remotePath: z.string().describe("Remote file path; supports ~ and %ENV_VARS%"),
-      localPath: z.string().describe("Destination on your side (a file, or an existing folder)"),
+      remotePath: z.string().describe("File path on the computer; supports ~ and %ENV_VARS%"),
+      localPath: z.string().describe("Destination on this side (a file, or an existing folder)"),
     },
   },
   async ({ remotePath, localPath }) => {
@@ -836,7 +799,7 @@ server.registerTool(
       await mkdir(path.dirname(dest), { recursive: true });
       const buf = Buffer.from(r.file.data, "base64");
       await writeFile(dest, buf);
-      return { content: [{ type: "text", text: `Saved to ${dest} (${buf.length} bytes)` }] };
+      return say(`Saved to ${dest} (${buf.length} bytes)`);
     } catch (e) {
       return errorReply(e);
     }

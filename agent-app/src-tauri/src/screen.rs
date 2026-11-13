@@ -47,8 +47,14 @@ pub fn watch_area(at: Option<(i32, i32)>) -> Area {
     if r - l < 16 || b - t < 16 {
         return v;
     }
-    Area { left: l, top: t, width: r - l, height: b - t }
+    // The outermost pixels are the window's border, which Windows repaints on its own (it fades between the
+    // active and inactive colour, and recomposes when windows above it move): not a reaction to anything
+    let edge = if r - l > 64 && b - t > 64 { FRAME_EDGE } else { 0 };
+    Area { left: l + edge, top: t + edge, width: r - l - 2 * edge, height: b - t - 2 * edge }
 }
+
+/// How far in from a window's edge its border and resize frame reach, in screen pixels
+const FRAME_EDGE: i32 = 4;
 
 /// What differs between two prints: how many samples, and their bounding box in screen pixels
 pub struct Diff {
@@ -288,6 +294,8 @@ pub struct Change {
     pub waited: Duration,
     /// Another window came to the front: its title
     pub new_front: Option<String>,
+    /// ... and its handle
+    pub front: Option<isize>,
 }
 
 /// Wait until the screen has reacted to an action and stopped changing.
@@ -340,9 +348,14 @@ pub fn settle(b: &Before, quiet: Duration, max: Duration) -> Change {
                 (true, Some(p), Some(c)) => diff_ignoring(p, c, ignore),
                 _ => Diff::NONE,
             };
-            let new_front = front().and_then(|h| crate::winmgr::list().into_iter().find(|w| w.handle == h).map(|w| w.title));
-            let changed = total.significant() || new_front.is_some();
-            return Change { changed, rect: total.rect.filter(|_| total.significant()), busy: !done, waited: elapsed, new_front };
+            let front = front();
+            // An untitled window in front (a menu, the desktop) is named by its program
+            let new_front = front.map(|h| match crate::winmgr::title_of(h) {
+                t if t.trim().is_empty() => crate::winmgr::process_name(crate::winmgr::pid_of(h)),
+                t => t,
+            });
+            let changed = total.significant() || front.is_some();
+            return Change { changed, rect: total.rect.filter(|_| total.significant()), busy: !done, waited: elapsed, new_front, front };
         }
         if cur.is_some() {
             prev = cur;

@@ -79,4 +79,7 @@ $canvas.Add_MouseClick({
   }
 })
 
-[void]$form.ShowDialog()
+# Started without a console window (as test/bench.ts does), a process's first window opens hidden:
+# Windows applies the launcher's "hidden" to the first show. Showing it again once it is up puts it on screen.
+$form.Add_Shown({ $form.Hide(); $form.Show(); $form.Activate() })
+[System.Windows.Forms.Application]::Run($form)

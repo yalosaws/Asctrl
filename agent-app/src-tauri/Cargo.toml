@@ -1,7 +1,7 @@
 [package]
 name = "asctrl-agent"
-version = "0.1.0"
-description = "Asctrl remote assist agent"
+version = "0.2.0"
+description = "Asctrl driver: gives an AI eyes and hands on this computer"
 authors = ["Asctrl"]
 edition = "2024"
 
@@ -16,7 +16,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time", "net", "io-util"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 base64 = "0.22"
@@ -55,6 +55,7 @@ windows = { version = "0.62", features = [
 [profile.release]
 codegen-units = 1
 lto = true
-opt-level = "s"
+# Speed first: screen capture, change detection and scene reading run after every action
+opt-level = 3
 panic = "abort"
 strip = true

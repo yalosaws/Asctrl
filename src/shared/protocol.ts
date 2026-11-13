@@ -7,31 +7,33 @@ export type ToolName =
   | "list_processes"
   | "event_log"
   | "run_powershell"
-  // The following are supported only by the GUI agent (agent-app)
-  | "reset_shell"
+  // The following are supported only by the driver app (agent-app)
+  // Looking
+  | "observe"
+  | "zoom"
+  | "find"
+  | "read_text"
+  | "list_windows"
+  | "wait_for"
+  // Acting
   | "click"
   | "scroll"
   | "drag"
+  | "mouse"
   | "type_text"
   | "press_keys"
-  | "upload_file"
-  | "download_file"
-  | "request_admin"
-  | "restart_computer"
-  | "zoom"
-  | "cursor_position"
-  | "mouse_move"
-  | "mouse_look"
-  | "mouse_down"
-  | "mouse_up"
-  | "hold_key"
-  | "list_windows"
-  | "focus_window"
-  | "list_elements"
+  | "set_value"
   | "element_action"
+  | "batch"
+  // Programs, windows, clipboard
   | "open_app"
+  | "focus_window"
   | "read_clipboard"
   | "write_clipboard"
+  // Shell, files, system
+  | "reset_shell"
+  | "job_output"
+  | "stop_job"
   | "read_file"
   | "write_file"
   | "edit_file"
@@ -39,12 +41,10 @@ export type ToolName =
   | "find_files"
   | "search_files"
   | "disk_usage"
-  | "job_output"
-  | "stop_job"
-  | "find_text"
-  | "click_text"
-  | "wait_for"
-  | "batch";
+  | "upload_file"
+  | "download_file"
+  | "request_admin"
+  | "restart_computer";
 
 // ---- Handshake ----
 
@@ -75,10 +75,21 @@ export interface ConsentReply {
   allow: boolean;
 }
 
-/** relay -> tech: paired */
+/** controller -> driver, on the same machine (no relay): the token from %LOCALAPPDATA%\Asctrl\local.json */
+export interface LocalHello {
+  type: "local_hello";
+  token: string;
+  name: string;
+}
+
+/** relay -> tech, or driver -> local controller: paired */
 export interface Paired {
   type: "paired";
   hostname: string;
+  /** Connected straight to a driver on this machine */
+  local?: boolean;
+  /** The driver runs as administrator */
+  admin?: boolean;
 }
 
 /** relay -> either side: an error, or the other side disconnected */
@@ -118,6 +129,7 @@ export interface ToolResult {
 export type Message =
   | AgentHello
   | TechHello
+  | LocalHello
   | ConsentRequest
   | ConsentReply
   | Paired

@@ -88,14 +88,19 @@ impl Drop for Gdi {
     }
 }
 
+/// How a capture of `area` comes out when limited to `max_width` pixels wide: (image pixels per screen
+/// pixel, width, height). Never scaled up.
+pub fn scaled(area: Area, max_width: i32) -> (f64, i32, i32) {
+    let scale = (max_width as f64 / area.width.max(1) as f64).min(1.0);
+    (scale, ((area.width as f64 * scale) as i32).max(1), ((area.height as f64 * scale) as i32).max(1))
+}
+
 /// Capture `area` and scale it down to at most `max_width` pixels wide (never up)
 pub fn grab(area: Area, max_width: i32) -> Result<Shot, String> {
     if area.width <= 0 || area.height <= 0 {
         return Err("Nothing to capture (the area is empty)".into());
     }
-    let scale = (max_width as f64 / area.width as f64).min(1.0);
-    let w = ((area.width as f64 * scale) as i32).max(1);
-    let h = ((area.height as f64 * scale) as i32).max(1);
+    let (scale, w, h) = scaled(area, max_width);
     // The JPEG encoder takes 16-bit dimensions
     if w > u16::MAX as i32 || h > u16::MAX as i32 {
         return Err("The area is too large to capture".into());

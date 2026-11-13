@@ -12,7 +12,7 @@ const FIRST_MS = 900;
 /** No call this long means the AI has most likely finished its turn: stop thinking */
 const THINK_MAX_MS = 60_000;
 /** Tools that only wait or scan and draw nothing of their own: they get the circling arcs */
-const WAITS = new Set(["wait", "wait_for", "find_text"]);
+const WAITS = new Set(["wait_for", "find", "read_text", "observe"]);
 
 let live = false;
 let running = 0;

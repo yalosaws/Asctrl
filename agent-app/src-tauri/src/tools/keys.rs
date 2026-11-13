@@ -1,0 +1,285 @@
+//! The keyboard: typing text and pressing keys. Both say where the keys went, and typing reads the field
+//! back when it can, so text that landed in the wrong place or was changed on the way shows at once.
+
+use super::locate::{Ask, Located, Miss};
+use super::report::Did;
+use super::*;
+
+/// type_text pastes text longer than this (method auto)
+const PASTE_OVER: usize = 200;
+
+/// How long a program gets to read the clipboard after ctrl+v when nothing tells us it has
+const PASTE_GRACE: Duration = Duration::from_millis(350);
+/// How long a field gets to show what was just typed before its content is called wrong
+const READBACK_GRACE: Duration = Duration::from_millis(250);
+
+/// The clipboard being put back after a paste: the thread doing it, and a way to tell it not to wait any longer
+struct Restore {
+    thread: std::thread::JoinHandle<()>,
+    now: std::sync::mpsc::Sender<()>,
+}
+
+static RESTORING: std::sync::Mutex<Option<Restore>> = std::sync::Mutex::new(None);
+
+/// Wait until the clipboard is the user's own again (a paste may still be putting it back)
+pub(super) fn clipboard_settled() {
+    let pending = RESTORING.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(r) = pending {
+        // `now` stays alive until the thread is done: dropping it first would cut the wait short
+        let _ = r.thread.join();
+        drop(r.now);
+    }
+}
+
+/// The pasted text is known to have arrived (the field reads it): the clipboard can go back right away
+pub(super) fn clipboard_release() {
+    if let Some(r) = RESTORING.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        let _ = r.now.send(());
+    }
+}
+
+/// Paste `t` with ctrl+v, then put the clipboard back as it was. The program reads the clipboard when it
+/// handles the keystroke, a moment later, so it is put back after a pause (or as soon as the text is seen to
+/// have arrived) — in the background: the reply does not wait for it, and the next action does (see `acting`).
+/// If someone else put something new on the clipboard in the meantime, it is theirs and is left alone.
+fn paste(t: &str, saved: Option<String>) -> Result<(), String> {
+    clipboard_settled();
+    winmgr::set_clipboard_text(t)?;
+    let serial = winmgr::clipboard_serial();
+    let r = input::press_keys("ctrl+v");
+    let (now, wait) = std::sync::mpsc::channel::<()>();
+    let pasted = t.to_string();
+    let thread = std::thread::spawn(move || {
+        let _ = wait.recv_timeout(PASTE_GRACE);
+        // Still what we put there? The serial moves on any change; some tools re-publish the same text
+        let ours = winmgr::clipboard_serial() == serial || winmgr::clipboard_text().ok().flatten().is_some_and(|c| c == pasted);
+        if !ours {
+            return;
+        }
+        match saved {
+            Some(s) => {
+                let _ = winmgr::set_clipboard_text(&s);
+            }
+            None => winmgr::clear_clipboard(),
+        }
+    });
+    *RESTORING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Restore { thread, now });
+    r
+}
+
+/// Whether `t` goes in through the clipboard
+fn pastes(t: &str, method: &str) -> bool {
+    method == "paste" || (method != "keys" && t.chars().count() > PASTE_OVER)
+}
+
+/// Type or paste, by method and length. Says how it went in.
+pub(super) fn enter_text(t: &str, method: &str) -> Result<&'static str, String> {
+    if pastes(t, method) {
+        match winmgr::clipboard_text() {
+            Ok(saved) => {
+                paste(t, saved)?;
+                return Ok(" (pasted; the clipboard was put back)");
+            }
+            Err(_) if method == "paste" => return Err("The clipboard holds an image or files, which pasting would lose; use method keys".into()),
+            // Something on the clipboard that couldn't be put back: type instead
+            Err(_) => {}
+        }
+    }
+    input::type_text(t)?;
+    Ok("")
+}
+
+/// Put the keyboard focus on a located target: a control of an ordinary program takes it directly; anything
+/// else (a web page's field, a spot on a canvas, a control that won't take it) is clicked.
+pub(super) fn focus_target(loc: &Located, call: &str, part: &str) -> Result<(), String> {
+    if let Some(l) = &loc.live {
+        if !l.enabled() {
+            return Err(format!("{} is disabled", loc.desc));
+        }
+        pointer::activate_for(loc);
+        if !l.is_web() && l.focus().is_ok() {
+            std::thread::sleep(Duration::from_millis(30));
+            if l.has_focus() {
+                return Ok(());
+            }
+        }
+    }
+    locate::uncover(loc)?;
+    let r = input::click(loc.point.0, loc.point.1, "", 1, "");
+    fx::click(call, part, loc.point, 1, r.is_ok());
+    r?;
+    std::thread::sleep(Duration::from_millis(50));
+    Ok(())
+}
+
+/// What the focused field holds after typing `typed`: (what has the focus, a note for the reply, the
+/// field's content when it was seen to hold the text). A program takes keys in a moment after they are
+/// sent, so a field that does not show the text yet is read again for a short while before it is called wrong.
+fn readback(typed: &str) -> (Option<String>, String, Option<String>) {
+    let flat = |s: &str| s.replace('\r', "");
+    let want = flat(typed);
+    let want = want.trim_end();
+    let started = std::time::Instant::now();
+    loop {
+        let Some(fo) = uia::focused() else { return (None, String::new(), None) };
+        let label = fo.label.clone();
+        if matches!(fo.role, "Button" | "CheckBox" | "RadioButton" | "Link" | "MenuItem" | "TabItem" | "SplitButton") {
+            let note = format!(". Careful: the keyboard focus is on {label}, which is not a text field, so the text may have gone nowhere");
+            return (Some(label), note, None);
+        }
+        if fo.password || typed.contains('\n') || typed.is_empty() {
+            return (Some(label), String::new(), None);
+        }
+        let Some(v) = fo.value else { return (Some(label), String::new(), None) };
+        let v = flat(&v);
+        if v.contains(want) {
+            let note = format!("; it now reads \"{}\"", uia::clip(&v, 100));
+            return (Some(label), note, Some(v));
+        }
+        if started.elapsed() < READBACK_GRACE {
+            std::thread::sleep(Duration::from_millis(30));
+            continue;
+        }
+        let note = if v.trim().is_empty() {
+            ". Careful: the field is still empty — the keys went elsewhere, or the field does not report its content".into()
+        } else {
+            format!(". Careful: it now reads \"{}\", which is not what was typed (an input method, autocomplete or formatting may have changed it)", uia::clip(&v, 100))
+        };
+        return (Some(label), note, None);
+    }
+}
+
+pub(super) async fn type_text(ctx: &Ctx, args: &Value) -> Output {
+    let t = str_arg(args, "text").to_string();
+    let replace = bool_arg(args, "replace") == Some(true);
+    let enter = bool_arg(args, "enter") == Some(true);
+    if t.is_empty() && !replace && !enter {
+        return fail("text is empty");
+    }
+    let method = str_arg(args, "method").to_string();
+    if !matches!(method.as_str(), "" | "auto" | "keys" | "paste") {
+        return fail(format!("method: \"{method}\" is not one of auto, keys, paste"));
+    }
+    let ask = match Ask::of(ctx, args) {
+        Ok(a) => a.map(Ask::editing),
+        Err(e) => return fail(e),
+    };
+    // Without a target, window only says which window the keys are for
+    let window = match (&ask, winmgr::find_arg(args.get("window"))) {
+        (Some(_), _) => None,
+        (None, Ok(w)) => w.map(|h| h.0 as isize),
+        (None, Err(e)) => return fail(e),
+    };
+    let (pace, call) = (Pace::current(), fx::call_id());
+    let turn = acting().await;
+    let r = tokio::task::spawn_blocking(move || -> Result<Did, Miss> {
+        let mut at = None;
+        let mut scene = None;
+        if let Some(a) = &ask {
+            let loc = locate::resolve(a)?;
+            focus_target(&loc, &call, "f")?;
+            at = Some(loc.point);
+            scene = loc.scene;
+        } else if let Some(h) = window {
+            winmgr::bring_to_front(winmgr::hwnd(h))?;
+        }
+        let fg = winmgr::real_foreground();
+        let before = pace.before(at);
+        if replace {
+            input::press_keys("ctrl+a")?;
+            std::thread::sleep(Duration::from_millis(20));
+            if t.is_empty() {
+                input::press_keys("delete")?;
+            }
+        }
+        // What the field holds before a paste, to tell afterwards that the paste really arrived
+        let prior = if !t.is_empty() && !pace.fast && pastes(&t, &method) { uia::focused().and_then(|f| f.value).map(|v| v.replace('\r', "")) } else { None };
+        let how = if t.is_empty() { "" } else { enter_text(&t, &method)? };
+        // Read the field back before Enter sends it away
+        let (into, note, landed) = if pace.fast { (None, String::new(), None) } else { readback(&t) };
+        // The field holds the text and did not before: the program has read the clipboard, so it can go back now.
+        // (A field that already read the same proves nothing: the paste may still be on its way.)
+        if let (Some(now), Some(was)) = (&landed, &prior)
+            && now != was
+        {
+            clipboard_release();
+        }
+        if enter {
+            std::thread::sleep(Duration::from_millis(30));
+            input::press_keys("enter")?;
+        }
+        let change = pace.after(before);
+        let n = t.chars().count();
+        let what = match (n, replace) {
+            (0, true) => "Cleared".to_string(),
+            (0, false) => "Pressed Enter in".to_string(),
+            (_, true) => format!("Replaced the content with {n} characters in"),
+            (_, false) => format!("Typed {n} characters into"),
+        };
+        let place = match into {
+            Some(label) => label,
+            None => format!("\"{}\"", uia::clip(&winmgr::title_of(fg), 50)),
+        };
+        let sent = if enter && n > 0 { ", then pressed Enter" } else { "" };
+        Ok(Did { done: format!("{what} {place}{how}{note}{sent}"), change, hwnd: scene.or(Some(fg).filter(|h| *h != 0)), fresh: false, delivered: false })
+    })
+    .await;
+    drop(turn);
+    match r {
+        Ok(Ok(did)) => report::conclude(ctx, args, did, true).await,
+        Ok(Err(m)) => report::missed(ctx, m).await,
+        Err(e) => fail(e.to_string()),
+    }
+}
+
+pub(super) async fn press_keys(ctx: &Ctx, args: &Value) -> Output {
+    let keys = str_arg(args, "keys").trim().to_string();
+    if keys.is_empty() {
+        return fail("No keys given");
+    }
+    let repeat = int_arg(args, "repeat", 1, 1, 100) as usize;
+    let hold_ms = args.get("holdSec").and_then(Value::as_f64).map(|s| (s.clamp(0.05, 10.0) * 1000.0) as u64);
+    if hold_ms.is_some() && keys.split_whitespace().count() > 1 {
+        return fail("holdSec holds one key or combination, not a sequence");
+    }
+    let window = match winmgr::find_arg(args.get("window")) {
+        Ok(w) => w.map(|h| h.0 as isize),
+        Err(e) => return fail(e),
+    };
+    let pace = Pace::current();
+    let turn = acting().await;
+    let r = tokio::task::spawn_blocking(move || -> Result<Did, String> {
+        if let Some(h) = window {
+            winmgr::bring_to_front(winmgr::hwnd(h))?;
+        }
+        let fg = winmgr::real_foreground();
+        let title = winmgr::title_of(fg);
+        let before = pace.before(None);
+        match hold_ms {
+            Some(ms) => input::hold_keys(&keys, ms)?,
+            None => {
+                for i in 0..repeat {
+                    if i > 0 {
+                        std::thread::sleep(Duration::from_millis(30));
+                    }
+                    input::press_sequence(&keys)?;
+                }
+            }
+        }
+        let change = pace.after(before);
+        let times = match (hold_ms, repeat) {
+            (Some(ms), _) => format!(" (held {:.1} s)", ms as f64 / 1000.0),
+            (None, 1) => String::new(),
+            (None, n) => format!(" ×{n}"),
+        };
+        let place = if title.trim().is_empty() { String::new() } else { format!(" in \"{}\"", uia::clip(&title, 50)) };
+        Ok(Did { done: format!("Pressed {keys}{times}{place}"), change, hwnd: Some(fg).filter(|h| *h != 0), fresh: false, delivered: false })
+    })
+    .await;
+    drop(turn);
+    match r {
+        Ok(Ok(did)) => report::conclude(ctx, args, did, true).await,
+        Ok(Err(e)) => fail(e),
+        Err(e) => fail(e.to_string()),
+    }
+}

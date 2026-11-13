@@ -1,5 +1,6 @@
-// Manual demo: connect to an agent, run the steps from JSON in order, save screenshots to test/out/.
+// Manual demo: connect to a driver, run the steps from JSON in order, save screenshots to test/out/.
 // Usage: node test/demo-step.ts <relayUrl> <code> '<json array of steps>'   (or @steps.json)
+//        node test/demo-step.ts local - '<json array of steps>'            the driver on this computer, directly
 //   Step: { "tool": "click", "args": {...} } or { "wait": ms }
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -12,7 +13,8 @@ const steps: Array<{ tool?: ToolName; args?: Record<string, unknown>; wait?: num
 );
 
 const tech = new TechClient(relay, "Demo");
-await tech.connect(code);
+if (relay === "local") await tech.connectLocalDriver();
+else await tech.connect(code);
 mkdirSync("test/out", { recursive: true });
 for (const s of steps) {
   if (s.wait) {

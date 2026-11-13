@@ -1,211 +1,218 @@
-# Asctrl — AI-assisted remote PC repair
+# Asctrl — a computer-use framework for AI agents
 
-Helps people who aren't comfortable with computers get them fixed: they run a small app and read you a 6-digit assist code, and you (with an AI) can then see their screen, click, type, run commands, transfer files and, when needed, request administrator rights remotely. The person can see what is being done on their screen.
+Asctrl gives an AI eyes and hands on a Windows computer: it reads what is on screen as structured text and as images, clicks, types, fills forms, runs commands and edits files — on the machine the AI runs on, or on a remote one reached with a 6-digit code. Any MCP client (Claude Code, Claude desktop, your own agent) can use it.
+
+It is built around three ideas:
+
+- **One way to point.** Every action takes a `target` — a control's reference such as `"e12"`, or simply the text the thing shows (`"Save"`) — or `x`, `y` on the latest screenshot. Text is looked up among the window's real controls first and read off the pixels (OCR) where a program draws its own UI.
+- **Look once.** `observe` reads a window's controls as a tree with references that stay valid for as long as the control exists. After that, every action's reply says what it did, whether the screen reacted, and what changed among the controls, with references to anything new. A screenshot comes back only when text can't tell. The AI rarely has to look again just to learn what its last action did.
+- **Never act on a stale picture.** A click by coordinates is checked against the windows as they were when the AI last looked: if the window moved, the click moves with it; if another program's window has come in front, or the window was resized or closed, nothing is clicked and a fresh screenshot goes back. A control is scrolled into view and its window uncovered before it is clicked. Typed text is read back from the field.
 
 ## Architecture
 
 ```
- Computer needing help            Your server                    Your computer
-┌──────────────┐   WebSocket   ┌──────────────┐   WebSocket   ┌─────────────────────┐
-│ Agent        │ ────────────▶ │  Relay       │ ◀──────────── │ MCP console         │
-│ shows a code │               │ pairs by code│               │  ↑ stdio            │
-│ shows actions│ ◀── calls ─── │ forwards msgs│ ─── calls ──▶ │ Claude (AI + you)   │
-└──────────────┘               └──────────────┘               └─────────────────────┘
+                         this computer                                   a remote computer
+┌─────────────────────┐  stdio  ┌────────────┐  loopback WebSocket  ┌──────────────────────────┐
+│ AI (any MCP client) │ ◀─────▶ │ MCP server │ ◀──────────────────▶ │ Driver (agent-app)        │
+└─────────────────────┘         │  (Node)    │                      │  look · locate · act ·    │
+                                │            │  WebSocket  ┌───────┐│  report · shell · files   │
+                                │            │ ◀─────────▶ │ Relay │◀──── driver on the remote  │
+                                └────────────┘   by code   └───────┘│  overlay shows every step │
+                                                                    └──────────────────────────┘
 ```
 
-- Both sides only **connect out** to the relay, so the other computer can be behind a router/NAT.
-- Having the code is enough to connect: the person shares it on purpose, and every action is shown on their screen. Only administrator access and restarts ask the person to click **Allow**.
-- The console is an **MCP server**, so Claude Code / Claude desktop can use the remote computer as a set of tools.
-- The agent pings the relay every 25 s and the relay pings every connection every 30 s, so a code stays valid while the person is reading it out (idle connections are otherwise forgotten by home routers), and a computer that went to sleep or lost Wi-Fi frees its code after 90 s.
+- The **driver** (`agent-app/`, Tauri: Rust backend + web overlay) runs on the computer being used. It does all the work natively: screen capture, UI Automation, OCR, input, the shell and files. It has no window: an orb of light on a transparent always-on-top overlay shows what the AI is doing (where it clicks, what it runs), and a gradient border runs round the screen while a session is active.
+- The **MCP server** (`src/console/mcp-server.ts`) exposes the tools. It reaches a driver one of two ways:
+  - **Local link** — straight to the driver on the same machine over a loopback WebSocket. No relay, no code, no trip over the internet. The driver writes its port and a random token to `%LOCALAPPDATA%\Asctrl\local.json` (readable only by the user); a connection must present the token, and connections from web pages are refused. `connect` with no arguments uses it and starts the driver if it is not running.
+  - **Relay** (`src/relay/server.ts`) — both sides connect out to a relay and are paired by the 6-digit code shown next to the orb, so the computer can be anywhere, behind any router. `connect` with a code uses it.
+- One controller drives at a time: there is one mouse and one keyboard.
 
 | Path | Description |
 |---|---|
-| `src/shared/protocol.ts` | Message format shared by all three parties |
+| `agent-app/src-tauri/src/tools/` | The tools: `look` (observe, screenshot, find, read_text), `locate` (targets), `pointer` / `keys` / `values` (actions), `report` (what a reply says), `wait`, `batch`, `apps`, `system` |
+| `agent-app/src-tauri/src/uia.rs` | UI Automation: scenes, stable references, change detection between readings, operating controls |
+| `agent-app/src-tauri/src/screen.rs` | Telling whether the screen reacted to an action and when it has settled |
+| `agent-app/src-tauri/src/link.rs` | The local link and the relay link; running tool calls |
+| `agent-app/src/` | The overlay UI |
+| `src/console/` | MCP server and the controller library (`TechClient`) |
 | `src/relay/server.ts` | Relay server |
-| `agent-app/` | **GUI agent** (Tauri: Rust backend + web UI). This is what you send to the person |
-| `src/agent/` | Command-line agent (Node, for development and testing) |
-| `src/console/tech-client.ts` | Technician connection library |
-| `src/console/mcp-server.ts` | Technician MCP server |
-| `test/e2e.ts` | End-to-end test (works with both agents) |
+| `src/shared/protocol.ts` | Message format shared by all parties |
+| `src/agent/` | A minimal command-line driver (Node, 5 tools), for testing the relay protocol |
+| `test/` | End-to-end test, benchmark, manual demo |
 
-## GUI agent (agent-app)
-
-The agent has no window: it is an orb of light on a transparent, always-on-top fullscreen overlay. When ready, it shows the 6-digit assist code next to the orb. When someone connects with the code, the session starts right away. While the session is active, a flowing gradient border runs around every screen, and commands and file operations are shown in a panel next to the orb. Typing and key presses are not shown. Hover the orb to end the session or quit.
-
-Development needs Rust (`rustup`) and the Visual Studio C++ build tools.
+## Quick start (Node.js 24+, Rust, Visual Studio C++ build tools)
 
 ```bash
-cd agent-app
 npm install
+```
+
+```bash
+cd agent-app && npm install && npx tauri build --no-bundle
+```
+
+Open this folder in Claude Code: the project's `.mcp.json` already configures the `asctrl` tools. Then:
+
+> Connect to this computer and tidy up my Downloads folder
+
+`connect` starts `agent-app/src-tauri/target/release/asctrl-agent.exe` if it is not running (set `ASCTRL_DRIVER_EXE` to use another copy). For Claude desktop, add the contents of `.mcp.json` to its MCP configuration and set `args` to the absolute path of `mcp-server.ts`.
+
+To drive a **remote** computer, run the driver there, read the 6-digit code next to the orb, and:
+
+> Connect with code 123456 and find out why this computer is so slow
+
+## Tools
+
+39 tools. The first group is what makes it a computer-use framework; the rest are the shell and file tools an agent expects.
+
+| Category | Tool | Purpose |
+|---|---|---|
+| Connection | `connect` / `disconnect` | No arguments: this computer, directly. `code`: a remote one. `waitSec` keeps retrying until the driver is back (after elevation or a restart) |
+| Looking | `observe` | A window as text: its controls as a tree with references, state, value and position; open menus and popups included; text read off the pixels where the controls say little. Names the window in front and the others. `image: true` adds a screenshot |
+| | `screenshot` | The whole screen, one display, or one window (sharper, cheaper). `x`, `y` of later actions refer to the latest one |
+| | `zoom` | Re-capture part of the screenshot at full resolution, to read small text and icons |
+| | `find` | Where something is: matching controls best first (with references), and places the text appears on the pixels |
+| | `read_text` | One control's full text, a window's text in reading order, or a region read off the pixels |
+| | `list_windows` | Open windows, front to back, dialogs included |
+| | `wait_for` | Return the moment a window or some text appears (or goes away), or the screen settles; lists the controls of what appeared |
+| Acting | `click` | By target or `x`,`y`. Ordinary programs' controls are pressed through UI Automation (exact, no pointer movement); web pages, games and coordinates get a real mouse click |
+| | `type_text` | Type into a target, or into what has the focus; `replace`, `enter`. Reads the field back |
+| | `press_keys` | A key, a combination, or a sequence (`ctrl+a delete`); `repeat`, `holdSec`; `window` brings a window forward first |
+| | `set_value` | Make a control hold a value whatever kind it is — text, on/off, a chosen item, a number — and verify it. Idempotent. `fields` fills a whole form in one call |
+| | `scroll` / `drag` | Wheel over a target; press on one target, move to another, release |
+| | `mouse` | Low-level steps: `move` (hover), `down` / `up` (fine drags), `look` (relative motion for game cameras) |
+| | `element_action` | One UI Automation action (press, toggle, select, expand, collapse, focus, scroll, scroll_into_view) that touches neither mouse, focus nor window order: works on windows in the background |
+| | `batch` | Several steps in one call, stopping at the first failure, with one report at the end. `fast` for many inputs into a screen that stays put |
+| Programs | `open_app` | Open a program, file, folder, URL or `ms-settings:` page; waits for its window and lists its controls |
+| | `focus_window` | Switch to / minimize / maximize / restore / close / move and resize a window |
+| Clipboard | `read_clipboard` / `write_clipboard` | Text, the list of copied files, or a note that it holds an image |
+| Shell | `run_powershell` | A persistent session (directory and variables carry over); `background: true` for long jobs |
+| | `job_output` / `stop_job` / `reset_shell` | Background job progress / stop it / reset the session |
+| System | `system_info` / `list_processes` / `event_log` | System overview, processes, error log |
+| Files | `read_file` / `write_file` / `edit_file` | Read (line numbers, in parts), write, exact replace. Detects UTF-8 / UTF-16 / ANSI and keeps encoding and line endings |
+| | `list_dir` / `find_files` / `search_files` / `disk_usage` | List; find by name; search contents by regex; where disk space goes |
+| | `upload_file` / `download_file` | Copy files between the MCP server's machine and the connected computer (≤ 20 MB) |
+| Privileges | `request_admin` | Ask the person at the computer for administrator rights; the driver restarts elevated and the console reconnects by itself |
+| | `restart_computer` | Restart with the person's consent; the driver reopens after sign-in with the same code |
+
+### Targets
+
+```jsonc
+{ "target": "e12" }                      // a reference from observe, find, or any reply
+{ "target": "Save" }                     // the text the thing shows: a control's name, else text on the pixels
+{ "target": "Delete", "nth": 2 }         // the second of several equally good matches, in reading order
+{ "target": "Name", "role": "edit" }     // only controls of that kind
+{ "target": "OK", "window": "Save As" }  // in that window rather than the one in front
+{ "x": 412, "y": 300 }                   // a point on the latest screenshot
+```
+
+Positions in text replies (`@(x,y)`) are in the same pixels as the latest screenshot, and before any screenshot in those a plain screenshot gives, so reading a window first and looking at a picture later agree. A screenshot framed differently from the one before (one window, another display, another width) says so, because earlier positions no longer apply.
+
+A text target waits briefly (`timeoutSec`, default 1.5) for something still on its way. When several controls match equally well it does not guess: the reply lists them with references. When nothing matches, the reply names the closest candidates.
+
+### What a reply says
+
+```text
+Pressed Button "Submit" [e7] (directly, without moving the mouse). Screen changed around (440,24)-(700,52) (settled in 96 ms)
+Changes in "Order form":
+~ [e9] Text "Waiting": now "Submitted: Alice"
++ [e31] Button "Print receipt" @(520,90)
+```
+
+`after` chooses what comes back: `auto` (default: control changes when they can tell, else a screenshot), `none` (fastest), `ui`, `screenshot`, `both`.
+
+### Speed
+
+- The local link removes the relay round trip for an AI on the same machine.
+- Actions wait only until the part of the screen they affect stops changing, never a fixed time; what moves on its own (a video, an ad) is left out. Nothing waits for the overlay's animations.
+- Reading a window fetches only what is on screen, in one cross-process call.
+- `batch` and `set_value fields` do in one call what would otherwise take a turn each.
+
+## Driver (agent-app)
+
+Debugging the real window:
+
+```bash
+cd agent-app && npm run tauri dev
 ```
 
 UI debugging in the browser with demo data (add `?state=ready|admin|reboot|connected|offline|connecting` to the URL to switch state):
 
 ```bash
-npm run dev
+cd agent-app && npm run dev
 ```
 
-Debugging the real window:
+**Relay URL**, in order of precedence: `--relay <url>`; environment variable `ASCTRL_RELAY_URL`; `relay.txt` next to the exe; the compile-time `ASCTRL_RELAY_URL`; the hosted relay `ws://124.222.182.40:8787` in release builds, `ws://localhost:8787` in debug builds. A driver that can't reach its relay still works over the local link.
 
-```bash
-npm run tauri dev
-```
+`--code <6 digits>` fixes the code (used to keep it across an elevated restart). `ASCTRL_CODE` only works in debug builds. `ASCTRL_LOCAL_FILE` moves the local link's address file (test runs use their own, so they never disturb a driver already running).
 
-Release build (exe and installer, in `src-tauri/target/release/`):
+**Admin mode**: the AI calls `request_admin` → the person clicks Allow → Windows shows UAC and they click "Yes" → the driver restarts as administrator → the console reconnects automatically.
 
-```bash
-npm run tauri build
-```
-
-**Relay URL**, in order of precedence:
-
-1. Command-line flag `--relay <url>`
-2. Environment variable `ASCTRL_RELAY_URL`
-3. `relay.txt` next to the exe (one line with the URL)
-4. Compile-time environment variable `ASCTRL_RELAY_URL` (recommended: set it before building so the exe you send needs no setup)
-5. Default: the hosted relay `ws://124.222.182.40:8787` in release builds, `ws://localhost:8787` in debug builds
-
-The `--code <6 digits>` flag fixes the assist code (used to keep the same code across an elevated restart). The `ASCTRL_CODE` (fixed code) environment variable only works in debug builds, for automated tests.
-
-**Admin mode**: the AI calls `request_admin` → the app explains and the person clicks Allow → Windows shows UAC and they click "Yes" → the app restarts as administrator with the same code → the console reconnects automatically with the same code. An "Admin" tag appears under the orb.
+**Limitations**: without admin rights, windows running as administrator can't be read or controlled; the UAC prompt and the lock screen can't be clicked with any rights. Windows only.
 
 ## Hosted relay
 
-The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-relay` on the server, code in `~/asctrl-relay`; port 8787 is open in the Tencent Cloud security group and ufw).
+The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-relay`, code in `~/asctrl-relay`). The console's `.mcp.json` points at it; it requires a token, read from `ASCTRL_RELAY_TOKEN` (falling back to a gitignored `.env` at the repo root, then the Windows user environment). To update it, copy `src/relay/server.ts` and `src/shared/protocol.ts` to the matching paths under `~/asctrl-relay/src/` and `sudo systemctl restart asctrl-relay`. The relay needs no update for this version: it forwards calls unchanged.
 
-- Agent: build with `ASCTRL_RELAY_URL=ws://124.222.182.40:8787` so the address is compiled into the exe.
-- Console: `.mcp.json` already points at this address. The relay requires a token, read from the `ASCTRL_RELAY_TOKEN` environment variable (not in the repo; ask the maintainer). If the MCP client was started before the variable was set, the server falls back to `ASCTRL_RELAY_TOKEN=...` in a gitignored `.env` at the repo root, then (on Windows) to the user environment in the registry.
-- Updating the relay: copy `src/relay/server.ts` and `src/shared/protocol.ts` to the matching paths under `~/asctrl-relay/src/` on the server, then `sudo systemctl restart asctrl-relay`. Old and new agents work with old and new relays; the dead-connection cleanup only exists on a relay that has been updated.
-
-## Tools
-
-41 tools, modelled on the tools Claude has when it controls a local machine (shell, file read/write/search, screen/mouse/keyboard, clipboard, windows, background jobs). ✅ means the command-line agent (Node) supports it too; the rest are GUI-agent only.
-
-| Category | Tool | Purpose |
-|---|---|---|
-| Connection | `connect` ✅ / `disconnect` ✅ | Connect with an assist code / disconnect. `waitSec` keeps retrying until the agent is back online (after elevation or a restart) |
-| Viewing | `screenshot` ✅ | Screenshot (JPEG, scaled to 1600 wide by default; captured in-process by the GUI agent, without starting PowerShell). With several displays, `display` captures one |
-| | `zoom` | Re-capture part of the screenshot at native resolution to read small text and icons |
-| | `cursor_position` | Current mouse position on the screenshot |
-| | `wait_for` | Return the moment a window, a control or some text appears (or goes away), or the screen settles. A new window counts once it has finished drawing; a control returns the window's listing with ids ready |
-| | `find_text` | Read text on screen with the OCR built into Windows, with positions; works where UI Automation sees nothing (games, canvases, remote desktops, many web pages) |
-| | `wait` | Wait a fixed time, then screenshot (console-side only; prefer `wait_for`) |
-| System | `system_info` ✅ / `list_processes` ✅ / `event_log` ✅ | System overview, processes, error log |
-| Commands | `run_powershell` ✅ | Runs in a persistent session (directory and variables carry over); `background: true` runs without the timeout |
-| | `job_output` / `stop_job` | Background job progress and new output / stop it (with child processes) |
-| | `reset_shell` | Reset the PowerShell session |
-| Controls | `list_elements` | A window's controls (buttons, boxes, checkboxes, menus, list items, text) as numbered text via UI Automation, with state and centre on the screenshot |
-| | `element_action` | Operate a listed control without the mouse: click, toggle, select, expand / collapse, set_value, focus, scroll, read text. `actions` runs up to 20 at once in parallel. The user's pointer never moves; the orb frames the work area and flings a coloured virtual cursor at each control |
-| Mouse | `click` | Single / double / triple click, left / middle / right, optionally holding ctrl, shift, etc. Real mouse actions run one at a time |
-| | `click_text` | Find text with OCR and click it, in one call and without a screenshot |
-| | `batch` | Several steps (clicks, keys, typing, element actions, `wait_for`…) in one call, stopping at the first failure |
-| | `mouse_move` / `mouse_down` / `mouse_up` | Hover; press, move and release step by step for fine drags |
-| | `mouse_look` | Relative mouse motion in raw counts, for turning first-person game cameras |
-| | `drag` / `scroll` | Drag; vertical or horizontal scroll |
-| Keyboard | `type_text` | Type text in any language, independent of the input method |
-| | `press_keys` / `hold_key` | Keys / combinations (including symbol and volume keys), or hold for a while |
-| Windows | `list_windows` | Open windows: title, program, state, position on the screenshot |
-| | `focus_window` | Switch to / minimize / maximize / restore / close a window |
-| | `open_app` | Open a program, file, folder, URL or `ms-settings:` page |
-| Clipboard | `read_clipboard` / `write_clipboard` | Read and write the clipboard (faster than `type_text` for long text) |
-| Files | `read_file` / `write_file` / `edit_file` | Read (line numbers, in parts), write, exact replace. Detects UTF-8 / UTF-16 / ANSI code page and keeps encoding and line endings |
-| | `list_dir` / `find_files` / `search_files` | List a folder; find by file-name wildcard recursively; search contents by regex |
-| | `disk_usage` | Where disk space goes: largest subfolders as a tree and the largest files, in one native scan |
-| | `upload_file` / `download_file` | Transfer files between the two computers (≤ 20 MB) |
-| Privileges | `request_admin` | Request administrator rights (see above) |
-| | `restart_computer` | Restart the computer with the person's consent; the app reopens after sign-in with the same code. `prepareOnly` only registers the auto-open, `cancel` cancels |
-
-After mouse, keyboard and window actions, the MCP console automatically returns a fresh screenshot so the AI sees the result right away (pass `screenshot: false` to turn this off).
-
-**Resuming after a restart**: `restart_computer` → the person clicks Allow → countdown and restart → after sign-in the app opens once via the `RunOnce` registry key (same code) → the AI reconnects with `connect` (`waitSec: 300`).
-
-**Background jobs** run in a separate PowerShell process and do not share the persistent session's directory or variables. Each keeps its most recent 2 MB of output. When the technician disconnects or the person clicks End session, all of them stop, and so does a command still running in the session (with the programs it started).
-
-**Limitations**: without admin rights, windows running as administrator can't be controlled; the UAC prompt and the lock screen can't be clicked with any rights, so the person has to do that themselves.
-
-## Quick start (Node.js 24+)
-
-```bash
-npm install
-```
-
-1. Start the relay (localhost for local testing; for real use, put it on a server with a public IP):
+To run your own:
 
 ```bash
 npm run relay
 ```
 
-2. Start the agent on the computer that needs help and note the code on screen:
-
-```bash
-npm run agent -- --relay ws://your-server:8787
-```
-
-3. Open this folder in Claude Code on your computer. The project's `.mcp.json` already configures the `asctrl` tools (change `RELAY_URL` in it), then tell Claude:
-
-> Connect with code 123456 and find out why this computer is so slow
-
-For Claude desktop, add the contents of `.mcp.json` to its MCP configuration and set `args` to the absolute path of `mcp-server.ts`.
-
 ## Tests
 
-```bash
-npm test
-```
-
-Starts a local relay and an agent, calls every tool in turn, and saves a screenshot to `test/out/screenshot.jpg`.
-
-To test the GUI agent (first run `npm run tauri build -- --debug --no-bundle` in `agent-app`):
+Unit tests (target matching, the stale-click check, change detection, frames):
 
 ```bash
-node test/e2e.ts --app agent-app/src-tauri/target/debug/asctrl-agent.exe
+cd agent-app/src-tauri && cargo test --lib
 ```
 
-Speed and reliability on a real desktop (moves the mouse and types for about 15 seconds; leave the computer alone):
-
-```bash
-npm run bench
-```
-
-It opens `test/bench-app.ps1` (a window with ordinary controls, a canvas only OCR can read and a dialog that opens late) and an Explorer folder, runs 11 tasks through the tools (forms, typing, clicking by coordinates and by text, catching a missed click, waiting for a late dialog, a batch), checks each result and prints the time per task and per tool.
-
-Every mouse and keyboard action waits only until the window it targets stops changing (instead of a fixed pause), and its reply says what changed, or that nothing visibly did, so a missed click shows without a screenshot. Changes elsewhere on the screen (a video, a chat streaming text) are ignored. When the MCP client asks for the screenshot after an action, it comes back in the same reply.
-
-Extra GUI-agent checks: session keeps directory and variables, `reset_shell` (also while a command is running), upload/download round trip, out-of-range coordinates and unknown keys rejected, `zoom` and per-display screenshots, window listing, file read/write/edit/search (UTF-8 / ANSI / UTF-16), clipboard round trip including long text (restored afterwards), background jobs and stopping them, restart-resume registration and cancel (no real restart). Mouse clicks and typing touch the real desktop, so they are not in the automated test; demo them by hand with `test/demo-step.ts`:
-
-```bash
-node test/demo-step.ts ws://localhost:8787 <code> @steps.json
-```
+Type check:
 
 ```bash
 npm run typecheck
 ```
 
+End-to-end, against the built driver (starts a local relay and the driver; exercises the relay link, the local link, files, shell, clipboard, jobs):
+
+```bash
+node test/e2e.ts --app agent-app/src-tauri/target/release/asctrl-agent.exe
+```
+
+Speed and reliability on a real desktop (moves the mouse and types for about 20 seconds; leave the computer alone):
+
+```bash
+npm run bench
+```
+
+It opens `test/bench-app.ps1` (a window with ordinary controls, a canvas only OCR can read and a dialog that opens late) and an Explorer folder, and runs 13 tasks the way an AI would: fill and submit a form in two calls, type 500 mixed characters and read them back, tick a checkbox idempotently, click by coordinates, catch a click that did nothing, follow a window that moved and refuse a click after a resize, click text on a canvas, wait for a late dialog, a batch. Each result is checked, and the time per task and per tool is printed.
+
+Where the time goes, action by action (the same few actions with and without the report, several times each; moves the mouse for a few seconds):
+
+```bash
+npm run prof
+```
+
+Single steps by hand:
+
+```bash
+node test/demo-step.ts local - @steps.json
+```
+
 ## Security
 
-Structurally, software like this is the same as a remote-access trojan; the whole difference is **informed consent**. Currently:
+Software like this is, structurally, remote-control software; the difference is **informed consent and visibility**.
 
-- Connecting needs the code, which the person reads out themselves; administrator access and restarts must be confirmed at the agent
-- A running session is visible at all times (gradient border around the screen) and can be ended from the orb
-- Commands and file operations are shown on the agent's screen
-- Quitting the app disconnects
-- The relay can require a `RELAY_TOKEN`, so only consoles with the right token can connect
+- A remote connection needs the code, which the person reads out themselves; administrator access and restarts must be confirmed at the computer
+- The local link accepts only a process that can read the user's own `local.json`, and never a web page
+- A running session is visible at all times (gradient border around the screen, the orb showing each action) and can be ended from the orb
+- Quitting the driver disconnects
+- The relay can require a `RELAY_TOKEN`
 
-**Must be added before real use:**
+**Still to do before wide use:**
 
 - [ ] Put the relay behind an HTTPS reverse proxy and use `wss://` (currently plaintext)
-- [ ] Limit attempts / expire codes to prevent brute-force guessing (more important now that the code alone connects)
-- [ ] Second confirmation on the agent for dangerous commands (optional)
+- [ ] Limit attempts / expire codes to prevent brute-force guessing
+- [ ] Optional confirmation at the computer for dangerous commands
 - [ ] Write an action log to disk
-
-## Roadmap
-
-- [x] GUI agent (assist code + on-screen activity)
 - [ ] Code signing, to reduce SmartScreen / antivirus blocking
-- [ ] Tray icon; no auto-start at boot (open only when needed)
-- [x] Mouse click and keyboard input tools (so the AI can operate the UI directly)
-- [x] File upload and download
-- [x] Persistent PowerShell session
-- [x] Admin mode (consent + UAC, then elevated restart)
-- [ ] Live view (or integrate RustDesk / MeshCentral for remote desktop)
-- [ ] Web console: view the screen and click buttons without Claude

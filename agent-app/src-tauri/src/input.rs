@@ -155,11 +155,31 @@ fn keys_up(keys: &[(VIRTUAL_KEY, bool)]) -> Vec<INPUT> {
     keys.iter().rev().map(|&(vk, e)| key(vk, 0, ext(e) | KEYEVENTF_KEYUP)).collect()
 }
 
+/// The last click made: when, where, with which button
+static LAST_CLICK: std::sync::Mutex<Option<(std::time::Instant, i32, i32, String)>> = std::sync::Mutex::new(None);
+
+/// Windows turns two clicks on the same spot within the double-click time into a double-click, whoever
+/// meant what. Two separate click calls mean two clicks: when the last one was here a moment ago, wait
+/// until the pair can no longer be taken for a double-click.
+fn keep_clicks_apart(x: i32, y: i32, button: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDOUBLECLK, SM_CYDOUBLECLK};
+    let Some((when, lx, ly, lb)) = LAST_CLICK.lock().unwrap().clone() else { return };
+    let (w, h) = unsafe { (GetSystemMetrics(SM_CXDOUBLECLK).max(4), GetSystemMetrics(SM_CYDOUBLECLK).max(4)) };
+    if lb != button || (x - lx).abs() > w || (y - ly).abs() > h {
+        return;
+    }
+    let limit = Duration::from_millis(unsafe { GetDoubleClickTime() } as u64 + 30);
+    if let Some(left) = limit.checked_sub(when.elapsed()) {
+        std::thread::sleep(left);
+    }
+}
+
 /// Click, optionally holding modifier keys (e.g. ctrl to multi-select, shift to range-select)
 pub fn click(x: i32, y: i32, button: &str, count: u32, modifiers: &str) -> Result<(), String> {
     let (down, up) = buttons(button)?;
     let mods = parse_keys(modifiers)?;
     check_target(Some((x, y)))?;
+    keep_clicks_apart(x, y, button);
     move_to(x, y)?;
     // Long enough for the program to see the pointer arrive (hover state) before the press
     std::thread::sleep(Duration::from_millis(15));
@@ -177,6 +197,7 @@ pub fn click(x: i32, y: i32, button: &str, count: u32, modifiers: &str) -> Resul
     if !mods.is_empty() {
         let _ = send(&keys_up(&mods));
     }
+    *LAST_CLICK.lock().unwrap() = Some((std::time::Instant::now(), x, y, button.to_string()));
     r
 }
 
@@ -227,19 +248,26 @@ pub fn scroll(x: i32, y: i32, amount: i32, horizontal: bool) -> Result<(), Strin
     }
 }
 
-pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), String> {
+/// Press `button` at the first point, move to the second in small steps (programs that track drags need to
+/// see the pointer travel), pause, and release. `ms` is how long the travel takes.
+pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32, button: &str, ms: u64) -> Result<(), String> {
+    let (down, up) = buttons(button)?;
     check_target(Some((x1, y1)))?;
     move_to(x1, y1)?;
     std::thread::sleep(Duration::from_millis(40));
-    send(&[mouse(MOUSEEVENTF_LEFTDOWN, 0)])?;
-    let moved = (1..=10).try_for_each(|i| {
-        std::thread::sleep(Duration::from_millis(20));
-        move_to(x1 + (x2 - x1) * i / 10, y1 + (y2 - y1) * i / 10)
+    send(&[mouse(down, 0)])?;
+    // A first small nudge: many programs only start a drag once the pointer leaves a few-pixel dead zone
+    let dist = (((x2 - x1) as f64).hypot((y2 - y1) as f64)) as i32;
+    let steps = (dist / 24).clamp(6, 40);
+    let pause = Duration::from_millis((ms / steps as u64).clamp(4, 40));
+    let moved = (1..=steps).try_for_each(|i| {
+        std::thread::sleep(pause);
+        move_to(x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps)
     });
     std::thread::sleep(Duration::from_millis(40));
     // Always release, even when a move failed: a button left held down would turn the user's
     // next mouse movement into a drag
-    let released = send(&[mouse(MOUSEEVENTF_LEFTUP, 0)]);
+    let released = send(&[mouse(up, 0)]);
     moved.and(released)
 }
 
@@ -417,6 +445,27 @@ pub fn press_keys(combo: &str) -> Result<(), String> {
     let mut inputs = keys_down(&keys);
     inputs.extend(keys_up(&keys));
     send(&inputs)
+}
+
+/// Press several combinations one after another: "ctrl+a delete", "tab tab enter", "alt+f s"
+pub fn press_sequence(seq: &str) -> Result<usize, String> {
+    let combos: Vec<&str> = seq.split_whitespace().collect();
+    if combos.is_empty() {
+        return Err("No keys given".into());
+    }
+    // Reject the whole sequence before pressing anything when one key is unknown
+    for c in &combos {
+        if parse_keys(c)?.is_empty() {
+            return Err("No keys given".into());
+        }
+    }
+    for (i, c) in combos.iter().enumerate() {
+        if i > 0 {
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        press_keys(c)?;
+    }
+    Ok(combos.len())
 }
 
 /// Hold a key combination for a while, then release it

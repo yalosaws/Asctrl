@@ -1,8 +1,8 @@
 {
   "name": "asctrl",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "AI-assisted remote PC repair: agent + relay server + MCP technician console",
+  "description": "Computer-use framework: a driver that gives an AI eyes and hands on a Windows computer, an MCP server for any agent, and a relay for remote machines",
   "type": "module",
   "engines": {
     "node": ">=24"
@@ -13,7 +13,8 @@
     "mcp": "node src/console/mcp-server.ts",
     "typecheck": "tsc",
     "test": "node test/e2e.ts",
-    "bench": "node test/bench.ts"
+    "bench": "node test/bench.ts",
+    "prof": "node test/prof.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
