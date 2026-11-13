@@ -14,7 +14,6 @@ type Status =
   | { state: "connecting" }
   | { state: "offline"; message?: string }
   | { state: "ready"; code: string }
-  | { state: "consent"; techName: string; timeoutSec: number }
   | { state: "admin"; techName: string; timeoutSec: number }
   | { state: "reboot"; techName: string; timeoutSec: number }
   | { state: "connected"; techName: string; code: string };
@@ -113,7 +112,7 @@ function showPanel(p: HTMLElement, on: boolean, interactive = false) {
 let menuTimer: number | undefined;
 function openMenu() {
   window.clearTimeout(menuTimer);
-  if (state === "consent" || state === "admin" || state === "reboot") return;
+  if (state === "admin" || state === "reboot") return;
   resetQuit();
   showPanel(menu, true, true);
 }
@@ -153,11 +152,10 @@ $("btn-end").addEventListener("click", () => {
   else render({ state: "ready", code: lastCode });
 });
 
-// ---------------- Consent ----------------
+// ---------------- Questions (admin access, restart) ----------------
 
-type Ask = "consent" | "admin" | "reboot";
+type Ask = "admin" | "reboot";
 const ASK_TEXT: Record<Ask, [string, string]> = {
-  consent: ["wants to help with your computer remotely", "If you allow it, they can:"],
   admin: ["needs administrator access", "If you allow it, they can also:"],
   reboot: ["needs to restart your computer", "Before you click Allow:"],
 };
@@ -165,7 +163,6 @@ const ASK_TEXT: Record<Ask, [string, string]> = {
 function showConsent(name: string, timeoutSec: number, kind: Ask) {
   $("consent-name").textContent = name;
   [$("consent-ask").textContent, $("consent-sub").textContent] = ASK_TEXT[kind];
-  $("perm-consent").hidden = kind !== "consent";
   $("perm-admin").hidden = kind !== "admin";
   $("admin-note").hidden = kind !== "admin";
   $("perm-reboot").hidden = kind !== "reboot";
@@ -192,7 +189,6 @@ function hideConsent() {
 }
 
 async function respond(allow: boolean) {
-  const wasAsk = state;
   hideConsent();
   if (allow) {
     orb.setMood("happy");
@@ -201,8 +197,7 @@ async function respond(allow: boolean) {
     ripple(orb.pos, { size: 60, ms: 700, tone: "mint" });
   }
   if (isTauri) await invoke("respond", { allow });
-  else if (allow || wasAsk !== "consent") render({ state: "connected", techName: $("consent-name").textContent ?? "", code: lastCode });
-  else render({ state: "ready", code: lastCode });
+  else render({ state: "connected", techName: $("consent-name").textContent ?? "", code: lastCode });
 }
 $("btn-allow").addEventListener("click", () => respond(true));
 $("btn-deny").addEventListener("click", () => respond(false));
@@ -212,7 +207,7 @@ $("btn-deny").addEventListener("click", () => respond(false));
 function render(s: Status) {
   state = s.state;
   document.body.dataset.state = s.state;
-  const asking = s.state === "consent" || s.state === "admin" || s.state === "reboot";
+  const asking = s.state === "admin" || s.state === "reboot";
 
   if (asking) {
     const c = center(primary().work);

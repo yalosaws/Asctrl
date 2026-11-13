@@ -1,4 +1,4 @@
-// End-to-end test: starts a local relay + an agent (auto-accept), then the tech client calls every tool in turn.
+// End-to-end test: starts a local relay + an agent, then the tech client calls every tool in turn.
 // Usage: npm test                      tests the Node agent
 //        npm test -- --app <exe path>  tests the GUI agent (needs a debug build)
 
@@ -26,11 +26,11 @@ const appExe = appIdx >= 0 ? process.argv[appIdx + 1] : undefined;
 const agent = appExe
   ? spawn(appExe, [], {
       stdio: ["ignore", "pipe", "inherit"],
-      env: { ...process.env, ASCTRL_RELAY_URL: `ws://localhost:${PORT}`, ASCTRL_CODE: CODE, ASCTRL_AUTO_ACCEPT: "1" },
+      env: { ...process.env, ASCTRL_RELAY_URL: `ws://localhost:${PORT}`, ASCTRL_CODE: CODE },
     })
   : spawn(
       process.execPath,
-      ["src/agent/agent.ts", "--relay", `ws://localhost:${PORT}`, "--code", CODE, "--auto-accept"],
+      ["src/agent/agent.ts", "--relay", `ws://localhost:${PORT}`, "--code", CODE],
       { stdio: ["ignore", "pipe", "inherit"] },
     );
 agent.stdout.on("data", (d) => process.stdout.write(`  [agent] ${d}`));
@@ -180,6 +180,8 @@ try {
     check("ANSI write refuses characters it would lose", !lossy.ok && !!lossy.error?.includes("code page"), lossy.error ?? lossy.text);
     const few = await tech.call("find_files", { path: dir, pattern: "*", maxResults: 1 });
     check("find_files stops at maxResults", few.ok && !!few.text?.startsWith("Found 1+"), few.text?.split("\n")[0] ?? few.error);
+    const du = await tech.call("disk_usage", { path: dir, depth: 1 });
+    check("disk_usage breaks down folders and files", du.ok && !!du.text?.includes("sub\\") && !!du.text?.includes("u16.log"), du.text ?? du.error);
     const bin = await tech.call("read_file", { path: "%WINDIR%\\notepad.exe" });
     check("binary file is not read as text", !bin.ok && !!bin.error?.includes("binary"), bin.error);
 

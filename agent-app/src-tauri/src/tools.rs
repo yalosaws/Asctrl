@@ -521,6 +521,20 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
             let max = int_arg(args, "maxResults", 200, 1, 5000) as usize;
             blocking(move || files::find(&path, &pattern, max)).await
         }
+        "disk_usage" => {
+            let p = match str_arg(args, "path") {
+                "" => "C:\\",
+                p => p,
+            };
+            let path = match resolve_path(p) {
+                Ok(p) => p,
+                Err(e) => return fail(e),
+            };
+            let depth = int_arg(args, "depth", 2, 0, 6) as usize;
+            let per_level = int_arg(args, "perFolder", 8, 1, 50) as usize;
+            let files = int_arg(args, "topFiles", 20, 0, 500) as usize;
+            blocking(move || files::disk_usage(&path, depth, per_level, files)).await
+        }
         "search_files" => {
             let path = match path_arg(args, "path") {
                 Ok(p) => p,

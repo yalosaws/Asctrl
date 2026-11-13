@@ -363,6 +363,161 @@ pub fn find(root: &Path, pattern: &str, max: usize) -> Result<String, String> {
     Ok(out)
 }
 
+// ---------------- Disk usage ----------------
+
+/// A full scan of a big drive takes about a minute; stop well before the technician's call times out
+const DU_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+/// OneDrive "online-only" placeholders report their full size but take no space on disk
+const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+
+struct DuDir {
+    path: PathBuf,
+    size: u64,
+    files: u64,
+    /// Largest subfolders only (kept down to the requested depth)
+    children: Vec<DuDir>,
+    /// Subfolders left out of `children`: (count, total size)
+    rest: (usize, u64),
+}
+
+struct DuScan {
+    top_files: std::collections::BinaryHeap<std::cmp::Reverse<(u64, PathBuf)>>,
+    max_files: usize,
+    denied: u64,
+    denied_eg: Vec<PathBuf>,
+    cloud: u64,
+    deadline: std::time::Instant,
+    timed_out: bool,
+}
+
+fn du_dir(path: &Path, depth: usize, per_level: usize, s: &mut DuScan) -> DuDir {
+    use std::os::windows::fs::MetadataExt;
+    let mut d = DuDir { path: path.to_path_buf(), size: 0, files: 0, children: vec![], rest: (0, 0) };
+    let rd = match std::fs::read_dir(path) {
+        Ok(rd) => rd,
+        Err(_) => {
+            s.denied += 1;
+            if s.denied_eg.len() < 5 {
+                s.denied_eg.push(path.to_path_buf());
+            }
+            return d;
+        }
+    };
+    let mut subs = vec![];
+    for e in rd.filter_map(Result::ok) {
+        if s.timed_out || std::time::Instant::now() > s.deadline {
+            s.timed_out = true;
+            break;
+        }
+        let Ok(ft) = e.file_type() else { continue };
+        // Junctions and symlinks point at folders counted elsewhere (or on another drive)
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            let c = du_dir(&e.path(), depth.saturating_sub(1), per_level, s);
+            d.size += c.size;
+            d.files += c.files;
+            subs.push(c);
+            continue;
+        }
+        let Ok(m) = e.metadata() else { continue };
+        if m.file_attributes() & (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_OFFLINE) != 0 {
+            s.cloud += m.len();
+            continue;
+        }
+        d.size += m.len();
+        d.files += 1;
+        if s.max_files > 0 {
+            s.top_files.push(std::cmp::Reverse((m.len(), e.path())));
+            if s.top_files.len() > s.max_files {
+                s.top_files.pop();
+            }
+        }
+    }
+    if depth > 0 {
+        subs.sort_by(|a, b| b.size.cmp(&a.size));
+        for c in subs.drain(per_level.min(subs.len())..) {
+            d.rest.0 += 1;
+            d.rest.1 += c.size;
+        }
+        d.children = subs;
+    }
+    d
+}
+
+fn dir_name(p: &Path) -> String {
+    let s = p.display().to_string();
+    if s.ends_with('\\') { s } else { s + "\\" }
+}
+
+fn du_write(out: &mut String, d: &DuDir, indent: usize) {
+    for c in &d.children {
+        let pct = if d.size > 0 { c.size as f64 * 100.0 / d.size as f64 } else { 0.0 };
+        let _ = writeln!(out, "{:indent$}{:>10}  {pct:>3.0}%  {}", "", fmt_size(c.size), dir_name(&c.path), indent = indent);
+        du_write(out, c, indent + 2);
+    }
+    if d.rest.0 > 0 {
+        let _ = writeln!(out, "{:indent$}{:>10}        ({} smaller folders)", "", fmt_size(d.rest.1), d.rest.0, indent = indent);
+    }
+}
+
+/// Where the space under a folder goes: the largest subfolders down to `depth` levels, and the largest files
+pub fn disk_usage(root: &Path, depth: usize, per_level: usize, max_files: usize) -> Result<String, String> {
+    if !root.is_dir() {
+        return Err(format!("{} is not a folder", root.display()));
+    }
+    std::fs::read_dir(root).map_err(|e| format!("Failed to open {}: {e}", root.display()))?;
+    let started = std::time::Instant::now();
+    let mut s = DuScan {
+        top_files: Default::default(),
+        max_files,
+        denied: 0,
+        denied_eg: vec![],
+        cloud: 0,
+        deadline: started + DU_TIME_LIMIT,
+        timed_out: false,
+    };
+    let d = du_dir(root, depth, per_level, &mut s);
+
+    let mut out = format!(
+        "{} — {} in {} files (scanned in {:.0} s)\n",
+        dir_name(root),
+        fmt_size(d.size),
+        d.files,
+        started.elapsed().as_secs_f64().ceil()
+    );
+    if s.timed_out {
+        let _ = writeln!(out, "⚠ Stopped after {} s: the totals below are incomplete. Scan a subfolder for exact numbers.", DU_TIME_LIMIT.as_secs());
+    }
+    if depth > 0 {
+        let _ = writeln!(out, "\nLargest folders (size, share of the parent):");
+        du_write(&mut out, &d, 0);
+    }
+    if max_files > 0 {
+        let _ = writeln!(out, "\nLargest files:");
+        for std::cmp::Reverse((size, p)) in s.top_files.into_sorted_vec() {
+            let t = std::fs::metadata(&p).ok().and_then(|m| m.modified().ok()).map(fmt_time).unwrap_or_default();
+            let _ = writeln!(out, "{:>10}  {t:<16}  {}", fmt_size(size), p.display());
+        }
+    }
+    if s.cloud > 0 {
+        let _ = writeln!(out, "\nNot counted: {} of online-only cloud files (OneDrive etc.) that take no disk space.", fmt_size(s.cloud));
+    }
+    if s.denied > 0 {
+        let eg: Vec<String> = s.denied_eg.iter().map(|p| p.display().to_string()).collect();
+        let _ = writeln!(
+            out,
+            "\n{} folders could not be read, so the totals are too low (e.g. {}).{}",
+            s.denied,
+            eg.join("; "),
+            if crate::is_elevated() { "" } else { " Call request_admin and scan again for a complete picture." }
+        );
+    }
+    Ok(out)
+}
+
 pub fn search(root: &Path, pattern: &str, glob: &str, ignore_case: bool, max: usize, context: usize) -> Result<String, String> {
     let re = regex::RegexBuilder::new(pattern).case_insensitive(ignore_case).build().map_err(|e| format!("Invalid regular expression: {e}"))?;
     let m = Matcher::new(glob);

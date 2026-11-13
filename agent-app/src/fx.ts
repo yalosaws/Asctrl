@@ -325,6 +325,12 @@ function fileStart(e: FxEvent) {
     }
     case "list_dir":
       return void skeleton(put(openCard("dir", baseName(path || "~"), path)), 7);
+    case "disk_usage": {
+      const c = put(openCard("disk", "Disk usage", path || "C:\\"));
+      skeleton(c, 5);
+      scan(c, true);
+      return;
+    }
     case "find_files":
     case "search_files": {
       const c = put(openCard(e.tool === "find_files" ? "find" : "search", str(a.pattern), path));
@@ -376,6 +382,11 @@ async function fileEnd(e: FxEvent) {
       break;
     case "find_files":
       await fillLines(c, lines(text).map((l) => baseName(l) || l));
+      break;
+    case "disk_usage":
+      // Header, then the largest folders and files as written by the agent
+      await fillLines(c, lines(text).filter((l) => l.trim()).slice(0, 14), "mono");
+      linger = 2200;
       break;
     case "search_files": {
       let re: RegExp | undefined;
@@ -435,7 +446,7 @@ function termCommand(e: FxEvent): string {
 // ---- Dispatch ----
 
 const TERM = new Set(["run_powershell", "system_info", "list_processes", "event_log", "job_output", "stop_job", "reset_shell"]);
-const FILE = new Set(["read_file", "write_file", "edit_file", "list_dir", "find_files", "search_files", "upload_file", "download_file", "read_clipboard", "write_clipboard"]);
+const FILE = new Set(["read_file", "write_file", "edit_file", "list_dir", "find_files", "search_files", "disk_usage", "upload_file", "download_file", "read_clipboard", "write_clipboard"]);
 
 /** End events carry only the result; args and start geometry are filled in from here */
 const started = new Map<string, Pick<FxEvent, "args" | "geo">>();

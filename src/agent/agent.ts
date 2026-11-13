@@ -3,7 +3,6 @@
 // Usage: node src/agent/agent.ts [--relay ws://host:8787] [--auto-accept]
 
 import os from "node:os";
-import readline from "node:readline/promises";
 import { randomInt } from "node:crypto";
 import { WebSocket } from "ws";
 import { parse, DEFAULT_RELAY_URL, type Message, type ToolCall } from "../shared/protocol.ts";
@@ -15,25 +14,12 @@ const flag = (name: string) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const RELAY_URL = flag("--relay") ?? process.env.RELAY_URL ?? DEFAULT_RELAY_URL;
-/** For automated tests only: skip the user's confirmation */
-const AUTO_ACCEPT = args.includes("--auto-accept");
 const FIXED_CODE = flag("--code");
 const randomCode = () => String(randomInt(0, 1_000_000)).padStart(6, "0");
 let CODE = FIXED_CODE ?? randomCode();
 
 function send(ws: WebSocket, msg: Message) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
-}
-
-async function askConsent(techName: string): Promise<boolean> {
-  if (AUTO_ACCEPT) return true;
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const ans = await rl.question(`\n>>> "${techName}" wants to help with your computer remotely. Allow? (y/n) `);
-    return ans.trim().toLowerCase().startsWith("y");
-  } finally {
-    rl.close();
-  }
 }
 
 function describe(call: ToolCall) {
@@ -58,9 +44,9 @@ function connect() {
     if (!msg) return;
     switch (msg.type) {
       case "consent_request": {
-        const allow = await askConsent(msg.techName);
-        send(ws, { type: "consent_reply", allow });
-        console.log(allow ? `Allowed ${msg.techName} to connect. You will see every action they take here.` : "Declined.");
+        // Having the code is enough to connect
+        send(ws, { type: "consent_reply", allow: true });
+        console.log(`${msg.techName} connected. You will see every action they take here.`);
         break;
       }
       case "call": {

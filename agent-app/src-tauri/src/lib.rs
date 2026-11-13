@@ -70,10 +70,6 @@ fn relay_url() -> String {
     option_env!("ASCTRL_RELAY_URL").unwrap_or(fallback).to_string()
 }
 
-fn auto_accept() -> bool {
-    cfg!(debug_assertions) && std::env::var("ASCTRL_AUTO_ACCEPT").is_ok()
-}
-
 fn is_elevated() -> bool {
     unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() }
 }
@@ -246,20 +242,12 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
 
     match msg.get("type").and_then(Value::as_str) {
         Some("consent_request") => {
-            let tech = s("techName");
-            let (app, tx) = (app.clone(), tx.clone());
-            tauri::async_runtime::spawn(async move {
-                let allow = auto_accept()
-                    || ask_user(&app, json!({ "state": "consent", "techName": tech, "timeoutSec": CONSENT_TIMEOUT.as_secs() })).await;
-                // The connection this request came from is gone: its status is no longer ours to set
-                if tx.send(json!({ "type": "consent_reply", "allow": allow }).to_string()).is_err() {
-                    return;
-                }
-                if allow {
-                    *app.state::<AgentState>().tech_name.lock().unwrap() = Some(tech);
-                }
-                set_status(&app, idle_status(&app));
-            });
+            // Having the code is enough to connect: the person handed it out on purpose, and the session
+            // is shown on their screen the whole time. Only administrator access and restarts still ask.
+            let _ = tx.send(json!({ "type": "consent_reply", "allow": true }).to_string());
+            *st.tech_name.lock().unwrap() = Some(s("techName"));
+            set_status(app, idle_status(app));
+            bring_to_front(app);
         }
         Some("call") => {
             let id = s("id");
@@ -344,7 +332,7 @@ async fn request_admin(app: AppHandle, tx: mpsc::UnboundedSender<String>, id: St
         &tx,
         &id,
         true,
-        "The user agreed; the app is restarting as administrator. In about 5 seconds, connect again with the same code; the user will need to click Allow once more.",
+        "The user agreed; the app is restarting as administrator with the same code.",
     );
     tokio::time::sleep(Duration::from_millis(500)).await;
     app.exit(0);
@@ -440,7 +428,7 @@ async fn restart_computer(app: AppHandle, tx: mpsc::UnboundedSender<String>, id:
         &id,
         true,
         &format!(
-            "The user agreed; the computer restarts in {delay} seconds (restart_computer cancel=true cancels it). After restart and sign-in the app opens automatically with code {code}. Usually connect with the same code after 1-3 minutes; the user will need to click Allow again. If the computer has a sign-in password, wait until the user reaches the desktop."
+            "The user agreed; the computer restarts in {delay} seconds (restart_computer cancel=true cancels it). After restart and sign-in the app opens automatically with code {code}. Usually connect with the same code after 1-3 minutes. If the computer has a sign-in password, wait until the user reaches the desktop."
         ),
     );
 }

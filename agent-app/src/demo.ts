@@ -1,5 +1,5 @@
 // Browser preview: a fake desktop plus every animation played in sequence.
-// Add ?state=ready|consent|admin|reboot|connected|offline|connecting to the URL to stop at one state;
+// Add ?state=ready|admin|reboot|connected|offline|connecting to the URL to stop at one state;
 // in the console, demoFx("click", {...}) triggers a single effect.
 
 import { fxEnd, fxStart, type FxEvent } from "./fx";
@@ -70,7 +70,6 @@ export async function runDemo(h: Hooks) {
       connecting: { state: "connecting" },
       offline: { state: "offline", message: "IO error" },
       ready: { state: "ready", code: "482913" },
-      consent: { state: "consent", ...T },
       admin: { state: "admin", ...T },
       reboot: { state: "reboot", ...T },
       connected: { state: "connected", techName: "Alex", code: "482913" },
@@ -87,8 +86,6 @@ export async function runDemo(h: Hooks) {
     await sleep(1600);
     h.render({ state: "ready", code: "482913" });
     await sleep(4500);
-    h.render({ state: "consent", ...T });
-    await sleep(3000);
     h.render({ state: "connected", techName: "Alex", code: "482913" });
     await sleep(5200);
 

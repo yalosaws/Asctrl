@@ -36,6 +36,7 @@ const ICON: Record<string, string> = {
   upload: svg('<path d="M12 4v11"/><path d="m7 11 5 5 5-5"/><path d="M5 20h14"/>'),
   download: svg('<path d="M12 16V5"/><path d="m7 9 5-5 5 5"/><path d="M5 20h14"/>'),
   clip: svg('<rect x="6" y="5" width="12" height="16" rx="2"/><path d="M9 5a3 3 0 0 1 6 0"/>'),
+  disk: svg('<ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6"/><path d="M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"/>'),
 };
 const MARK_OK = svg('<path d="m5 12.5 4.5 4.5L19 7.5" pathLength="1"/>');
 const MARK_BAD = svg('<path d="M6 6l12 12" pathLength="1"/><path d="M18 6 6 18" pathLength="1"/>');

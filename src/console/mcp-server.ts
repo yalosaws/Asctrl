@@ -92,34 +92,41 @@ async function act(tool: ToolName, args: Record<string, unknown> & { screenshot?
 const screenshotFlag = z.boolean().optional().describe("Take a screenshot after the action; default true");
 const coord = (what: string) => z.number().min(0).describe(`${what} (pixel coordinate on the latest screenshot)`);
 
+/** Code of the last successful connection, so request_admin can reconnect by itself */
+let lastCode = "";
+
+/** Connect to a code; if their app is not online yet, keep retrying for waitSec seconds */
+async function connectWait(code: string, waitSec: number): Promise<Reply> {
+  const deadline = Date.now() + waitSec * 1000;
+  for (;;) {
+    try {
+      const host = await client.connect(code);
+      lastCode = code;
+      return { content: [{ type: "text", text: `Connected to ${host}` }] };
+    } catch (e) {
+      const msg = (e as Error).message;
+      // Only "their app is not online yet" is worth retrying; other errors return immediately
+      const offline = /No agent with this code|already connected|Connection closed|ECONNREFUSED/.test(msg);
+      if (!offline || Date.now() + 5000 > deadline) {
+        return { content: [{ type: "text", text: `Connection failed: ${msg}` }], isError: true };
+      }
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+}
+
 server.registerTool(
   "connect",
   {
     description:
-      "Connect to a remote computer with the 6-digit code the user gives you. The user must click Allow on their computer; waits up to 2 minutes. " +
-      "When reconnecting after an elevated restart or a reboot, pass waitSec to keep retrying until their app is back online.",
+      "Connect to a remote computer with the 6-digit code the user gives you. Connects right away; the user doesn't need to confirm. " +
+      "When reconnecting after a reboot, pass waitSec to keep retrying until their app is back online.",
     inputSchema: {
       code: z.string().regex(/^\d{6}$/).describe("6-digit assist code"),
       waitSec: z.number().int().min(0).max(600).optional().describe("How many seconds to keep waiting if their app is not online yet; default 0 (don't wait)"),
     },
   },
-  async ({ code, waitSec = 0 }) => {
-    const deadline = Date.now() + waitSec * 1000;
-    for (;;) {
-      try {
-        const host = await client.connect(code);
-        return { content: [{ type: "text", text: `Connected to ${host}` }] };
-      } catch (e) {
-        const msg = (e as Error).message;
-        // Only "their app is not online yet" is worth retrying; refusals, timeouts etc. return immediately
-        const offline = /No agent with this code|already connected|Connection closed|ECONNREFUSED/.test(msg);
-        if (!offline || Date.now() + 5000 > deadline) {
-          return { content: [{ type: "text", text: `Connection failed: ${msg}` }], isError: true };
-        }
-        await new Promise((r) => setTimeout(r, 5000));
-      }
-    }
-  },
+  ({ code, waitSec = 0 }) => connectWait(code, waitSec),
 );
 
 server.registerTool("disconnect", { description: "Disconnect from the current remote computer." }, async () => {
@@ -267,12 +274,27 @@ server.registerTool(
   "request_admin",
   {
     description:
-      "Request administrator access. The user clicks Allow in the app, then \"Yes\" in the Windows confirmation; the app then restarts as administrator. " +
-      "Wait about 5 seconds and connect again with the same code (the user clicks Allow once more). " +
+      "Request administrator access. The user clicks Allow in the app, then \"Yes\" in the Windows confirmation; the app then restarts as administrator " +
+      "and this tool reconnects to it automatically (takes about 5-15 seconds). " +
       "Call it whenever the task needs admin rights: repairing system files, managing services, installing software, " +
       "or when a mouse/keyboard tool reports that the target window runs as administrator (Windows blocks input to it until the app is elevated).",
   },
-  () => forward("request_admin", {}),
+  async () => {
+    const code = lastCode;
+    const r = await forward("request_admin", {});
+    const text = r.content.find((c) => c.type === "text")?.text ?? "";
+    if (r.isError || !/restarting as administrator/.test(text) || !code) return r;
+    // Give the old process time to exit, so the reconnect reaches the new elevated one
+    await new Promise((res) => setTimeout(res, 3000));
+    const c = await connectWait(code, 90);
+    if (c.isError) {
+      return {
+        content: [...r.content, ...c.content, { type: "text", text: `Reconnect with connect (code ${code}, waitSec: 60).` }],
+        isError: true,
+      };
+    }
+    return { content: [...r.content, { type: "text", text: "Reconnected; now running as administrator." }] };
+  },
 );
 
 server.registerTool(
@@ -280,7 +302,7 @@ server.registerTool(
   {
     description:
       "Restart the remote computer. The user is asked to agree in the app first (and reminded to save files), then it counts down and restarts; after restart and sign-in the assist app opens automatically with the same code. " +
-      "Then reconnect with connect (waitSec: 300 recommended); the user clicks Allow again. " +
+      "Then reconnect with connect (waitSec: 300 recommended). " +
       "prepareOnly: only register \"open automatically at next sign-in\" without restarting (for installers that restart, or a manual restart by the user); cancel: cancel a pending restart.",
     inputSchema: {
       delaySec: z.number().int().min(5).max(600).optional().describe("Seconds until restart; default 15"),
@@ -566,6 +588,25 @@ server.registerTool(
     annotations: { readOnlyHint: true },
   },
   (a) => forward("search_files", a),
+);
+
+server.registerTool(
+  "disk_usage",
+  {
+    description:
+      "Show where disk space goes under a folder: the largest subfolders as a tree (size and share of the parent) and the largest files. " +
+      "One native scan, much faster than PowerShell; a whole system drive usually takes under a minute (stops after 5 minutes with partial totals). " +
+      "Use system_info for free space per drive. Folders the user can't read are skipped and reported; after request_admin the totals are complete. " +
+      "Online-only OneDrive files are not counted; C:\\Windows\\WinSxS looks larger than it is because of hard links.",
+    inputSchema: {
+      path: remotePath.optional().describe("Folder to scan; default C:\\"),
+      depth: z.number().int().min(0).max(6).optional().describe("Folder levels to break down; default 2 (0 = only the largest files)"),
+      perFolder: z.number().int().min(1).max(50).optional().describe("Largest subfolders shown per folder; default 8"),
+      topFiles: z.number().int().min(0).max(500).optional().describe("How many of the largest files to list; default 20 (0 = none)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  (a) => forward("disk_usage", a),
 );
 
 server.registerTool(

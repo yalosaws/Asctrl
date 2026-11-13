@@ -9,12 +9,12 @@ Helps people who aren't comfortable with computers get them fixed: they run a sm
 ┌──────────────┐   WebSocket   ┌──────────────┐   WebSocket   ┌─────────────────────┐
 │ Agent        │ ────────────▶ │  Relay       │ ◀──────────── │ MCP console         │
 │ shows a code │               │ pairs by code│               │  ↑ stdio            │
-│ asks consent │ ◀── calls ─── │ forwards msgs│ ─── calls ──▶ │ Claude (AI + you)   │
+│ shows actions│ ◀── calls ─── │ forwards msgs│ ─── calls ──▶ │ Claude (AI + you)   │
 └──────────────┘               └──────────────┘               └─────────────────────┘
 ```
 
 - Both sides only **connect out** to the relay, so the other computer can be behind a router/NAT.
-- Every connection needs the person to click **Allow** on the agent; actions are shown on their screen.
+- Having the code is enough to connect: the person shares it on purpose, and every action is shown on their screen. Only administrator access and restarts ask the person to click **Allow**.
 - The console is an **MCP server**, so Claude Code / Claude desktop can use the remote computer as a set of tools.
 - The agent pings the relay every 25 s and the relay pings every connection every 30 s, so a code stays valid while the person is reading it out (idle connections are otherwise forgotten by home routers), and a computer that went to sleep or lost Wi-Fi frees its code after 90 s.
 
@@ -30,7 +30,7 @@ Helps people who aren't comfortable with computers get them fixed: they run a sm
 
 ## GUI agent (agent-app)
 
-The agent has no window: it is an orb of light on a transparent, always-on-top fullscreen overlay. When ready, it shows the 6-digit assist code next to the orb. When someone connects, a consent card asks the person to Allow or Deny (denied automatically after 2 minutes). While the session is active, a flowing gradient border runs around every screen, and commands and file operations are shown in a panel next to the orb. Typing and key presses are not shown. Hover the orb to end the session or quit.
+The agent has no window: it is an orb of light on a transparent, always-on-top fullscreen overlay. When ready, it shows the 6-digit assist code next to the orb. When someone connects with the code, the session starts right away. While the session is active, a flowing gradient border runs around every screen, and commands and file operations are shown in a panel next to the orb. Typing and key presses are not shown. Hover the orb to end the session or quit.
 
 Development needs Rust (`rustup`) and the Visual Studio C++ build tools.
 
@@ -39,7 +39,7 @@ cd agent-app
 npm install
 ```
 
-UI debugging in the browser with demo data (add `?state=ready|consent|admin|reboot|connected|offline|connecting` to the URL to switch state):
+UI debugging in the browser with demo data (add `?state=ready|admin|reboot|connected|offline|connecting` to the URL to switch state):
 
 ```bash
 npm run dev
@@ -65,9 +65,9 @@ npm run tauri build
 4. Compile-time environment variable `ASCTRL_RELAY_URL` (recommended: set it before building so the exe you send needs no setup)
 5. Default: the hosted relay `ws://124.222.182.40:8787` in release builds, `ws://localhost:8787` in debug builds
 
-The `--code <6 digits>` flag fixes the assist code (used to keep the same code across an elevated restart). The `ASCTRL_CODE` (fixed code) and `ASCTRL_AUTO_ACCEPT` (auto-allow) environment variables only work in debug builds, for automated tests.
+The `--code <6 digits>` flag fixes the assist code (used to keep the same code across an elevated restart). The `ASCTRL_CODE` (fixed code) environment variable only works in debug builds, for automated tests.
 
-**Admin mode**: the AI calls `request_admin` → the app explains and the person clicks Allow → Windows shows UAC and they click "Yes" → the app restarts as administrator with the same code → the AI calls `connect` again and the person clicks Allow once more. An "Admin" tag appears under the orb.
+**Admin mode**: the AI calls `request_admin` → the app explains and the person clicks Allow → Windows shows UAC and they click "Yes" → the app restarts as administrator with the same code → the console reconnects automatically with the same code. An "Admin" tag appears under the orb.
 
 ## Hosted relay
 
@@ -104,13 +104,14 @@ The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-rel
 | Clipboard | `read_clipboard` / `write_clipboard` | Read and write the clipboard (faster than `type_text` for long text) |
 | Files | `read_file` / `write_file` / `edit_file` | Read (line numbers, in parts), write, exact replace. Detects UTF-8 / UTF-16 / ANSI code page and keeps encoding and line endings |
 | | `list_dir` / `find_files` / `search_files` | List a folder; find by file-name wildcard recursively; search contents by regex |
+| | `disk_usage` | Where disk space goes: largest subfolders as a tree and the largest files, in one native scan |
 | | `upload_file` / `download_file` | Transfer files between the two computers (≤ 20 MB) |
 | Privileges | `request_admin` | Request administrator rights (see above) |
 | | `restart_computer` | Restart the computer with the person's consent; the app reopens after sign-in with the same code. `prepareOnly` only registers the auto-open, `cancel` cancels |
 
 After mouse, keyboard and window actions, the MCP console automatically returns a fresh screenshot so the AI sees the result right away (pass `screenshot: false` to turn this off).
 
-**Resuming after a restart**: `restart_computer` → the person clicks Allow → countdown and restart → after sign-in the app opens once via the `RunOnce` registry key (same code) → the AI reconnects with `connect` (`waitSec: 300`) and the person clicks Allow again.
+**Resuming after a restart**: `restart_computer` → the person clicks Allow → countdown and restart → after sign-in the app opens once via the `RunOnce` registry key (same code) → the AI reconnects with `connect` (`waitSec: 300`).
 
 **Background jobs** run in a separate PowerShell process and do not share the persistent session's directory or variables. Each keeps its most recent 2 MB of output. When the technician disconnects or the person clicks End session, all of them stop, and so does a command still running in the session (with the programs it started).
 
@@ -146,7 +147,7 @@ For Claude desktop, add the contents of `.mcp.json` to its MCP configuration and
 npm test
 ```
 
-Starts a local relay and an auto-allowing agent, calls every tool in turn, and saves a screenshot to `test/out/screenshot.jpg`.
+Starts a local relay and an agent, calls every tool in turn, and saves a screenshot to `test/out/screenshot.jpg`.
 
 To test the GUI agent (first run `npm run tauri build -- --debug --no-bundle` in `agent-app`):
 
@@ -168,7 +169,8 @@ npm run typecheck
 
 Structurally, software like this is the same as a remote-access trojan; the whole difference is **informed consent**. Currently:
 
-- Every connection must be confirmed by the person at the agent
+- Connecting needs the code, which the person reads out themselves; administrator access and restarts must be confirmed at the agent
+- A running session is visible at all times (gradient border around the screen) and can be ended from the orb
 - Commands and file operations are shown on the agent's screen
 - Quitting the app disconnects
 - The relay can require a `RELAY_TOKEN`, so only consoles with the right token can connect
@@ -176,13 +178,13 @@ Structurally, software like this is the same as a remote-access trojan; the whol
 **Must be added before real use:**
 
 - [ ] Put the relay behind an HTTPS reverse proxy and use `wss://` (currently plaintext)
-- [ ] Limit attempts / expire codes to prevent brute-force guessing
+- [ ] Limit attempts / expire codes to prevent brute-force guessing (more important now that the code alone connects)
 - [ ] Second confirmation on the agent for dangerous commands (optional)
 - [ ] Write an action log to disk
 
 ## Roadmap
 
-- [x] GUI agent (assist code + consent prompt + on-screen activity)
+- [x] GUI agent (assist code + on-screen activity)
 - [ ] Code signing, to reduce SmartScreen / antivirus blocking
 - [ ] Tray icon; no auto-start at boot (open only when needed)
 - [x] Mouse click and keyboard input tools (so the AI can operate the UI directly)

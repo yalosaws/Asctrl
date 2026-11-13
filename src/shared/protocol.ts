@@ -36,6 +36,7 @@ export type ToolName =
   | "list_dir"
   | "find_files"
   | "search_files"
+  | "disk_usage"
   | "job_output"
   | "stop_job";
 
