@@ -156,7 +156,21 @@ pub fn act(h: HWND, action: &str) -> Result<String, String> {
 }
 
 /// Open the way Explorer does: program names, full paths, files, URLs, ms-settings: links, etc.
-pub fn open(target: &str, args: &str, cwd: &str) -> Result<(), String> {
+/// Returns the window that came up for it, brought to the front if Windows left it behind (None for a console
+/// program, or anything that shows no window within a few seconds).
+pub fn open(target: &str, args: &str, cwd: &str) -> Result<Option<isize>, String> {
+    let before: std::collections::HashSet<isize> = list().iter().map(|w| w.handle).collect();
+    let fg0 = foreground();
+    // We run in the background, so Windows would normally keep the new program's window behind the current one.
+    // A simulated Alt press lets us hand the foreground on, and AllowSetForegroundWindow passes that right to the launched program.
+    unsafe {
+        let alt = |flags| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_MENU, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+        };
+        SendInput(&[alt(KEYBD_EVENT_FLAGS(0)), alt(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32);
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
     let t = HSTRING::from(target);
     let a = HSTRING::from(args);
     let d = HSTRING::from(cwd);
@@ -171,11 +185,37 @@ pub fn open(target: &str, args: &str, cwd: &str) -> Result<(), String> {
         )
     };
     match r.0 as isize {
-        n if n > 32 => Ok(()),
-        2 | 3 => Err(format!("Can't find \"{target}\"")),
-        5 => Err("Access denied".into()),
-        n => Err(format!("Failed to open (error code {n})")),
+        n if n > 32 => {}
+        2 | 3 => return Err(format!("Can't find \"{target}\"")),
+        5 => return Err("Access denied".into()),
+        n => return Err(format!("Failed to open (error code {n})")),
     }
+    // Wait for a new window, or for an existing one to come forward (a URL in a browser already open, a single-instance app)
+    let came_up = || -> Option<isize> {
+        if let Some(w) = list().into_iter().find(|w| !before.contains(&w.handle) && !w.minimized) {
+            return Some(w.handle);
+        }
+        let fg = foreground();
+        (fg != 0 && fg != fg0 && before.contains(&fg)).then_some(fg)
+    };
+    let mut found = None;
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Some(h) = came_up() {
+            found = Some(h);
+            break;
+        }
+    }
+    let Some(_) = found else { return Ok(None) };
+    // Let it settle: windows often resize or replace a splash screen right after appearing
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let h = came_up().or(found).filter(|&h| rect_of(h).is_some());
+    if let Some(h) = h {
+        if foreground() != h {
+            let _ = act(HWND(h as *mut _), "focus");
+        }
+    }
+    Ok(h)
 }
 
 /// The window in front right now
@@ -215,6 +255,58 @@ unsafe fn visible_rect(h: HWND) -> Option<RECT> {
     }
     unsafe { GetWindowRect(h, &mut r) }.ok()?;
     Some(r)
+}
+
+/// What the clipboard holds, so it can be put back: Ok(Some(text)), Ok(None) when empty,
+/// Err when it holds something other than text (an image, copied files), which can't be restored
+pub fn clipboard_text() -> Result<Option<String>, String> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{CloseClipboard, CountClipboardFormats, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    const CF_UNICODETEXT: u32 = 13;
+    unsafe {
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        if !opened {
+            return Err("The clipboard is in use".into());
+        }
+        let r = (|| {
+            if IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() {
+                return if CountClipboardFormats() == 0 { Ok(None) } else { Err("The clipboard holds something other than text".to_string()) };
+            }
+            let h = GetClipboardData(CF_UNICODETEXT).map_err(|e| e.to_string())?;
+            let p = GlobalLock(HGLOBAL(h.0)) as *const u16;
+            if p.is_null() {
+                return Ok(Some(String::new()));
+            }
+            let mut n = 0;
+            while *p.add(n) != 0 {
+                n += 1;
+            }
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+            let _ = GlobalUnlock(HGLOBAL(h.0));
+            Ok(Some(s))
+        })();
+        let _ = CloseClipboard();
+        r
+    }
+}
+
+/// Empty the clipboard
+pub fn clear_clipboard() {
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard};
+    unsafe {
+        if OpenClipboard(None).is_ok() {
+            let _ = EmptyClipboard();
+            let _ = CloseClipboard();
+        }
+    }
 }
 
 /// Put text on the clipboard

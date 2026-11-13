@@ -40,7 +40,11 @@ export type ToolName =
   | "search_files"
   | "disk_usage"
   | "job_output"
-  | "stop_job";
+  | "stop_job"
+  | "find_text"
+  | "click_text"
+  | "wait_for"
+  | "batch";
 
 // ---- Handshake ----
 

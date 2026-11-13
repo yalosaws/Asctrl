@@ -120,9 +120,9 @@ export class Cursor {
       let t = 0;
       onFrame((dt) => {
         t += dt;
-        // Let it spin up first; a full turn is under half a second, so never wait long after that
-        const lined = t > 0.22 && Math.abs(wrap(where() - (want(orb.pos) - LEAD))) < 12;
-        if (lined || t > 0.9) {
+        // A brief spin-up, then the next time its colour lines up; never more than 0.12 s, so clicks stay fast
+        const lined = t > 0.03 && Math.abs(wrap(where() - (want(orb.pos) - LEAD))) < 20;
+        if (lined || t > 0.12) {
           resolve();
           return false;
         }
@@ -144,7 +144,7 @@ export class Cursor {
     bloom(from, { size: 46, ms: 380, color: this.color });
     orb.bump(0.18);
 
-    const ms = clamp(dist * 0.36, 240, 560);
+    const ms = clamp(dist * 0.16, 100, 220);
     await tween(ms, (t) => {
       const e = easeOut(t);
       this.place(bez(from, c1, c2, p, e));

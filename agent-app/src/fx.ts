@@ -199,7 +199,7 @@ function frameZone(r: R, hug = false): Promise<void> {
   const spot = zoneSpot(zone.r);
   const far = Math.hypot(orb.pos.x - spot.x, orb.pos.y - spot.y) > 24;
   orb.goTo(spot, "fast");
-  return far ? sleep(360) : Promise.resolve();
+  return far ? sleep(80) : Promise.resolve();
 }
 
 /** Let the frame go a while after the last action in it (long enough to span the pause between steps), then send the orb home */
@@ -402,7 +402,7 @@ function openAppStart() {
 
 function openAppEnd(e: FxEvent) {
   if (!e.ok) return;
-  // Land on the window that came up; without one (a console program, or it opened behind), the middle of the screen
+  // Land on the window that came up (found even if it opened behind); without one (a console program), the middle of the screen
   const r = rect(e.geo?.rect);
   const c = r ? center(r) : center(primary().work);
   const size = r ? Math.min(520, Math.max(160, Math.max(r.w, r.h) * 0.7)) : 520;

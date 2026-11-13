@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 
 /// How long a step waits for its cursor. If the overlay never answers (no window, nothing to fly to),
 /// the first timeout turns pacing off for the rest of that call, so a long sequence is not held up
-const LAND_TIMEOUT: Duration = Duration::from_millis(2500);
+const LAND_TIMEOUT: Duration = Duration::from_millis(450);
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static CALLS: OnceLock<Mutex<HashMap<String, Arc<Call>>>> = OnceLock::new();
@@ -27,6 +27,13 @@ fn calls() -> &'static Mutex<HashMap<String, Arc<Call>>> {
 
 pub fn init(app: AppHandle) {
     let _ = APP.set(app);
+}
+
+/// Send an animation event to the overlay (steps of a batch, the click of click_text)
+pub fn emit(v: serde_json::Value) {
+    if let Some(app) = APP.get() {
+        let _ = app.emit("fx", v);
+    }
 }
 
 /// Register a call before its start event goes out, so no landing can be missed

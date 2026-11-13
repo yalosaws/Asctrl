@@ -237,6 +237,17 @@ fn describe(el: &IUIAutomationElement, to_shot: &dyn Fn(i32, i32) -> Option<(i32
 
 /// Number the useful controls of a window and describe them, one per line, indented by nesting
 pub fn list(hwnd: HWND, query: &str, max: usize, offscreen: bool, to_shot: &dyn Fn(i32, i32) -> Option<(i32, i32)>) -> Result<String, String> {
+    list_counted(hwnd, query, max, offscreen, to_shot).map(|(s, _)| s)
+}
+
+/// list, plus how many controls matched
+pub fn list_counted(
+    hwnd: HWND,
+    query: &str,
+    max: usize,
+    offscreen: bool,
+    to_shot: &dyn Fn(i32, i32) -> Option<(i32, i32)>,
+) -> Result<(String, usize), String> {
     if hwnd.is_invalid() {
         return Err("No window is in front; pass handle or title".into());
     }
@@ -330,7 +341,7 @@ pub fn list(hwnd: HWND, query: &str, max: usize, offscreen: bool, to_shot: &dyn 
     if more > 0 {
         out += &format!("\n… {more} more not shown; narrow it down with query");
     }
-    Ok(out)
+    Ok((out, lines.len() + more))
 }
 
 /// Screen rectangle and short name of a listed element, for the on-screen animation

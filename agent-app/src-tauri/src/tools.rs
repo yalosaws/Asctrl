@@ -1,6 +1,6 @@
 //! Tools the agent can run. The system_info / list_processes / event_log scripts match the Node version in src/agent/tools.ts.
 
-use crate::{capture, files, input, jobs, jobs::Jobs, pace, powershell, shell::Shell, uia, winmgr};
+use crate::{capture, files, input, jobs, jobs::Jobs, ocr, pace, powershell, screen, shell::Shell, uia, winmgr};
 use base64::Engine;
 use serde::Serialize;
 use serde_json::Value;
@@ -65,6 +65,8 @@ pub struct Ctx {
     /// Pid of the session's PowerShell, kept outside `shell` so a reset can kill it while a command holds that lock
     shell_pid: Mutex<Option<u32>>,
     jobs: Mutex<Jobs>,
+    /// Window the last open_app brought up, for the overlay to land on
+    opened: Mutex<Option<isize>>,
 }
 
 impl Ctx {
@@ -256,16 +258,73 @@ async fn blocking(f: impl FnOnce() -> Result<String, String> + Send + 'static) -
 /// parallel can't interleave (one moving the pointer while the other presses). Element actions don't take it.
 static REAL_INPUT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Run a blocking input operation on a background thread, then pause briefly so the UI can refresh
-async fn input_op(f: impl FnOnce() -> Result<(), String> + Send + 'static, done: String) -> Output {
-    let _turn = REAL_INPUT.lock().await;
-    match tokio::task::spawn_blocking(f).await {
-        Ok(Ok(())) => {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            text(done)
+/// type_text pastes text longer than this (method auto)
+const PASTE_OVER: usize = 200;
+
+/// Paste `t` with ctrl+v, then put the clipboard back as it was
+fn paste(t: &str, saved: Option<String>) -> Result<(), String> {
+    winmgr::set_clipboard_text(t)?;
+    let r = input::press_keys("ctrl+v");
+    // The program reads the clipboard when it handles the keystroke, a moment later: restoring too soon would paste the old text
+    std::thread::sleep(Duration::from_millis(350));
+    match saved {
+        Some(s) => {
+            let _ = winmgr::set_clipboard_text(&s);
         }
+        None => winmgr::clear_clipboard(),
+    }
+    r
+}
+
+/// No change within this long after an action: nothing happened (or not yet)
+const QUIET: Duration = Duration::from_millis(350);
+/// Never wait longer than this for the screen to stop changing after an action
+const SETTLE_MAX: Duration = Duration::from_millis(1500);
+
+/// Run a blocking input operation on a background thread, then wait just until the screen has reacted
+/// and stopped changing (instead of a fixed pause), and say what changed
+async fn input_op(ctx: &Ctx, at: Option<(i32, i32)>, f: impl FnOnce() -> Result<(), String> + Send + 'static, done: String) -> Output {
+    let _turn = REAL_INPUT.lock().await;
+    let g = *ctx.geom.lock().unwrap();
+    let r = tokio::task::spawn_blocking(move || {
+        let before = screen::before(at);
+        f()?;
+        Ok::<_, String>(Some(screen::settle(&before, QUIET, SETTLE_MAX)))
+    })
+    .await;
+    match r {
+        Ok(Ok(change)) => text(format!("{done}{}", describe_change(g, change.as_ref()))),
         Ok(Err(e)) => fail(e),
         Err(e) => fail(e.to_string()),
+    }
+}
+
+/// A screen rectangle as the AI should read it: on the last screenshot when it is there, else in screen pixels
+fn rect_text(g: Option<Geom>, (l, t, r, b): (i32, i32, i32, i32)) -> String {
+    match g.and_then(|g| Some((g.screen_to_shot(l, t)?, g.screen_to_shot(r, b)?))) {
+        Some(((x0, y0), (x1, y1))) => format!("({x0},{y0})-({x1},{y1})"),
+        None => format!("screen ({l},{t})-({r},{b})"),
+    }
+}
+
+/// A screen point as the AI should read it, like list_elements: @(x,y) on the last screenshot, else @screen(x,y)
+fn at_text(g: Option<Geom>, x: i32, y: i32) -> String {
+    match g.and_then(|g| g.screen_to_shot(x, y)) {
+        Some((px, py)) => format!("@({px},{py})"),
+        None => format!("@screen({x},{y})"),
+    }
+}
+
+/// What the screen did after an action, for the AI to catch a click that missed without taking a screenshot
+fn describe_change(g: Option<Geom>, c: Option<&screen::Change>) -> String {
+    let Some(c) = c else { return String::new() };
+    let ms = c.waited.as_millis();
+    let front = c.new_front.as_ref().map(|t| format!(". \"{t}\" is now in front")).unwrap_or_default();
+    match (c.changed, c.rect) {
+        (true, Some(r)) if c.busy => format!(". Screen changed around {} and was still changing after {ms} ms (loading or animating){front}", rect_text(g, r)),
+        (true, Some(r)) => format!(". Screen changed around {} (settled in {ms} ms){front}", rect_text(g, r)),
+        (true, None) => front,
+        _ => format!(". No visible change in the window within {ms} ms: the action may have missed, or the program is still working"),
     }
 }
 
@@ -328,11 +387,31 @@ async fn shell_run(ctx: &Ctx, script: &str, timeout_secs: u64) -> Output {
     }
 }
 
+/// Run a tool. With `_shot` ({maxWidth, display}) a screenshot comes back in the same reply, once the
+/// screen has settled: one round trip instead of two after every action.
 pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
-    match tool {
-        "screenshot" => {
-            let maxw = int_arg(args, "maxWidth", 1600, 320, 3840);
-            let display = int_arg(args, "display", 0, 0, 16) as usize;
+    let mut out = run_tool(ctx, tool, args).await;
+    if let Some(s) = args.get("_shot").filter(|s| s.is_object()) {
+        if out.image.is_none() && tool != "screenshot" {
+            let shot = screenshot(ctx, int_arg(s, "maxWidth", 1600, 320, 3840), int_arg(s, "display", 0, 0, 16) as usize).await;
+            out.image = shot.image;
+            let note = match (shot.ok, shot.text, shot.error) {
+                (true, Some(t), _) => t,
+                (_, _, e) => format!("(the screenshot after it failed: {})", e.unwrap_or_default()),
+            };
+            match (&mut out.text, &mut out.error) {
+                (_, Some(e)) => *e = format!("{e}\n{note}"),
+                (Some(t), None) => *t = format!("{t}\n{note}"),
+                (None, None) => out.text = Some(note),
+            }
+        }
+    }
+    out
+}
+
+async fn screenshot(ctx: &Ctx, maxw: i64, display: usize) -> Output {
+    {
+        {
             let displays = capture::displays();
             let area = match display {
                 0 => capture::virtual_screen(),
@@ -360,6 +439,109 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 Err(e) => fail(e),
             }
         }
+    }
+}
+
+fn run_tool<'a>(ctx: &'a Ctx, tool: &'a str, args: &'a Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Output> + Send + 'a>> {
+    Box::pin(run_tool_inner(ctx, tool, args))
+}
+
+async fn run_tool_inner(ctx: &Ctx, tool: &str, args: &Value) -> Output {
+    match tool {
+        "screenshot" => screenshot(ctx, int_arg(args, "maxWidth", 1600, 320, 3840), int_arg(args, "display", 0, 0, 16) as usize).await,
+        "find_text" => {
+            let query = str_arg(args, "text").trim().to_string();
+            let area = match ocr_area(ctx, args) {
+                Ok(a) => a,
+                Err(e) => return fail(e),
+            };
+            let g = *ctx.geom.lock().unwrap();
+            blocking(move || {
+                let lines = ocr::read(area)?;
+                if query.is_empty() {
+                    if lines.is_empty() {
+                        return Ok("No text found in that area".into());
+                    }
+                    let shown: Vec<String> = lines
+                        .iter()
+                        .take(400)
+                        .map(|l| {
+                            let (a, b, c, d) = l.rect();
+                            format!("\"{}\" {}", l.text(), at_text(g, (a + c) / 2, (b + d) / 2))
+                        })
+                        .collect();
+                    let more = if lines.len() > 400 { format!("\n… {} more lines", lines.len() - 400) } else { String::new() };
+                    return Ok(format!("Text on screen, top to bottom ({} lines; @ is the centre):\n{}{more}", lines.len(), shown.join("\n")));
+                }
+                let hits = ocr::find(&lines, &query);
+                if hits.is_empty() {
+                    return Err(not_on_screen(&query, lines.len()));
+                }
+                let shown: Vec<String> = hits
+                    .iter()
+                    .enumerate()
+                    .map(|(i, h)| {
+                        let (a, b, c, d) = h.rect;
+                        format!("{}. {} in \"{}\"{}", i + 1, at_text(g, (a + c) / 2, (b + d) / 2), h.line, if h.exact { " (whole line)" } else { "" })
+                    })
+                    .collect();
+                Ok(format!("Found \"{query}\" {} time(s):\n{}", hits.len(), shown.join("\n")))
+            })
+            .await
+        }
+        "click_text" => {
+            let query = str_arg(args, "text").trim().to_string();
+            if query.is_empty() {
+                return fail("text is empty");
+            }
+            let area = match ocr_area(ctx, args) {
+                Ok(a) => a,
+                Err(e) => return fail(e),
+            };
+            let nth = int_arg(args, "occurrence", 1, 1, 100) as usize;
+            let q = query.clone();
+            let found = tokio::task::spawn_blocking(move || {
+                // Retry briefly: the text is often on its way (a menu opening, a page still drawing)
+                let start = std::time::Instant::now();
+                loop {
+                    let lines = ocr::read(area)?;
+                    let hits = ocr::find(&lines, &q);
+                    // A label that is the whole line (a button, a menu item) beats the same words inside a sentence
+                    let exact: Vec<&ocr::Hit> = hits.iter().filter(|h| h.exact).collect();
+                    let pool: Vec<&ocr::Hit> = if exact.is_empty() { hits.iter().collect() } else { exact };
+                    let r = match pool.get(nth - 1) {
+                        Some(h) => return Ok((h.rect, pool.len())),
+                        None if pool.is_empty() => Err(not_on_screen(&q, lines.len())),
+                        None => Err(format!("\"{q}\" is on screen only {} time(s)", pool.len())),
+                    };
+                    if start.elapsed() >= Duration::from_millis(1500) {
+                        return r;
+                    }
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            })
+            .await;
+            let ((l, t, r, b), total) = match found {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => return fail(e),
+                Err(e) => return fail(e.to_string()),
+            };
+            let (x, y) = ((l + r) / 2, (t + b) / 2);
+            let button = str_arg(args, "button").to_string();
+            let count = int_arg(args, "count", 1, 1, 3) as u32;
+            let mods = str_arg(args, "modifiers").to_string();
+            // Shown like an ordinary click; the real click doesn't wait for the animation
+            let fx_id = format!("{}.text", pace::CALL_ID.try_with(Clone::clone).unwrap_or_default());
+            let zone = winmgr::top_window_at(x, y).and_then(winmgr::rect_of).map(rect_json);
+            pace::emit(serde_json::json!({ "phase": "start", "id": fx_id, "tool": "click", "args": { "count": count }, "geo": { "at": [x, y], "zone": zone, "zoneIsWindow": true } }));
+            let g = *ctx.geom.lock().unwrap();
+            let which = if total > 1 { format!(" (match {nth} of {total})") } else { String::new() };
+            let out = input_op(ctx, Some((x, y)), move || input::click(x, y, &button, count, &mods), format!("Clicked \"{query}\" {}{which}", at_text(g, x, y))).await;
+            pace::emit(serde_json::json!({ "phase": "end", "id": fx_id, "tool": "click", "ok": out.ok, "text": "", "geo": {} }));
+            out
+        }
+        "wait_for" => wait_for(ctx, args).await,
+        "batch" => batch(ctx, args).await,
         "zoom" => {
             let g = match geom(ctx) {
                 Ok(g) => g,
@@ -406,7 +588,7 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 Ok(p) => p,
                 Err(e) => return fail(e),
             };
-            input_op(move || input::mouse_move(x, y), "Mouse moved".into()).await
+            input_op(ctx, Some((x, y)), move || input::mouse_move(x, y), "Mouse moved".into()).await
         }
         "mouse_look" => {
             let dx = int_arg(args, "dx", 0, -20000, 20000) as i32;
@@ -415,7 +597,7 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 return fail("Give dx and/or dy");
             }
             let ms = (args.get("seconds").and_then(Value::as_f64).unwrap_or(0.2).clamp(0.0, 5.0) * 1000.0) as u64;
-            input_op(move || input::mouse_look(dx, dy, ms), format!("Mouse moved by ({dx}, {dy})")).await
+            input_op(ctx, None, move || input::mouse_look(dx, dy, ms), format!("Mouse moved by ({dx}, {dy})")).await
         }
         "mouse_down" | "mouse_up" => {
             let at = match opt_screen(ctx, args) {
@@ -424,12 +606,12 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
             };
             let button = str_arg(args, "button").to_string();
             let press = tool == "mouse_down";
-            input_op(move || input::mouse_button(at, &button, press), if press { "Pressed" } else { "Released" }.into()).await
+            input_op(ctx, at.or_else(|| input::cursor_pos().ok()), move || input::mouse_button(at, &button, press), if press { "Pressed" } else { "Released" }.into()).await
         }
         "hold_key" => {
             let k = str_arg(args, "keys").to_string();
             let ms = (args.get("seconds").and_then(Value::as_f64).unwrap_or(1.0).clamp(0.05, 10.0) * 1000.0) as u64;
-            input_op(move || input::hold_keys(&k, ms), "Keys released".into()).await
+            input_op(ctx, None, move || input::hold_keys(&k, ms), "Keys released".into()).await
         }
         "read_clipboard" => ps_text(CLIPBOARD_READ_PS, 15).await,
         "write_clipboard" => {
@@ -474,6 +656,9 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 return fail(format!("Give 1 to {max} actions"));
             }
             let changes = items.iter().any(|i| i.1 != "text");
+            let g = *ctx.geom.lock().unwrap();
+            let at = items.iter().find_map(|(id, _, _)| uia::mark_of(*id as usize)).map(|((l, t, r, b), _)| ((l + r) / 2, (t + b) / 2));
+            let before = if changes { tokio::task::spawn_blocking(move || screen::before(at)).await.ok() } else { None };
             // Each step acts when its virtual cursor lands, so what is drawn and what happens line up
             let pace = pace::current();
             let pace = pace.as_deref();
@@ -498,13 +683,15 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 let runs = items.into_iter().enumerate().map(|(i, (id, action, value))| paced_act(pace, i, id, action, value));
                 futures_util::future::join_all(runs).await.into_iter().map(Some).collect()
             };
-            if changes && results.iter().any(|r| matches!(r, Some(Ok(_)))) {
-                // Let the program react before anything looks at the screen again
-                tokio::time::sleep(Duration::from_millis(150)).await;
+            // Let the program react before anything looks at the screen again, and say whether it did
+            let mut change = String::new();
+            if let Some(b) = before.filter(|_| results.iter().any(|r| matches!(r, Some(Ok(_))))) {
+                let c = tokio::task::spawn_blocking(move || screen::settle(&b, QUIET, SETTLE_MAX)).await.ok();
+                change = describe_change(g, c.as_ref());
             }
             if batch.is_none() {
                 return match results.into_iter().next().flatten() {
-                    Some(Ok(s)) => text(s),
+                    Some(Ok(s)) => text(s + &change),
                     Some(Err(e)) => fail(e),
                     None => fail("No result"),
                 };
@@ -521,7 +708,7 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                     None => format!("{}. – skipped", i + 1),
                 })
                 .collect();
-            let mut o = text(lines.join("\n"));
+            let mut o = text(lines.join("\n") + &change);
             if failed > 0 {
                 o.ok = false;
                 let note = if skipped > 0 { format!(", so the sequence stopped and {skipped} were skipped") } else { String::new() };
@@ -533,9 +720,20 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
             let handle = args.get("handle").and_then(Value::as_i64).map(|h| h as isize);
             let title = str_arg(args, "title").to_string();
             let action = str_arg(args, "action").to_string();
-            let out = blocking(move || winmgr::act(winmgr::find(handle, &title)?, &action)).await;
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            out
+            let g = *ctx.geom.lock().unwrap();
+            let r = tokio::task::spawn_blocking(move || {
+                let h = winmgr::find(handle, &title)?;
+                let at = winmgr::rect_of(h.0 as isize).map(|(l, t, r, b)| ((l + r) / 2, (t + b) / 2));
+                let before = screen::before(at);
+                let done = winmgr::act(h, &action)?;
+                Ok::<_, String>((done, Some(screen::settle(&before, Duration::from_millis(150), Duration::from_millis(800)))))
+            })
+            .await;
+            match r {
+                Ok(Ok((done, c))) => text(done + &describe_change(g, c.as_ref())),
+                Ok(Err(e)) => fail(e),
+                Err(e) => fail(e.to_string()),
+            }
         }
         "open_app" => {
             let target = str_arg(args, "target").trim().to_string();
@@ -550,11 +748,17 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                     Err(e) => return fail(e),
                 },
             };
-            let out = blocking(move || winmgr::open(&target, &a, &cwd).map(|_| format!("Opened {target}"))).await;
-            if out.ok {
-                tokio::time::sleep(Duration::from_millis(1500)).await; // wait for the window to appear
+            // Waits (up to ~4.5 s) for the program's window and brings it to the front
+            let r = tokio::task::spawn_blocking(move || winmgr::open(&target, &a, &cwd).map(|h| (target, h))).await;
+            match r {
+                Ok(Ok((target, h))) => {
+                    *ctx.opened.lock().unwrap() = h;
+                    let title = h.and_then(|h| winmgr::list().into_iter().find(|w| w.handle == h)).map(|w| format!(" — window \"{}\" (handle {}) is in front", w.title, w.handle));
+                    text(format!("Opened {target}{}", title.unwrap_or_default()))
+                }
+                Ok(Err(e)) => fail(e),
+                Err(e) => fail(e.to_string()),
             }
-            out
         }
         "read_file" => {
             let path = match path_arg(args, "path") {
@@ -666,7 +870,7 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
             if let Some(p) = &pace {
                 p.wait(0).await;
             }
-            let out = input_op(move || input::click(x, y, &button, count, &mods), "Clicked".into()).await;
+            let out = input_op(ctx, Some((x, y)), move || input::click(x, y, &button, count, &mods), "Clicked".into()).await;
             if let Some(p) = &pace {
                 p.step(0, out.ok);
             }
@@ -679,7 +883,7 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
             };
             let amount = int_arg(args, "amount", 3, -50, 50) as i32;
             let horizontal = args.get("horizontal").and_then(Value::as_bool).unwrap_or(false);
-            input_op(move || input::scroll(x, y, amount, horizontal), "Scrolled".into()).await
+            input_op(ctx, Some((x, y)), move || input::scroll(x, y, amount, horizontal), "Scrolled".into()).await
         }
         "drag" => {
             let from = to_screen(ctx, args, "fromX", "fromY");
@@ -688,18 +892,29 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 (Ok(a), Ok(b)) => (a, b),
                 (Err(e), _) | (_, Err(e)) => return fail(e),
             };
-            input_op(move || input::drag(x1, y1, x2, y2), "Dragged".into()).await
+            input_op(ctx, Some((x1, y1)), move || input::drag(x1, y1, x2, y2), "Dragged".into()).await
         }
         "type_text" => {
             let t = str_arg(args, "text").to_string();
             if t.is_empty() {
                 return fail("text is empty");
             }
-            input_op(move || input::type_text(&t), "Typed".into()).await
+            // Programs take keystrokes at their own pace (a few hundred a second); a paste lands at once.
+            // auto pastes long text, unless the clipboard holds something that couldn't be put back.
+            let method = str_arg(args, "method").to_string();
+            let long = t.chars().count() > PASTE_OVER;
+            let saved = if method == "paste" || (method != "keys" && long) { Some(tokio::task::spawn_blocking(winmgr::clipboard_text).await) } else { None };
+            match saved {
+                Some(Ok(Ok(saved))) => {
+                    input_op(ctx, None, move || paste(&t, saved), "Typed (pasted through the clipboard, which was put back afterwards)".into()).await
+                }
+                Some(_) if method == "paste" => fail("The clipboard holds an image or files, which pasting would lose; use method keys"),
+                _ => input_op(ctx, None, move || input::type_text(&t), "Typed".into()).await,
+            }
         }
         "press_keys" => {
             let k = str_arg(args, "keys").to_string();
-            input_op(move || input::press_keys(&k), "Keys pressed".into()).await
+            input_op(ctx, None, move || input::press_keys(&k), "Keys pressed".into()).await
         }
         "upload_file" => {
             let path = match path_arg(args, "path") {
@@ -787,6 +1002,223 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
     }
 }
 
+fn not_on_screen(q: &str, lines: usize) -> String {
+    format!("\"{q}\" is not on screen (OCR read {lines} lines of text). Try a shorter part of it, or look with screenshot")
+}
+
+/// The part of the screen to read: a rectangle on the last screenshot (x0,y0,x1,y1), one display, or everything
+fn ocr_area(ctx: &Ctx, args: &Value) -> Result<capture::Area, String> {
+    if args.get("x0").is_some() {
+        let a = to_screen(ctx, args, "x0", "y0")?;
+        let b = to_screen(ctx, args, "x1", "y1")?;
+        let (l, t, r, btm) = (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1));
+        if r - l < 8 || btm - t < 8 {
+            return Err("Region is too small".into());
+        }
+        return Ok(capture::Area { left: l, top: t, width: r - l, height: btm - t });
+    }
+    // A window by handle or title: just its visible part
+    let handle = args.get("handle").and_then(Value::as_i64).map(|h| h as isize);
+    let title = str_arg(args, "title");
+    if handle.is_some() || !title.trim().is_empty() {
+        let h = winmgr::find(handle, title)?;
+        let (l, t, r, b) = winmgr::rect_of(h.0 as isize).ok_or("That window is minimized or hidden")?;
+        let v = capture::virtual_screen();
+        let (l, t, r, b) = (l.max(v.left), t.max(v.top), r.min(v.left + v.width), b.min(v.top + v.height));
+        return Ok(capture::Area { left: l, top: t, width: (r - l).max(1), height: (b - t).max(1) });
+    }
+    match int_arg(args, "display", 0, 0, 16) as usize {
+        0 => Ok(capture::virtual_screen()),
+        n => capture::displays().get(n - 1).map(|d| d.area).ok_or(format!("There is no display #{n}")),
+    }
+}
+
+/// Alternatives separated by |, e.g. "Save|保存": any of them counts
+fn alternatives(s: &str) -> Vec<String> {
+    s.split('|').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect()
+}
+
+/// Poll until a window, a control or some text shows up (or goes away), or the screen settles.
+/// Returns as soon as it happens, so the AI never has to guess how long to wait.
+async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
+    let window = alternatives(str_arg(args, "window"));
+    let element = alternatives(str_arg(args, "element"));
+    let text_q = alternatives(str_arg(args, "text"));
+    let stable = args.get("stable").and_then(Value::as_bool).unwrap_or(false);
+    let gone = args.get("gone").and_then(Value::as_bool).unwrap_or(false);
+    let given = [!window.is_empty(), !element.is_empty(), !text_q.is_empty(), stable].iter().filter(|b| **b).count();
+    if given != 1 {
+        return fail("Give exactly one of window, element, text or stable");
+    }
+    let timeout = Duration::from_secs_f64(args.get("timeoutSec").and_then(Value::as_f64).unwrap_or(10.0).clamp(0.5, 120.0));
+    let g = *ctx.geom.lock().unwrap();
+    let handle = args.get("handle").and_then(Value::as_i64).map(|h| h as isize);
+    let title = str_arg(args, "title").to_string();
+    let area = if text_q.is_empty() {
+        None
+    } else {
+        // Re-resolved on every poll when it names a window that may not exist yet
+        match ocr_area(ctx, args) {
+            Ok(a) => Some(a),
+            Err(e) if handle.is_none() && title.is_empty() => return fail(e),
+            Err(_) => None,
+        }
+    };
+    let args = args.clone();
+    let r = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let start = std::time::Instant::now();
+        if stable {
+            let at = winmgr::find(handle, &title).ok().and_then(|h| winmgr::rect_of(h.0 as isize)).map(|(l, t, r, b)| ((l + r) / 2, (t + b) / 2));
+            let ok = screen::wait_stable(screen::watch_area(at), Duration::from_millis(400), timeout);
+            let s = start.elapsed().as_secs_f64();
+            return if ok { Ok(format!("Screen settled after {s:.1} s")) } else { Err(format!("The screen was still changing after {s:.1} s")) };
+        }
+        let what = if !window.is_empty() {
+            format!("window \"{}\"", window.join("|"))
+        } else if !element.is_empty() {
+            format!("control \"{}\"", element.join("|"))
+        } else {
+            format!("text \"{}\"", text_q.join("|"))
+        };
+        let mut last_err = String::new();
+        loop {
+            // Some(details) when the thing is there
+            let found: Option<String> = if !window.is_empty() {
+                let ws = winmgr::list();
+                let hit = ws.iter().find(|w| {
+                    let (t, p) = (w.title.to_lowercase(), w.process.to_lowercase());
+                    window.iter().any(|q| t.contains(&q.to_lowercase()) || p.contains(&q.to_lowercase()))
+                });
+                hit.map(|w| {
+                    // A window exists before it has drawn anything: let it finish, so the next step can read it
+                    if !gone {
+                        let (l, t, r, b) = w.rect;
+                        if r - l > 16 && b - t > 16 && !w.minimized {
+                            let area = capture::Area { left: l, top: t, width: r - l, height: b - t };
+                            screen::wait_stable(area, Duration::from_millis(120), Duration::from_millis(1500));
+                        }
+                    }
+                    win_line(g, w)
+                })
+            } else if !element.is_empty() {
+                let hwnd = if handle.is_some() || !title.trim().is_empty() { winmgr::find(handle, &title).ok() } else { Some(uia::foreground()) };
+                let mut out = None;
+                if let Some(h) = hwnd {
+                    for q in &element {
+                        let to_shot = |x, y| g.and_then(|g: Geom| g.screen_to_shot(x, y));
+                        match uia::list_counted(h, q, 50, false, &to_shot) {
+                            Ok((listing, n)) if n > 0 => {
+                                // The whole window, so every control's id is ready for element_action
+                                out = Some(uia::list(h, "", 300, false, &to_shot).unwrap_or(listing));
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(e) => last_err = e,
+                        }
+                    }
+                }
+                out
+            } else {
+                let a = area.or_else(|| ocr_area_static(&args).ok());
+                match a.map(ocr::read) {
+                    Some(Ok(lines)) => text_q.iter().find_map(|q| {
+                        let hits = ocr::find(&lines, q);
+                        hits.first().map(|h| {
+                            let (a, b, c, d) = h.rect;
+                            format!("\"{q}\" {} in \"{}\"", at_text(g, (a + c) / 2, (b + d) / 2), h.line)
+                        })
+                    }),
+                    Some(Err(e)) => return Err(e),
+                    None => None,
+                }
+            };
+            let s = start.elapsed().as_secs_f64();
+            match (found, gone) {
+                (Some(d), false) => return Ok(format!("{what} appeared after {s:.1} s:\n{d}")),
+                (None, true) => return Ok(format!("{what} is gone after {s:.1} s")),
+                _ => {}
+            }
+            if start.elapsed() >= timeout {
+                let fg = winmgr::list().into_iter().find(|w| w.foreground).map(|w| format!(" The window in front is \"{}\" ({}).", w.title, w.process)).unwrap_or_default();
+                let note = if last_err.is_empty() { String::new() } else { format!(" Last error: {last_err}.") };
+                return Err(format!("Timed out after {s:.1} s: {what} {}.{fg}{note}", if gone { "is still there" } else { "did not appear" }));
+            }
+            std::thread::sleep(Duration::from_millis(if text_q.is_empty() { 120 } else { 250 }));
+        }
+    })
+    .await;
+    match r {
+        Ok(Ok(s)) => text(s),
+        Ok(Err(e)) => fail(e),
+        Err(e) => fail(e.to_string()),
+    }
+}
+
+/// ocr_area for a window given by title, looked up again on each poll (no screenshot geometry needed)
+fn ocr_area_static(args: &Value) -> Result<capture::Area, String> {
+    let handle = args.get("handle").and_then(Value::as_i64).map(|h| h as isize);
+    let h = winmgr::find(handle, str_arg(args, "title"))?;
+    let (l, t, r, b) = winmgr::rect_of(h.0 as isize).ok_or("That window is minimized or hidden")?;
+    Ok(capture::Area { left: l, top: t, width: (r - l).max(1), height: (b - t).max(1) })
+}
+
+/// Tools a batch may run as steps: actions and checks, nothing that changes files or the system
+const BATCHABLE: [&str; 19] = [
+    "click", "click_text", "scroll", "drag", "mouse_move", "mouse_down", "mouse_up", "mouse_look", "type_text", "press_keys", "hold_key",
+    "element_action", "list_elements", "focus_window", "open_app", "wait_for", "write_clipboard", "find_text", "wait",
+];
+
+/// Run several steps in one call, in order, stopping at the first failure. Each step still waits only until
+/// the screen settles, but the AI saves a whole round trip (and a turn of thinking) per step.
+async fn batch(ctx: &Ctx, args: &Value) -> Output {
+    let Some(steps) = args.get("steps").and_then(Value::as_array) else { return fail("Missing steps") };
+    if steps.is_empty() || steps.len() > 50 {
+        return fail("Give 1 to 50 steps");
+    }
+    let call = pace::CALL_ID.try_with(Clone::clone).unwrap_or_default();
+    let started = std::time::Instant::now();
+    let mut lines = vec![];
+    let mut failed: Option<usize> = None;
+    for (i, step) in steps.iter().enumerate() {
+        if failed.is_some() {
+            lines.push(format!("{}. – skipped", i + 1));
+            continue;
+        }
+        let tool = str_arg(step, "tool");
+        let out = if !BATCHABLE.contains(&tool) {
+            fail(format!("\"{tool}\" can't run in a batch; allowed: {}", BATCHABLE.join(", ")))
+        } else if tool == "wait" {
+            let ms = (step.get("seconds").and_then(Value::as_f64).unwrap_or(0.5).clamp(0.0, 30.0) * 1000.0) as u64;
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            text(format!("Waited {ms} ms"))
+        } else {
+            // Each step animates on its own; its real input doesn't wait for the animation (an id the pacer doesn't know)
+            let id = format!("{call}.{i}");
+            let before = fx_before(ctx, tool, step);
+            pace::emit(serde_json::json!({ "phase": "start", "id": id, "tool": tool, "args": step, "geo": before }));
+            let out = pace::CALL_ID.scope(id.clone(), run_tool(ctx, tool, step)).await;
+            let after = fx_after(ctx, tool, &before);
+            let t: String = out.text.as_deref().or(out.error.as_deref()).unwrap_or("").chars().take(6000).collect();
+            pace::emit(serde_json::json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "text": t, "geo": after }));
+            out
+        };
+        let body: String = out.text.as_deref().or(out.error.as_deref()).unwrap_or("").chars().take(3000).collect();
+        lines.push(format!("{}. {} {tool}: {body}", i + 1, if out.ok { "✓" } else { "✗" }));
+        if !out.ok {
+            failed = Some(i);
+        }
+    }
+    let secs = started.elapsed().as_secs_f64();
+    match failed {
+        None => text(format!("All {} steps done in {secs:.1} s\n{}", steps.len(), lines.join("\n"))),
+        Some(i) => Output {
+            ok: false,
+            error: Some(format!("Step {} failed after {secs:.1} s, so the rest were skipped:\n{}", i + 1, lines.join("\n"))),
+            ..Default::default()
+        },
+    }
+}
+
 // ---- Geometry for the animations (physical screen pixels) ----
 
 fn rect_json(r: (i32, i32, i32, i32)) -> Value {
@@ -854,7 +1286,10 @@ pub fn fx_before(ctx: &Ctx, tool: &str, args: &Value) -> Value {
             }
         }
         // Remember what was in front, so afterwards the window that came up can be told apart
-        "open_app" => json!({ "fg": winmgr::foreground() }),
+        "open_app" => {
+            *ctx.opened.lock().unwrap() = None;
+            json!({})
+        }
         _ => json!({}),
     }
 }
@@ -871,11 +1306,10 @@ pub fn fx_after(ctx: &Ctx, tool: &str, before: &Value) -> Value {
             Some(h) => json!({ "rect": winmgr::rect_of(h as isize).map(rect_json) }),
             None => json!({}),
         },
-        // The program's window, if a new one came to the front (a console app or a launch in the background has none)
+        // The program's window, wherever it is (a console program has none)
         "open_app" => {
-            let fg = winmgr::foreground();
-            let new = fg != 0 && before.get("fg").and_then(Value::as_i64) != Some(fg as i64);
-            json!({ "rect": new.then(|| winmgr::rect_of(fg)).flatten().map(rect_json) })
+            let h = ctx.opened.lock().unwrap().take();
+            json!({ "rect": h.and_then(winmgr::rect_of).map(rect_json) })
         }
         _ => json!({}),
     }

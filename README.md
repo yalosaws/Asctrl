@@ -79,7 +79,7 @@ The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-rel
 
 ## Tools
 
-37 tools, modelled on the tools Claude has when it controls a local machine (shell, file read/write/search, screen/mouse/keyboard, clipboard, windows, background jobs). ✅ means the command-line agent (Node) supports it too; the rest are GUI-agent only.
+41 tools, modelled on the tools Claude has when it controls a local machine (shell, file read/write/search, screen/mouse/keyboard, clipboard, windows, background jobs). ✅ means the command-line agent (Node) supports it too; the rest are GUI-agent only.
 
 | Category | Tool | Purpose |
 |---|---|---|
@@ -87,7 +87,9 @@ The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-rel
 | Viewing | `screenshot` ✅ | Screenshot (JPEG, scaled to 1600 wide by default; captured in-process by the GUI agent, without starting PowerShell). With several displays, `display` captures one |
 | | `zoom` | Re-capture part of the screenshot at native resolution to read small text and icons |
 | | `cursor_position` | Current mouse position on the screenshot |
-| | `wait` | Wait a few seconds, then screenshot (console-side only) |
+| | `wait_for` | Return the moment a window, a control or some text appears (or goes away), or the screen settles. A new window counts once it has finished drawing; a control returns the window's listing with ids ready |
+| | `find_text` | Read text on screen with the OCR built into Windows, with positions; works where UI Automation sees nothing (games, canvases, remote desktops, many web pages) |
+| | `wait` | Wait a fixed time, then screenshot (console-side only; prefer `wait_for`) |
 | System | `system_info` ✅ / `list_processes` ✅ / `event_log` ✅ | System overview, processes, error log |
 | Commands | `run_powershell` ✅ | Runs in a persistent session (directory and variables carry over); `background: true` runs without the timeout |
 | | `job_output` / `stop_job` | Background job progress and new output / stop it (with child processes) |
@@ -95,6 +97,8 @@ The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-rel
 | Controls | `list_elements` | A window's controls (buttons, boxes, checkboxes, menus, list items, text) as numbered text via UI Automation, with state and centre on the screenshot |
 | | `element_action` | Operate a listed control without the mouse: click, toggle, select, expand / collapse, set_value, focus, scroll, read text. `actions` runs up to 20 at once in parallel. The user's pointer never moves; the orb frames the work area and flings a coloured virtual cursor at each control |
 | Mouse | `click` | Single / double / triple click, left / middle / right, optionally holding ctrl, shift, etc. Real mouse actions run one at a time |
+| | `click_text` | Find text with OCR and click it, in one call and without a screenshot |
+| | `batch` | Several steps (clicks, keys, typing, element actions, `wait_for`…) in one call, stopping at the first failure |
 | | `mouse_move` / `mouse_down` / `mouse_up` | Hover; press, move and release step by step for fine drags |
 | | `mouse_look` | Relative mouse motion in raw counts, for turning first-person game cameras |
 | | `drag` / `scroll` | Drag; vertical or horizontal scroll |
@@ -156,6 +160,16 @@ To test the GUI agent (first run `npm run tauri build -- --debug --no-bundle` in
 ```bash
 node test/e2e.ts --app agent-app/src-tauri/target/debug/asctrl-agent.exe
 ```
+
+Speed and reliability on a real desktop (moves the mouse and types for about 15 seconds; leave the computer alone):
+
+```bash
+npm run bench
+```
+
+It opens `test/bench-app.ps1` (a window with ordinary controls, a canvas only OCR can read and a dialog that opens late) and an Explorer folder, runs 11 tasks through the tools (forms, typing, clicking by coordinates and by text, catching a missed click, waiting for a late dialog, a batch), checks each result and prints the time per task and per tool.
+
+Every mouse and keyboard action waits only until the window it targets stops changing (instead of a fixed pause), and its reply says what changed, or that nothing visibly did, so a missed click shows without a screenshot. Changes elsewhere on the screen (a video, a chat streaming text) are ignored. When the MCP client asks for the screenshot after an action, it comes back in the same reply.
 
 Extra GUI-agent checks: session keeps directory and variables, `reset_shell` (also while a command is running), upload/download round trip, out-of-range coordinates and unknown keys rejected, `zoom` and per-display screenshots, window listing, file read/write/edit/search (UTF-8 / ANSI / UTF-16), clipboard round trip including long text (restored afterwards), background jobs and stopping them, restart-resume registration and cancel (no real restart). Mouse clicks and typing touch the real desktop, so they are not in the automated test; demo them by hand with `test/demo-step.ts`:
 

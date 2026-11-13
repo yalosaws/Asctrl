@@ -12,7 +12,8 @@
     "agent": "node src/agent/agent.ts",
     "mcp": "node src/console/mcp-server.ts",
     "typecheck": "tsc",
-    "test": "node test/e2e.ts"
+    "test": "node test/e2e.ts",
+    "bench": "node test/bench.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

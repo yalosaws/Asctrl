@@ -159,17 +159,18 @@ pub fn click(x: i32, y: i32, button: &str, count: u32, modifiers: &str) -> Resul
     let mods = parse_keys(modifiers)?;
     check_target(Some((x, y)))?;
     move_to(x, y)?;
-    std::thread::sleep(Duration::from_millis(40));
+    // Long enough for the program to see the pointer arrive (hover state) before the press
+    std::thread::sleep(Duration::from_millis(15));
     if !mods.is_empty() {
         send(&keys_down(&mods))?;
     }
     let mut r = Ok(());
     for _ in 0..count.clamp(1, 3) {
         r = send(&[mouse(down, 0), mouse(up, 0)]);
-        if r.is_err() {
+        if r.is_err() || count == 1 {
             break;
         }
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(25));
     }
     if !mods.is_empty() {
         let _ = send(&keys_up(&mods));
@@ -216,7 +217,7 @@ pub fn mouse_button(x: Option<(i32, i32)>, button: &str, press: bool) -> Result<
 pub fn scroll(x: i32, y: i32, amount: i32, horizontal: bool) -> Result<(), String> {
     check_target(Some((x, y)))?;
     move_to(x, y)?;
-    std::thread::sleep(Duration::from_millis(40));
+    std::thread::sleep(Duration::from_millis(15));
     if horizontal {
         send(&[mouse(MOUSEEVENTF_HWHEEL, amount * 120)])
     } else {
@@ -240,28 +241,48 @@ pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), String> {
     moved.and(released)
 }
 
+/// Characters sent in one go. Programs read them from their input queue at their own pace; a short pause
+/// between chunks keeps slow ones (Electron, remote sessions) from dropping any.
+const TYPE_CHUNK: usize = 24;
+
 /// Type any text (including CJK) without depending on the input method
 pub fn type_text(text: &str) -> Result<(), String> {
     check_target(None)?;
+    let mut inputs: Vec<INPUT> = vec![];
+    let mut chars = 0;
+    let flush = |inputs: &mut Vec<INPUT>| -> Result<(), String> {
+        if !inputs.is_empty() {
+            send(inputs)?;
+            inputs.clear();
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        Ok(())
+    };
     for ch in text.chars() {
         // "\r\n" is one Enter, not two
         if ch == '\r' {
             continue;
         }
         if ch == '\n' {
+            // Enter goes on its own: it may open a dialog or submit a form, which needs a moment
+            flush(&mut inputs)?;
             send(&[key(VK_RETURN, 0, KEYBD_EVENT_FLAGS(0)), key(VK_RETURN, 0, KEYEVENTF_KEYUP)])?;
-        } else {
-            let mut buf = [0u16; 2];
-            let mut inputs = vec![];
-            for unit in ch.encode_utf16(&mut buf) {
-                inputs.push(key(VIRTUAL_KEY(0), *unit, KEYEVENTF_UNICODE));
-                inputs.push(key(VIRTUAL_KEY(0), *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-            }
-            send(&inputs)?;
+            std::thread::sleep(Duration::from_millis(15));
+            chars = 0;
+            continue;
         }
-        std::thread::sleep(Duration::from_millis(8));
+        let mut buf = [0u16; 2];
+        for unit in ch.encode_utf16(&mut buf) {
+            inputs.push(key(VIRTUAL_KEY(0), *unit, KEYEVENTF_UNICODE));
+            inputs.push(key(VIRTUAL_KEY(0), *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+        }
+        chars += 1;
+        if chars >= TYPE_CHUNK {
+            flush(&mut inputs)?;
+            chars = 0;
+        }
     }
-    Ok(())
+    flush(&mut inputs)
 }
 
 fn vk_of(name: &str) -> Option<(VIRTUAL_KEY, bool)> {

@@ -77,11 +77,14 @@ async function forward(tool: ToolName, args: Record<string, unknown>): Promise<R
   }
 }
 
-/** Mouse and keyboard actions: by default take a screenshot afterwards so the result is visible */
+/** Mouse and keyboard actions: by default take a screenshot afterwards so the result is visible.
+ *  The agent takes it in the same call once the screen has settled (`_shot`), saving a round trip;
+ *  an older agent ignores `_shot`, and then it is fetched separately. */
 async function act(tool: ToolName, args: Record<string, unknown> & { screenshot?: boolean }, shotByDefault = true): Promise<Reply> {
   const { screenshot = shotByDefault, ...rest } = args;
-  const r = await forward(tool, rest);
-  if (r.isError || !screenshot) return r;
+  const r = await forward(tool, screenshot ? { ...rest, _shot: { maxWidth: lastMaxWidth, display: lastDisplay } } : rest);
+  if (!screenshot || r.content.some((c) => c.type === "image")) return r;
+  if (r.isError) return r;
   const shot = await forward("screenshot", { maxWidth: lastMaxWidth, display: lastDisplay });
   // The action itself succeeded. Reporting the whole call as failed because the follow-up screenshot
   // didn't work would invite a retry, and the click or keystroke would happen twice.
@@ -180,9 +183,106 @@ server.registerTool(
 );
 
 server.registerTool(
+  "wait_for",
+  {
+    description:
+      "Wait until something happens on the remote computer, and return the moment it does (polls about 8 times a second). Much faster and more reliable than wait with a guessed time. " +
+      "Give exactly one of: window (a window whose title or program name contains this appears), element (a control matching this appears in the window in front, " +
+      "or in handle/title; the reply is its list_elements listing, so its ids are ready for element_action), text (this text appears on screen, read by OCR; " +
+      "limit it with display, a region x0,y0,x1,y1, or handle/title), or stable: true (the screen stops changing, e.g. a page finished loading). " +
+      "Separate alternatives with |, e.g. 'Save As|另存为'. gone: true waits for it to disappear instead. Fails with what is in front when the time runs out.",
+    inputSchema: {
+      window: z.string().optional().describe("Title or program-name keyword(s), e.g. notepad, 'Settings|设置'"),
+      element: z.string().optional().describe("Text in a control's list_elements line, e.g. a button label, 'Edit'"),
+      text: z.string().optional().describe("Text to find on screen with OCR"),
+      stable: z.boolean().optional().describe("Wait for the screen to stop changing"),
+      gone: z.boolean().optional().describe("Wait for the window / control / text to disappear instead"),
+      handle: z.number().int().optional().describe("For element / text: the window to look in (from list_windows)"),
+      title: z.string().optional().describe("For element / text: or a title keyword of that window"),
+      display: z.number().int().min(0).max(16).optional().describe("For text: only this display"),
+      x0: coord("For text: region top-left x").optional(),
+      y0: coord("For text: region top-left y").optional(),
+      x1: coord("For text: region bottom-right x").optional(),
+      y1: coord("For text: region bottom-right y").optional(),
+      timeoutSec: z.number().min(0.5).max(120).optional().describe("Give up after this many seconds; default 10"),
+      screenshot: z.boolean().optional().describe("Take a screenshot when it happens; default false"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  (a) => act("wait_for", a, false),
+);
+
+const ocrScope = {
+  display: z.number().int().min(0).max(16).optional().describe("Only this display (from 1); default all"),
+  handle: z.number().int().optional().describe("Only this window (handle from list_windows)"),
+  title: z.string().optional().describe("Or only the window whose title / program name contains this"),
+  x0: coord("Region top-left x").optional(),
+  y0: coord("Region top-left y").optional(),
+  x1: coord("Region bottom-right x").optional(),
+  y1: coord("Region bottom-right y").optional(),
+};
+
+server.registerTool(
+  "find_text",
+  {
+    description:
+      "Read text on the remote screen with OCR (built into Windows) and say where it is, as @(x,y) on the latest screenshot. " +
+      "With text: every place that text appears (case and spacing ignored). Without: all lines of text, top to bottom. " +
+      "Works where list_elements sees nothing (games, canvases, remote desktops, many web pages), and is much cheaper than reading a screenshot. " +
+      "Limit it to a window, display or region for speed and accuracy.",
+    inputSchema: { text: z.string().optional().describe("Text to look for; omit to read everything"), ...ocrScope },
+    annotations: { readOnlyHint: true },
+  },
+  (a) => forward("find_text", a),
+);
+
+server.registerTool(
+  "click_text",
+  {
+    description:
+      "Find text on the remote screen with OCR and click it, in one step: a button label, menu item, link, file name. No screenshot needed first. " +
+      "A match that is the whole line (a label) wins over the same words inside a sentence. Prefer element_action for programs list_elements can read; " +
+      "use this for everything else. Reports whether the screen changed afterwards.",
+    inputSchema: {
+      text: z.string().min(1).describe("The text to click, e.g. 'OK', '下一步', 'Save'"),
+      occurrence: z.number().int().min(1).max(100).optional().describe("Which match, top to bottom, when it appears more than once; default 1"),
+      button: z.enum(["left", "right", "middle"]).optional().describe("Default left"),
+      count: z.number().int().min(1).max(3).optional().describe("2 = double-click"),
+      modifiers: z.string().optional().describe("Keys held while clicking, e.g. ctrl"),
+      ...ocrScope,
+      screenshot: screenshotFlag,
+    },
+  },
+  (a) => act("click_text", a),
+);
+
+const stepTools = [
+  "click", "click_text", "scroll", "drag", "mouse_move", "mouse_down", "mouse_up", "mouse_look", "type_text", "press_keys", "hold_key",
+  "element_action", "list_elements", "focus_window", "open_app", "wait_for", "write_clipboard", "find_text", "wait",
+] as const;
+
+server.registerTool(
+  "batch",
+  {
+    description:
+      "Run several steps in one call, in order, stopping at the first failure: the fastest way to do a known sequence, " +
+      "e.g. open_app → wait_for the window → click_text a menu → type_text → press_keys ctrl+s → wait_for the Save dialog. " +
+      "Each step is { tool, ...that tool's arguments } for: " + stepTools.join(", ") + " (wait takes seconds). " +
+      "Steps wait only until the screen settles, never a fixed time; put wait_for between steps that open something slowly. " +
+      "Click coordinates refer to the latest screenshot, so only batch clicks whose targets you already know; prefer click_text, element_action and keys. " +
+      "Returns one line per step (✓ / ✗ / skipped), plus a screenshot at the end unless screenshot: false.",
+    inputSchema: {
+      steps: z.array(z.object({ tool: z.enum(stepTools) }).passthrough()).min(1).max(50),
+      screenshot: screenshotFlag,
+    },
+  },
+  (a) => act("batch", a),
+);
+
+server.registerTool(
   "wait",
   {
-    description: "Wait a few seconds (e.g. for a program to open or an install to progress), then take a screenshot.",
+    description: "Wait a fixed number of seconds, then take a screenshot. Prefer wait_for, which returns as soon as the thing you are waiting for happens.",
     inputSchema: { seconds: z.number().min(0.1).max(60).describe("Seconds to wait"), screenshot: screenshotFlag },
     annotations: { readOnlyHint: true },
   },
@@ -322,7 +422,8 @@ server.registerTool(
     description:
       "Click on the remote screen by moving the user's real mouse pointer. Coordinates are pixels on the latest screenshot. " +
       "For buttons, boxes, menus and lists in ordinary programs, prefer list_elements + element_action: they don't take over the user's mouse. " +
-      "Use click for games, canvases, remote desktops, or when element_action says it can't.",
+      "Use click for games, canvases, remote desktops, or when element_action says it can't; to click a visible label, click_text needs no coordinates. " +
+      "The reply says whether the window under the click changed, so a miss shows without a screenshot.",
     inputSchema: {
       x: coord("x"),
       y: coord("y"),
@@ -414,8 +515,14 @@ server.registerTool(
 server.registerTool(
   "type_text",
   {
-    description: "Type text at the current focus. Any language works and the user's input method doesn't matter. Newlines press Enter. Click the input box first if unsure where focus is.",
-    inputSchema: { text: z.string().min(1), screenshot: screenshotFlag },
+    description:
+      "Type text at the current focus. Any language works and the user's input method doesn't matter. Newlines press Enter. Click the input box first if unsure where focus is. " +
+      "Text over 200 characters is pasted through the clipboard (put back afterwards), which is many times faster; method keys forces keystrokes (for fields that block pasting, games, remote desktops).",
+    inputSchema: {
+      text: z.string().min(1),
+      method: z.enum(["auto", "keys", "paste"]).optional().describe("auto (default): paste long text, type short text; keys: always keystrokes; paste: always paste"),
+      screenshot: screenshotFlag,
+    },
   },
   (a) => act("type_text", a),
 );

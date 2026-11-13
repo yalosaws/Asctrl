@@ -5,9 +5,11 @@ mod capture;
 mod files;
 mod input;
 mod jobs;
+mod ocr;
 mod overlay;
 mod pace;
 mod powershell;
+mod screen;
 mod shell;
 mod tools;
 mod uia;
@@ -125,7 +127,7 @@ fn fx_text(out: &tools::Output) -> String {
 
 /// Tools that move the mouse: pause overlay interaction while they run so they don't hit the orb
 fn moves_mouse(tool: &str) -> bool {
-    matches!(tool, "click" | "scroll" | "drag" | "mouse_move" | "mouse_look" | "mouse_down" | "mouse_up")
+    matches!(tool, "click" | "click_text" | "batch" | "scroll" | "drag" | "mouse_move" | "mouse_look" | "mouse_down" | "mouse_up")
 }
 
 /// Ask the user a question; a timeout counts as a refusal
