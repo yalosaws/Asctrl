@@ -127,7 +127,7 @@ fn fx_text(out: &tools::Output) -> String {
 
 /// Tools that move the mouse: pause overlay interaction while they run so they don't hit the orb
 fn moves_mouse(tool: &str) -> bool {
-    matches!(tool, "click" | "scroll" | "drag" | "mouse_move" | "mouse_down" | "mouse_up")
+    matches!(tool, "click" | "scroll" | "drag" | "mouse_move" | "mouse_look" | "mouse_down" | "mouse_up")
 }
 
 /// Ask the user a question; a timeout counts as a refusal

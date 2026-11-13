@@ -268,7 +268,9 @@ server.registerTool(
   {
     description:
       "Request administrator access. The user clicks Allow in the app, then \"Yes\" in the Windows confirmation; the app then restarts as administrator. " +
-      "Wait about 5 seconds and connect again with the same code (the user clicks Allow once more). Use only when really needed, e.g. repairing system files, managing services, installing software.",
+      "Wait about 5 seconds and connect again with the same code (the user clicks Allow once more). " +
+      "Call it whenever the task needs admin rights: repairing system files, managing services, installing software, " +
+      "or when a mouse/keyboard tool reports that the target window runs as administrator (Windows blocks input to it until the app is elevated).",
   },
   () => forward("request_admin", {}),
 );
@@ -345,6 +347,23 @@ server.registerTool(
     inputSchema: { x: coord("x"), y: coord("y"), screenshot: screenshotFlag },
   },
   (a) => act("mouse_move", a),
+);
+
+server.registerTool(
+  "mouse_look",
+  {
+    description:
+      "Move the mouse relative to where it is, like a physical mouse, in raw mouse counts. Use it to turn the camera in games " +
+      "(first-person views ignore mouse_move, which jumps the pointer to a position). Positive dx turns right, positive dy turns down; " +
+      "how far a count turns depends on the game's sensitivity, so start small (e.g. 200), check the screenshot, then adjust.",
+    inputSchema: {
+      dx: z.number().int().min(-20000).max(20000).optional().describe("Horizontal counts; default 0"),
+      dy: z.number().int().min(-20000).max(20000).optional().describe("Vertical counts; default 0"),
+      seconds: z.number().min(0).max(5).optional().describe("Spread the motion over this long; default 0.2"),
+      screenshot: screenshotFlag,
+    },
+  },
+  (a) => act("mouse_look", a),
 );
 
 const buttonArg = z.enum(["left", "right", "middle"]).optional().describe("Default left");

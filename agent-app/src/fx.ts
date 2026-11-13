@@ -464,7 +464,8 @@ export function fxStart(e: FxEvent) {
     case "type_text":
     case "press_keys":
     case "hold_key":
-      // Typing and key presses show nothing on screen
+    case "mouse_look":
+      // Typing, key presses and camera turns show nothing on screen
       return;
     case "focus_window":
       return winStart(e);

@@ -1,11 +1,18 @@
 //! Mouse and keyboard control (Windows SendInput). Coordinates are physical screen pixels.
 
 use std::time::Duration;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, POINT};
+use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
-use windows::Win32::Foundation::POINT;
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, SetCursorPos, WindowFromPoint,
+};
 
-const BLOCKED: &str = "Input was blocked by Windows: the target window may be running as administrator (try request_admin first), or the lock screen / UAC prompt is showing";
+const BLOCKED: &str = "Input was blocked by Windows: the target window may be running as administrator (call request_admin, then reconnect), or the lock screen / UAC prompt is showing";
 
 fn send(inputs: &[INPUT]) -> Result<(), String> {
     let n = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
@@ -13,12 +20,83 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
 }
 
 fn mouse(flags: MOUSE_EVENT_FLAGS, data: i32) -> INPUT {
+    mouse_at(flags, data, 0, 0)
+}
+
+fn mouse_at(flags: MOUSE_EVENT_FLAGS, data: i32, dx: i32, dy: i32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
-            mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: data as u32, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+            mi: MOUSEINPUT { dx, dy, mouseData: data as u32, dwFlags: flags, time: 0, dwExtraInfo: 0 },
         },
     }
+}
+
+/// Whether a process token is elevated. None when it can't be told.
+fn token_elevated(process: HANDLE) -> Option<bool> {
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.ok()?;
+    let mut e = TOKEN_ELEVATION::default();
+    let mut len = 0u32;
+    let r = unsafe {
+        GetTokenInformation(token, TokenElevation, Some(&mut e as *mut _ as *mut _), size_of::<TOKEN_ELEVATION>() as u32, &mut len)
+    };
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    r.ok().map(|_| e.TokenIsElevated != 0)
+}
+
+/// The program behind a window, if it runs as administrator: (elevated, exe name)
+fn window_elevated(hwnd: HWND) -> Option<(bool, String)> {
+    if hwnd.is_invalid() {
+        return None;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    let hwnd = if root.is_invalid() { hwnd } else { root };
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 || pid == std::process::id() {
+        return None;
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buf = [0u16; 512];
+    let mut n = buf.len() as u32;
+    let name = match unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut n) } {
+        Ok(()) => {
+            let path = String::from_utf16_lossy(&buf[..n as usize]);
+            path.rsplit('\\').next().unwrap_or(&path).to_string()
+        }
+        Err(_) => format!("process {pid}"),
+    };
+    // A non-elevated process of the same user can always open the token of another non-elevated one;
+    // being refused means the target is elevated (or otherwise above us)
+    let elevated = token_elevated(process).unwrap_or(true);
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    Some((elevated, name))
+}
+
+/// Windows (UIPI) drops input that a non-elevated program sends to an elevated one, often without
+/// any error. Check the foreground window, and the window under `at` for mouse actions, before acting.
+fn check_target(at: Option<(i32, i32)>) -> Result<(), String> {
+    if token_elevated(unsafe { GetCurrentProcess() }) == Some(true) {
+        return Ok(());
+    }
+    let mut targets = vec![unsafe { GetForegroundWindow() }];
+    if let Some((x, y)) = at {
+        targets.push(unsafe { WindowFromPoint(POINT { x, y }) });
+    }
+    for hwnd in targets {
+        if let Some((true, name)) = window_elevated(hwnd) {
+            return Err(format!(
+                "{name} is running as administrator, so Windows blocks mouse and keyboard input to it from the assist app. \
+                 Call request_admin (the user approves), then connect again with the same code, and retry."
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn key(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
@@ -29,7 +107,8 @@ fn key(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 }
 
 fn move_to(x: i32, y: i32) -> Result<(), String> {
-    unsafe { SetCursorPos(x, y) }.map_err(|e| format!("Failed to move the mouse: {e}"))
+    // SetCursorPos refused by UIPI reports "The operation completed successfully"; the code is useless
+    unsafe { SetCursorPos(x, y) }.map_err(|_| BLOCKED.to_string())
 }
 
 pub fn cursor_pos() -> Result<(i32, i32), String> {
@@ -71,6 +150,7 @@ fn keys_up(keys: &[(VIRTUAL_KEY, bool)]) -> Vec<INPUT> {
 pub fn click(x: i32, y: i32, button: &str, count: u32, modifiers: &str) -> Result<(), String> {
     let (down, up) = buttons(button)?;
     let mods = parse_keys(modifiers)?;
+    check_target(Some((x, y)))?;
     move_to(x, y)?;
     std::thread::sleep(Duration::from_millis(40));
     if !mods.is_empty() {
@@ -91,12 +171,33 @@ pub fn click(x: i32, y: i32, button: &str, count: u32, modifiers: &str) -> Resul
 }
 
 pub fn mouse_move(x: i32, y: i32) -> Result<(), String> {
+    check_target(Some((x, y)))?;
     move_to(x, y)
+}
+
+/// Move the mouse by (dx, dy) counts, the way a physical mouse does, spread over `ms` milliseconds.
+/// Games that read raw mouse input (first-person cameras) ignore SetCursorPos; they only see this.
+pub fn mouse_look(dx: i32, dy: i32, ms: u64) -> Result<(), String> {
+    check_target(None)?;
+    // At most ~20 counts per step so the motion reads as a sweep rather than a jump
+    let steps = ((dx.abs().max(dy.abs()) + 19) / 20).clamp(1, 200);
+    let pause = Duration::from_millis(ms / steps as u64);
+    let (mut sx, mut sy) = (0, 0);
+    for i in 1..=steps {
+        let (tx, ty) = (dx * i / steps, dy * i / steps);
+        send(&[mouse_at(MOUSEEVENTF_MOVE, 0, tx - sx, ty - sy)])?;
+        (sx, sy) = (tx, ty);
+        if i < steps {
+            std::thread::sleep(pause);
+        }
+    }
+    Ok(())
 }
 
 /// Press or release a mouse button on its own, for drags that need fine control
 pub fn mouse_button(x: Option<(i32, i32)>, button: &str, press: bool) -> Result<(), String> {
     let (down, up) = buttons(button)?;
+    check_target(x.or_else(|| cursor_pos().ok()))?;
     if let Some((x, y)) = x {
         move_to(x, y)?;
         std::thread::sleep(Duration::from_millis(40));
@@ -106,6 +207,7 @@ pub fn mouse_button(x: Option<(i32, i32)>, button: &str, press: bool) -> Result<
 
 /// amount > 0 scrolls down (right when horizontal), < 0 up (left), in wheel notches
 pub fn scroll(x: i32, y: i32, amount: i32, horizontal: bool) -> Result<(), String> {
+    check_target(Some((x, y)))?;
     move_to(x, y)?;
     std::thread::sleep(Duration::from_millis(40));
     if horizontal {
@@ -116,6 +218,7 @@ pub fn scroll(x: i32, y: i32, amount: i32, horizontal: bool) -> Result<(), Strin
 }
 
 pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), String> {
+    check_target(Some((x1, y1)))?;
     move_to(x1, y1)?;
     std::thread::sleep(Duration::from_millis(40));
     send(&[mouse(MOUSEEVENTF_LEFTDOWN, 0)])?;
@@ -132,6 +235,7 @@ pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), String> {
 
 /// Type any text (including CJK) without depending on the input method
 pub fn type_text(text: &str) -> Result<(), String> {
+    check_target(None)?;
     for ch in text.chars() {
         // "\r\n" is one Enter, not two
         if ch == '\r' {
@@ -213,6 +317,7 @@ pub fn press_keys(combo: &str) -> Result<(), String> {
     if keys.is_empty() {
         return Err("No keys given".into());
     }
+    check_target(None)?;
     let mut inputs = keys_down(&keys);
     inputs.extend(keys_up(&keys));
     send(&inputs)
@@ -224,6 +329,7 @@ pub fn hold_keys(combo: &str, ms: u64) -> Result<(), String> {
     if keys.is_empty() {
         return Err("No keys given".into());
     }
+    check_target(None)?;
     send(&keys_down(&keys))?;
     std::thread::sleep(Duration::from_millis(ms));
     send(&keys_up(&keys))

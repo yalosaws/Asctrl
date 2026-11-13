@@ -146,6 +146,8 @@ try {
     check("focus_window errors when not found", !noWin.ok, noWin.error);
     const badHold = await tech.call("hold_key", { keys: "notakey", seconds: 0.1 });
     check("hold_key rejects unknown keys", !badHold.ok, badHold.error);
+    const noLook = await tech.call("mouse_look", {});
+    check("mouse_look rejects an empty move", !noLook.ok, noLook.error);
     const sym = await tech.call("press_keys", { keys: "shift+/" });
     check("press_keys supports symbol keys", sym.ok, sym.error);
 

@@ -403,6 +403,15 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
             };
             input_op(move || input::mouse_move(x, y), "Mouse moved".into()).await
         }
+        "mouse_look" => {
+            let dx = int_arg(args, "dx", 0, -20000, 20000) as i32;
+            let dy = int_arg(args, "dy", 0, -20000, 20000) as i32;
+            if dx == 0 && dy == 0 {
+                return fail("Give dx and/or dy");
+            }
+            let ms = (args.get("seconds").and_then(Value::as_f64).unwrap_or(0.2).clamp(0.0, 5.0) * 1000.0) as u64;
+            input_op(move || input::mouse_look(dx, dy, ms), format!("Mouse moved by ({dx}, {dy})")).await
+        }
         "mouse_down" | "mouse_up" => {
             let at = match opt_screen(ctx, args) {
                 Ok(p) => p,

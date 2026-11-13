@@ -21,6 +21,7 @@ export type ToolName =
   | "zoom"
   | "cursor_position"
   | "mouse_move"
+  | "mouse_look"
   | "mouse_down"
   | "mouse_up"
   | "hold_key"

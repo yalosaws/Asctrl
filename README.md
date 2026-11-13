@@ -94,6 +94,7 @@ The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-rel
 | | `reset_shell` | Reset the PowerShell session |
 | Mouse | `click` | Single / double / triple click, left / middle / right, optionally holding ctrl, shift, etc. |
 | | `mouse_move` / `mouse_down` / `mouse_up` | Hover; press, move and release step by step for fine drags |
+| | `mouse_look` | Relative mouse motion in raw counts, for turning first-person game cameras |
 | | `drag` / `scroll` | Drag; vertical or horizontal scroll |
 | Keyboard | `type_text` | Type text in any language, independent of the input method |
 | | `press_keys` / `hold_key` | Keys / combinations (including symbol and volume keys), or hold for a while |
