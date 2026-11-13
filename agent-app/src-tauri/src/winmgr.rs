@@ -178,7 +178,11 @@ pub fn open(target: &str, args: &str, cwd: &str) -> Result<(), String> {
     }
 }
 
-/// Current window position (physical screen pixels); None when minimized or closed
+/// The window in front right now
+pub fn foreground() -> isize {
+    unsafe { GetForegroundWindow() }.0 as isize
+}
+
 /// The top-level window under a screen point (the overlay lets the mouse through, so it is never this)
 pub fn top_window_at(x: i32, y: i32) -> Option<isize> {
     let h = unsafe { WindowFromPoint(windows::Win32::Foundation::POINT { x, y }) };
@@ -189,6 +193,7 @@ pub fn top_window_at(x: i32, y: i32) -> Option<isize> {
     Some(if root.is_invalid() { h } else { root }.0 as isize)
 }
 
+/// Current window position (physical screen pixels); None when minimized or closed
 pub fn rect_of(handle: isize) -> Option<(i32, i32, i32, i32)> {
     let h = HWND(handle as *mut _);
     unsafe {

@@ -48,6 +48,10 @@ class Orb {
     this.setMood("idle");
   }
 
+  get currentMood(): Mood {
+    return this.mood;
+  }
+
   setMood(m: Mood) {
     if (m === this.mood && this.el.dataset.mood === m) return;
     const was = this.mood;

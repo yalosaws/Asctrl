@@ -1,6 +1,6 @@
 //! Tools the agent can run. The system_info / list_processes / event_log scripts match the Node version in src/agent/tools.ts.
 
-use crate::{capture, files, input, jobs, jobs::Jobs, powershell, shell::Shell, uia, winmgr};
+use crate::{capture, files, input, jobs, jobs::Jobs, pace, powershell, shell::Shell, uia, winmgr};
 use base64::Engine;
 use serde::Serialize;
 use serde_json::Value;
@@ -468,39 +468,64 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 Some(list) => list.iter().map(element_item).collect(),
                 None => vec![element_item(args)],
             };
-            if items.is_empty() || items.len() > 20 {
-                return fail("Give 1 to 20 actions");
+            let sequence = batch.is_some() && args.get("sequence").and_then(Value::as_bool).unwrap_or(false);
+            let max = if sequence { 100 } else { 20 };
+            if items.is_empty() || items.len() > max {
+                return fail(format!("Give 1 to {max} actions"));
             }
             let changes = items.iter().any(|i| i.1 != "text");
-            // Each action on its own thread, all at once: UI Automation calls are independent
-            let runs = items.into_iter().map(|(id, action, value)| tokio::task::spawn_blocking(move || uia::act(id as usize, &action, &value)));
-            let results: Vec<Result<String, String>> =
-                futures_util::future::join_all(runs).await.into_iter().map(|r| r.unwrap_or_else(|e| Err(e.to_string()))).collect();
-            if changes && results.iter().any(Result::is_ok) {
+            // Each step acts when its virtual cursor lands, so what is drawn and what happens line up
+            let pace = pace::current();
+            let pace = pace.as_deref();
+            // None = skipped: a sequence stops at its first failure
+            let results: Vec<Option<Result<String, String>>> = if sequence {
+                // One after another, in the order given, as fast as the cursors arrive (or intervalMs apart)
+                let gap = Duration::from_millis(int_arg(args, "intervalMs", 0, 0, 5000) as u64);
+                let mut out = Vec::with_capacity(items.len());
+                for (i, (id, action, value)) in items.into_iter().enumerate() {
+                    if matches!(out.last(), Some(Some(Err(_))) | Some(None)) {
+                        out.push(None);
+                        continue;
+                    }
+                    if i > 0 && !gap.is_zero() {
+                        tokio::time::sleep(gap).await;
+                    }
+                    out.push(Some(paced_act(pace, i, id, action, value).await));
+                }
+                out
+            } else {
+                // All at once, each as soon as its own cursor lands: UI Automation calls are independent
+                let runs = items.into_iter().enumerate().map(|(i, (id, action, value))| paced_act(pace, i, id, action, value));
+                futures_util::future::join_all(runs).await.into_iter().map(Some).collect()
+            };
+            if changes && results.iter().any(|r| matches!(r, Some(Ok(_)))) {
                 // Let the program react before anything looks at the screen again
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
             if batch.is_none() {
-                return match results.into_iter().next() {
+                return match results.into_iter().next().flatten() {
                     Some(Ok(s)) => text(s),
                     Some(Err(e)) => fail(e),
                     None => fail("No result"),
                 };
             }
-            let failed = results.iter().filter(|r| r.is_err()).count();
-            // One line per action, in the order given; fx.ts reads the ✓ / ✗ marks
+            let failed = results.iter().filter(|r| matches!(r, Some(Err(_)))).count();
+            let skipped = results.iter().filter(|r| r.is_none()).count();
+            // One line per action, in the order given; fx.ts reads the ✓ / ✗ / – marks
             let lines: Vec<String> = results
                 .iter()
                 .enumerate()
                 .map(|(i, r)| match r {
-                    Ok(s) => format!("{}. ✓ {}", i + 1, s),
-                    Err(e) => format!("{}. ✗ {}", i + 1, e),
+                    Some(Ok(s)) => format!("{}. ✓ {}", i + 1, s),
+                    Some(Err(e)) => format!("{}. ✗ {}", i + 1, e),
+                    None => format!("{}. – skipped", i + 1),
                 })
                 .collect();
             let mut o = text(lines.join("\n"));
             if failed > 0 {
                 o.ok = false;
-                o.error = Some(format!("{failed} of {} actions failed:\n{}", results.len(), o.text.take().unwrap_or_default()));
+                let note = if skipped > 0 { format!(", so the sequence stopped and {skipped} were skipped") } else { String::new() };
+                o.error = Some(format!("{failed} of {} actions failed{note}:\n{}", results.len(), o.text.take().unwrap_or_default()));
             }
             o
         }
@@ -636,7 +661,16 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
             let button = str_arg(args, "button").to_string();
             let count = int_arg(args, "count", 1, 1, 3) as u32;
             let mods = str_arg(args, "modifiers").to_string();
-            input_op(move || input::click(x, y, &button, count, &mods), "Clicked".into()).await
+            // Click when the virtual cursor gets there, and have it press right as the real click happens
+            let pace = pace::current();
+            if let Some(p) = &pace {
+                p.wait(0).await;
+            }
+            let out = input_op(move || input::click(x, y, &button, count, &mods), "Clicked".into()).await;
+            if let Some(p) = &pace {
+                p.step(0, out.ok);
+            }
+            out
         }
         "scroll" => {
             let (x, y) = match to_screen(ctx, args, "x", "y") {
@@ -759,6 +793,18 @@ fn rect_json(r: (i32, i32, i32, i32)) -> Value {
     serde_json::json!([r.0, r.1, r.2 - r.0, r.3 - r.1])
 }
 
+/// One element action, once its cursor has landed; the overlay presses that cursor as soon as it is done
+async fn paced_act(pace: Option<&pace::Call>, i: usize, id: u64, action: String, value: String) -> Result<String, String> {
+    if let Some(p) = pace {
+        p.wait(i).await;
+    }
+    let r = tokio::task::spawn_blocking(move || uia::act(id as usize, &action, &value)).await.unwrap_or_else(|e| Err(e.to_string()));
+    if let Some(p) = pace {
+        p.step(i, r.is_ok());
+    }
+    r
+}
+
 /// (id, action, value) of one element action, from the call itself or one entry of its `actions`
 fn element_item(v: &Value) -> (u64, String, String) {
     (v.get("id").and_then(Value::as_u64).unwrap_or(0), str_arg(v, "action").to_string(), str_arg(v, "value").to_string())
@@ -792,11 +838,10 @@ pub fn fx_before(ctx: &Ctx, tool: &str, args: &Value) -> Value {
             let marks: Vec<Option<((i32, i32, i32, i32), String)>> =
                 items.iter().map(|(id, action, _)| uia::mark_of(*id as usize).filter(|_| action != "text")).collect();
             let targets: Vec<Value> = marks.iter().map(|m| m.as_ref().map_or(Value::Null, |((l, t, r, b), _)| json!([(l + r) / 2, (t + b) / 2]))).collect();
-            let labels: Vec<Value> = marks.iter().map(|m| m.as_ref().map_or(Value::Null, |(_, tag)| json!(tag))).collect();
             // The controls' own bounds, so the overlay can frame the area being worked on
             // One fixed frame around everything operable in that window, drawn once for all its actions
             let area = uia::work_area();
-            json!({ "targets": targets, "labels": labels, "zone": area.map(|(r, _)| rect_json(r)), "zoneIsWindow": area.is_some_and(|(_, w)| w) })
+            json!({ "targets": targets, "zone": area.map(|(r, _)| rect_json(r)), "zoneIsWindow": area.is_some_and(|(_, w)| w) })
         }
         "focus_window" => {
             let handle = args.get("handle").and_then(Value::as_i64).map(|h| h as isize);
@@ -808,6 +853,8 @@ pub fn fx_before(ctx: &Ctx, tool: &str, args: &Value) -> Value {
                 Err(_) => json!({}),
             }
         }
+        // Remember what was in front, so afterwards the window that came up can be told apart
+        "open_app" => json!({ "fg": winmgr::foreground() }),
         _ => json!({}),
     }
 }
@@ -824,6 +871,12 @@ pub fn fx_after(ctx: &Ctx, tool: &str, before: &Value) -> Value {
             Some(h) => json!({ "rect": winmgr::rect_of(h as isize).map(rect_json) }),
             None => json!({}),
         },
+        // The program's window, if a new one came to the front (a console app or a launch in the background has none)
+        "open_app" => {
+            let fg = winmgr::foreground();
+            let new = fg != 0 && before.get("fg").and_then(Value::as_i64) != Some(fg as i64);
+            json!({ "rect": new.then(|| winmgr::rect_of(fg)).flatten().map(rect_json) })
+        }
         _ => json!({}),
     }
 }

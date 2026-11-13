@@ -3,7 +3,8 @@
 // the last spot straight to the next, never teleporting.
 // If the result arrives before the start animation lands, the end animation waits for it (see `ready`).
 
-import { center, home, monitorAt, monitors, primary, pt, rect, type Pt, type R } from "./geo";
+import { invoke } from "@tauri-apps/api/core";
+import { center, home, isTauri, monitorAt, monitors, primary, pt, rect, type Pt, type R } from "./geo";
 import { orb } from "./orb";
 import { Cursor } from "./cursor";
 import { bloom, capture, dart, hold, Outline, ripple, streaks, strand, sweep, type Tone } from "./light";
@@ -12,13 +13,15 @@ import { closeCard, deckRect, fillEntries, fillLines, openCard, progress, scan, 
 import { easeInOutCubic, el, fadeOut, play, sleep, SPRING, tween } from "./motion";
 
 export interface FxEvent {
-  phase: "start" | "end";
+  phase: "start" | "step" | "end";
   id: string;
   tool: string;
   args?: Record<string, unknown>;
   geo?: Record<string, unknown>;
   ok?: boolean;
   text?: string;
+  /** step: which action of the call just ran */
+  index?: number;
 }
 
 const str = (v: unknown) => (typeof v === "string" ? v : v === undefined || v === null ? "" : String(v));
@@ -40,16 +43,27 @@ function attend() {
   orb.setMood("work");
 }
 
+let errorTimer: number | undefined;
+/** How long a failure keeps the orb red */
+const ERROR_MS = 1600;
+
 function release(ok = true, delay = 1500) {
   active = Math.max(0, active - 1);
-  if (!ok) orb.setMood("error");
+  if (!ok) {
+    // Red is a short flash, not a state: the frame and the trip home can wait several seconds, the colour doesn't
+    orb.setMood("error");
+    window.clearTimeout(errorTimer);
+    errorTimer = window.setTimeout(() => {
+      if (orb.currentMood === "error") orb.setMood(active > 0 ? "work" : "idle");
+    }, ERROR_MS);
+  }
   window.clearTimeout(homeTimer);
   homeTimer = window.setTimeout(() => {
     // While a work area is framed the orb waits over it; it goes home when the frame goes
     if (active > 0 || zone) return;
     orb.setMood("idle");
     orb.goTo(home(), "slow");
-  }, ok ? delay : delay + 1200);
+  }, delay);
 }
 
 /** Fly next to a target point (without covering it) */
@@ -128,8 +142,9 @@ async function zoomEnd(e: FxEvent) {
 let holdMark: HTMLElement | null = null;
 const TONE = (b: string): Tone => (b === "right" ? "warm" : b === "middle" ? "mint" : "aurora");
 
-/** Virtual cursors out for each call, by action index (an action with nothing to point at has none) */
-const sent = new Map<string, (Cursor | null)[]>();
+/** Virtual cursors out for each call, by action index (an action with nothing to point at has none), with their
+ *  flights and which of them have pressed */
+const sent = new Map<string, { cursors: (Cursor | null)[]; flights: Promise<void>[]; pressed: Set<number>; count: number }>();
 
 // ---- Work zone: the area being operated on, framed while the orb works there ----
 
@@ -202,33 +217,71 @@ function unframeLater(ms = 8000) {
   }, ms);
 }
 
-/** Clicks and element actions: the orb frames the area, flies over it, then sends a virtual cursor to each target */
+/** Clicks and element actions: the orb frames the area, flies over it, then sends a virtual cursor to each target.
+ *  The agent holds each real click until its cursor has landed (landed() tells it), then reports the click as a
+ *  step event, and that cursor presses right then: what is drawn happens when the click does. */
 function dispatchStart(e: FxEvent) {
   const targets = Array.isArray(e.geo?.targets) ? (e.geo.targets as unknown[]).map(pt) : [pt(e.geo?.at)];
-  if (!targets.some(Boolean)) return;
+  if (!targets.some(Boolean)) {
+    // Nothing to fly to: let every step go at once
+    targets.forEach((_, i) => landed(e.id, i));
+    return;
+  }
   // The agent says where the work area is (all operable controls, or the window a click lands in);
   // failing that, frame just the targets
   const given = rect(e.geo?.zone);
   const inPlace = given && e.geo?.zoneIsWindow === true ? frameZone(given, true) : frameZone(given ? zoneOf([given]) : zoneOf(targets.flatMap((p) => (p ? [{ x: p.x, y: p.y, w: 0, h: 0 }] : []))));
+  // In a sequence the cursors leave one after another, in step order; otherwise all together
+  const stagger = isSequence(e) ? SEQ_LAUNCH_MS : 0;
   // The orb spins up on the way and flings each cursor off its rim as its colour comes round
-  orb.whirl(1000 + targets.length * 120);
+  orb.whirl(1000 + targets.length * Math.max(120, stagger));
   const cursors = targets.map((p) => (p ? new Cursor() : null));
-  sent.set(e.id, cursors);
-  const labels = Array.isArray(e.geo?.labels) ? (e.geo.labels as unknown[]) : [];
-  ready.set(e.id, inPlace.then(() => Promise.all(cursors.map((c, i) => c?.go(targets[i]!, str(labels[i]))))).then(() => {}));
+  const flights = cursors.map((c, i) => {
+    const flight = c ? inPlace.then(() => sleep(i * stagger)).then(() => c.go(targets[i]!)) : Promise.resolve();
+    void flight.then(() => landed(e.id, i));
+    return flight;
+  });
+  sent.set(e.id, { cursors, flights, pressed: new Set(), count: Math.max(1, Math.min(3, num(e.args?.count, 1))) });
+}
+
+/** In a sequence, how far apart the cursors leave the orb */
+const SEQ_LAUNCH_MS = 90;
+const isSequence = (e: FxEvent) => e.args?.sequence === true && Array.isArray(e.args?.actions);
+
+function landed(id: string, index: number) {
+  if (isTauri) void invoke("fx_landed", { id, index }).catch(() => {});
+}
+
+/** The agent has just carried out step `index`: its cursor presses now (or flashes red) */
+function dispatchStep(e: FxEvent) {
+  const call = sent.get(e.id);
+  const i = num(e.index, -1);
+  const c = call?.cursors[i];
+  if (!call || !c || call.pressed.has(i)) return;
+  call.pressed.add(i);
+  // Normally it has landed already; if the agent stopped waiting for it, press once it gets there
+  void call.flights[i].then(() => c.finish(!!e.ok, call.count));
 }
 
 async function dispatchEnd(e: FxEvent) {
-  await whenReady(e.id);
-  const cursors = sent.get(e.id) ?? [];
+  const call = sent.get(e.id);
   sent.delete(e.id);
-  // A batch reports each action on its own line ("2. ✗ …"), so only the ones that failed flash red
-  const failed = new Set<number>();
-  for (const m of (e.text ?? "").matchAll(/^(\d+)\. ✗/gm)) failed.add(Number(m[1]) - 1);
-  const batch = Array.isArray(e.args?.actions);
-  const count = Math.max(1, Math.min(3, num(e.args?.count, 1)));
-  const whole = !e.ok && failed.size === 0; // the call failed before any action ran
-  cursors.forEach((c, i) => c && void c.finish(batch && !whole ? !failed.has(i) : !!e.ok, count));
+  if (!call) return;
+  // Steps already pressed as they happened. What is left never ran: skipped after a failure in a sequence, or the
+  // whole call failed before acting. A batch reports each action on its own line ("2. ✗ …", "3. – skipped")
+  const marks = (re: RegExp) => new Set([...(e.text ?? "").matchAll(re)].map((m) => Number(m[1]) - 1));
+  const failed = marks(/^(\d+)\. ✗/gm);
+  const skipped = marks(/^(\d+)\. – skipped/gm);
+  const perStep = Array.isArray(e.args?.actions) && (e.ok || failed.size + skipped.size > 0);
+  await Promise.all(
+    call.cursors.map(async (c, i) => {
+      if (!c || call.pressed.has(i)) return;
+      await call.flights[i];
+      if (skipped.has(i)) return void c.cancel();
+      // No step event came for it (an agent without pacing, the demo): press it now with its own outcome
+      return void c.finish(perStep ? !failed.has(i) : !!e.ok, call.count);
+    }),
+  );
   unframeLater();
 }
 
@@ -349,10 +402,13 @@ function openAppStart() {
 
 function openAppEnd(e: FxEvent) {
   if (!e.ok) return;
-  const c = center(primary().work);
+  // Land on the window that came up; without one (a console program, or it opened behind), the middle of the screen
+  const r = rect(e.geo?.rect);
+  const c = r ? center(r) : center(primary().work);
+  const size = r ? Math.min(520, Math.max(160, Math.max(r.w, r.h) * 0.7)) : 520;
   void dart(orb.pos, c).then(() => {
-    bloom(c, { size: 520, ms: 900 });
-    ripple(c, { size: 120, ms: 900, to: 3.2 });
+    bloom(c, { size, ms: 900 });
+    ripple(c, { size: size * 0.23, ms: 900, to: 3.2 });
   });
 }
 
@@ -555,6 +611,11 @@ export function fxStart(e: FxEvent) {
   }
   if (TERM.has(e.tool)) return termStart(e.id, termCommand(e));
   if (FILE.has(e.tool)) return fileStart(e);
+}
+
+/** One action of a click or element_action call has just really happened */
+export function fxStep(e: FxEvent) {
+  dispatchStep(e);
 }
 
 export function fxEnd(ev: FxEvent) {

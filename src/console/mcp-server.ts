@@ -503,7 +503,9 @@ server.registerTool(
       "toggle, select, expand, collapse, set_value (fills a text box or slider with value, replacing its content), focus, " +
       "scroll (value up / down / left / right, add :page for a page, e.g. down:page), scroll_into_view, text (returns the control's full text, e.g. a document or a long message). " +
       "Parallel: pass actions (up to 20) instead of id/action/value to run several at the same time, e.g. fill every field of a form or tick several boxes in one call; " +
-      "they run concurrently in no set order, so steps that depend on each other (open a menu, then pick an item) need separate calls. " +
+      "they run concurrently in no set order. Sequence: add sequence: true to run actions (up to 100) one after another in the order given, as fast as the controls take them " +
+      "(or intervalMs apart), e.g. keying a sum into a calculator; it stops at the first failure and skips the rest. Controls that only appear after a step " +
+      "(a menu that opens, a new dialog) have no id yet, so those still need separate calls with list_elements in between. " +
       "No screenshot afterwards by default: check the result with list_elements (cheap) or pass screenshot: true.",
     inputSchema: {
       id: z.number().int().min(1).optional().describe("The number in brackets from list_elements"),
@@ -512,16 +514,20 @@ server.registerTool(
       actions: z
         .array(z.object({ id: z.number().int().min(1), action: elementVerb.optional(), value: z.string().optional() }))
         .min(1)
-        .max(20)
+        .max(100)
         .optional()
-        .describe("Several actions to run at the same time, instead of id/action/value"),
+        .describe("Several actions instead of id/action/value: up to 20 at the same time, or up to 100 in order with sequence"),
+      sequence: z.boolean().optional().describe("Run actions one after another in the order given, stopping at the first failure; default false (all at once)"),
+      intervalMs: z.number().int().min(0).max(5000).optional().describe("With sequence: pause between steps in milliseconds; default 0 (as fast as possible)"),
       screenshot: z.boolean().optional().describe("Take a screenshot after the action; default false"),
     },
   },
   (a) =>
     a.id === undefined && !a.actions
       ? Promise.resolve({ content: [{ type: "text" as const, text: "Give id, or actions" }], isError: true })
-      : act("element_action", a, false),
+      : a.actions && !a.sequence && a.actions.length > 20
+        ? Promise.resolve({ content: [{ type: "text" as const, text: "Up to 20 actions at the same time; for more, pass sequence: true" }], isError: true })
+        : act("element_action", a, false),
 );
 
 server.registerTool(

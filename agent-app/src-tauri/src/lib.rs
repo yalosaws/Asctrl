@@ -6,6 +6,7 @@ mod files;
 mod input;
 mod jobs;
 mod overlay;
+mod pace;
 mod powershell;
 mod shell;
 mod tools;
@@ -267,11 +268,13 @@ fn handle(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: Value) -> Re
                         ov.suppress(Duration::from_secs(5));
                     }
                     let before = tools::fx_before(&st.ctx, &tool, &args);
+                    pace::begin(&id);
                     let _ = app.emit(
                         "fx",
                         json!({ "phase": "start", "id": id, "tool": tool, "args": fx_args(&args), "geo": before }),
                     );
-                    let out = tools::run(&st.ctx, &tool, &args).await;
+                    let out = pace::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args)).await;
+                    pace::end(&id);
                     if moves_mouse(&tool) {
                         ov.suppress(Duration::from_millis(1200));
                     }
@@ -481,10 +484,12 @@ pub fn run() {
             disconnect,
             quit,
             overlay::overlay_info,
-            overlay::set_hit_regions
+            overlay::set_hit_regions,
+            pace::fx_landed
         ])
         .setup(|app| {
             overlay::setup(app.handle());
+            pace::init(app.handle().clone());
             tauri::async_runtime::spawn(relay_loop(app.handle().clone()));
             Ok(())
         })

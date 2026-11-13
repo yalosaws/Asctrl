@@ -6,7 +6,7 @@ import { center, hit, home, initGeo, isTauri, primary, setHome, snap, syncHits, 
 import { orb } from "./orb";
 import { bloom, ripple } from "./light";
 import { collapse, expand, isShown, relayout as relayoutEdge } from "./edge";
-import { fxEnd, fxStart, type FxEvent } from "./fx";
+import { fxEnd, fxStart, fxStep, type FxEvent } from "./fx";
 import { EASE, play, sleep, SPRING } from "./motion";
 import { runDemo } from "./demo";
 
@@ -313,7 +313,12 @@ async function boot() {
 
   if (isTauri) {
     await listen<Status>("status", (e) => render(e.payload));
-    await listen<FxEvent>("fx", (e) => (e.payload.phase === "start" ? fxStart(e.payload) : fxEnd(e.payload)));
+    await listen<FxEvent>("fx", (e) => {
+      const p = e.payload;
+      if (p.phase === "start") fxStart(p);
+      else if (p.phase === "step") fxStep(p);
+      else fxEnd(p);
+    });
     $("admin-tag").hidden = !(await invoke<boolean>("is_admin"));
     render(await invoke<Status>("get_status"));
     void entrance();

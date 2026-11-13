@@ -54,12 +54,6 @@ const arrow = (k: number) =>
   `<path d="${HEAD}" class="vc-fill" fill="url(#vc-g${k})" stroke="url(#vc-g${k})"/>` +
   `<path d="${HEAD}" class="vc-gloss" fill="url(#vc-gloss)"/></svg>`;
 
-/** Dark text on the bright colours (amber, teal), white on the rest */
-const ink = (hex: string) => {
-  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.62 ? "#1d1830" : "#fff";
-};
-
 let launched = 0;
 
 const wrap = (a: number) => ((((a + 180) % 360) + 360) % 360) - 180;
@@ -87,7 +81,6 @@ export class Cursor {
   private root: HTMLDivElement;
   private drop: HTMLDivElement;
   private arrow: HTMLDivElement;
-  private tag?: HTMLDivElement;
   private pos: Pt = { ...orb.pos };
   private aim?: HTMLElement;
   private k: number;
@@ -119,7 +112,7 @@ export class Cursor {
   }
 
   /** Wait until this cursor's colour comes round to the release point for `p`, then throw it there */
-  async go(p: Pt, label = "") {
+  async go(p: Pt) {
     const want = (o: Pt) => (Math.atan2(p.y - o.y, p.x - o.x) * 180) / Math.PI;
     // Screen angle (clockwise from the top) where the colour is now
     const where = () => PALETTE[this.k].at + orb.turn;
@@ -167,16 +160,15 @@ export class Cursor {
     aim.style.top = `${p.y}px`;
     this.aim = aim;
     play(aim, [{ transform: "scale(2.2)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }], { spring: SPRING.snap });
+  }
 
-    // A name tag beside the pointer says which control this one went for
-    if (label.trim()) {
-      const s = SHADES[this.k];
-      const tag = el("div", "vc-tag", this.root, label.trim());
-      tag.style.background = `linear-gradient(135deg, ${s.light}, ${s.base} 55%, ${s.deep})`;
-      tag.style.color = ink(s.base);
-      this.tag = tag;
-      play(tag, [{ transform: "scale(.4)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }], { spring: SPRING.pop });
-    }
+  /** Never ran (a sequence stopped before this step): fade away quietly, no press and no red */
+  async cancel() {
+    const aim = this.aim;
+    this.aim = undefined;
+    if (aim) void fadeOut(aim, 300, { transform: "scale(.5)" });
+    await fadeOut(this.root, 320, { transform: `translate(${this.pos.x}px, ${this.pos.y}px) scale(.6)` });
+    out.delete(this.k);
   }
 
   /** Press (count times), then fall back into the orb; on failure flash red and fade where it stands */
@@ -193,8 +185,6 @@ export class Cursor {
       return;
     }
     if (aim) void fadeOut(aim, 260, { transform: "scale(.5)" });
-    // The tag fades as it presses, so the pointer goes home on its own
-    if (this.tag) void fadeOut(this.tag, 520, { transform: "scale(.7)" });
     bloom(p, { size: 130, ms: 620, color: this.color });
     for (let i = 0; i < count; i++) {
       ripple(p, { size: 34, ms: 560, to: 1.9 + i * 0.35, color: this.color });
