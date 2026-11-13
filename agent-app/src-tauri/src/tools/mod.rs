@@ -290,13 +290,51 @@ const QUIET: Duration = Duration::from_millis(350);
 /// Never wait longer than this for the screen to stop changing after an action
 const SETTLE_MAX: Duration = Duration::from_millis(1500);
 
+tokio::task_local! {
+    /// Set by batch fast: input steps don't wait for the screen to settle, only for the program to take the input
+    static FAST: bool;
+    /// Set by a watch argument: the region (screen pixels) whose changes count after an input step
+    static WATCH: capture::Area;
+}
+
+/// The region a tool's or batch's `watch` argument frames ({x0, y0, x1, y1} on the last screenshot), if any
+fn watch_arg(ctx: &Ctx, args: &Value) -> Result<Option<capture::Area>, String> {
+    let Some(w) = args.get("watch").filter(|w| !w.is_null()) else { return Ok(None) };
+    let (a, b) = (to_screen(ctx, w, "x0", "y0")?, to_screen(ctx, w, "x1", "y1")?);
+    let (l, t, r, btm) = (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1));
+    if r - l < 8 || btm - t < 8 {
+        return Err("watch region is too small".into());
+    }
+    Ok(Some(capture::Area { left: l, top: t, width: r - l, height: btm - t }))
+}
+
+/// In fast mode, the pause after each input so the program has taken it before the next one arrives
+const FAST_GAP: Duration = Duration::from_millis(25);
+
 /// Run a blocking input operation on a background thread, then wait just until the screen has reacted
 /// and stopped changing (instead of a fixed pause), and say what changed
 async fn input_op(ctx: &Ctx, at: Option<(i32, i32)>, f: impl FnOnce() -> Result<(), String> + Send + 'static, done: String) -> Output {
     let _turn = REAL_INPUT.lock().await;
+    if FAST.try_with(|f| *f).unwrap_or(false) {
+        let r = tokio::task::spawn_blocking(move || {
+            f()?;
+            std::thread::sleep(FAST_GAP);
+            Ok::<_, String>(())
+        })
+        .await;
+        return match r {
+            Ok(Ok(())) => text(done),
+            Ok(Err(e)) => fail(e),
+            Err(e) => fail(e.to_string()),
+        };
+    }
     let g = *ctx.geom.lock().unwrap();
+    let watch = WATCH.try_with(|w| *w).ok();
     let r = tokio::task::spawn_blocking(move || {
-        let before = screen::before(at);
+        let before = match watch {
+            Some(area) => screen::before_in(area, at),
+            None => screen::before(at),
+        };
         f()?;
         Ok::<_, String>(Some(screen::settle(&before, QUIET, SETTLE_MAX)))
     })
@@ -448,9 +486,15 @@ async fn screenshot(ctx: &Ctx, maxw: i64, display: usize) -> Output {
 
 type BoxedRun<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Output> + Send + 'a>>;
 
-/// Boxed so batch can run tools from inside a tool
+/// Boxed so batch can run tools from inside a tool. A watch argument frames the region input steps wait on.
 fn run_tool<'a>(ctx: &'a Ctx, tool: &'a str, args: &'a Value) -> BoxedRun<'a> {
-    Box::pin(run_tool_inner(ctx, tool, args))
+    Box::pin(async move {
+        match watch_arg(ctx, args) {
+            Err(e) => fail(e),
+            Ok(Some(area)) => WATCH.scope(area, run_tool_inner(ctx, tool, args)).await,
+            Ok(None) => run_tool_inner(ctx, tool, args).await,
+        }
+    })
 }
 
 async fn run_tool_inner(ctx: &Ctx, tool: &str, args: &Value) -> Output {

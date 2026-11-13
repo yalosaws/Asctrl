@@ -93,6 +93,14 @@ async function act(tool: ToolName, args: Record<string, unknown> & { screenshot?
 }
 
 const screenshotFlag = z.boolean().optional().describe("Take a screenshot after the action; default true");
+
+const watchArg = z
+  .object({ x0: z.number().min(0), y0: z.number().min(0), x1: z.number().min(0), y1: z.number().min(0) })
+  .optional()
+  .describe(
+    "Region (screenshot pixels) where the action shows its effect, e.g. a game board with its buttons. After the action only this region is " +
+      "watched until it settles, so a video, ad or clock elsewhere can't hold it up. Default: the whole window, leaving out parts that keep moving on their own",
+  );
 const coord = (what: string) => z.number().min(0).describe(`${what} (pixel coordinate on the latest screenshot)`);
 
 /** Code of the last successful connection, so request_admin can reconnect by itself */
@@ -251,6 +259,7 @@ server.registerTool(
       modifiers: z.string().optional().describe("Keys held while clicking, e.g. ctrl"),
       ...ocrScope,
       screenshot: screenshotFlag,
+      watch: watchArg,
     },
   },
   (a) => act("click_text", a),
@@ -269,11 +278,16 @@ server.registerTool(
       "e.g. open_app → wait_for the window → click_text a menu → type_text → press_keys ctrl+s → wait_for the Save dialog. " +
       "Each step is { tool, ...that tool's arguments } for: " + stepTools.join(", ") + " (wait takes seconds). " +
       "Steps wait only until the screen settles, never a fixed time; put wait_for between steps that open something slowly. " +
+      "fast: true skips even that wait for input steps (click, type_text, press_keys…), so pages that animate every click don't hold each step up: " +
+      "use it for many inputs into a screen that stays put (a game board, a form), not when a step opens something the next one needs. " +
       "Click coordinates refer to the latest screenshot, so only batch clicks whose targets you already know; prefer click_text, element_action and keys. " +
+      "watch frames the region every step waits on (a step's own watch overrides it). " +
       "Returns one line per step (✓ / ✗ / skipped), plus a screenshot at the end unless screenshot: false.",
     inputSchema: {
       steps: z.array(z.object({ tool: z.enum(stepTools) }).passthrough()).min(1).max(50),
+      fast: z.boolean().optional().describe("Input steps don't wait for the screen to settle (about 25 ms each); it settles once at the end. Default false"),
       screenshot: screenshotFlag,
+      watch: watchArg,
     },
   },
   (a) => act("batch", a),
@@ -431,6 +445,7 @@ server.registerTool(
       count: z.number().int().min(1).max(3).optional().describe("Number of clicks: 2 = double-click, 3 = triple-click (selects a line); default 1"),
       modifiers: z.string().optional().describe("Keys held while clicking, e.g. ctrl, shift, ctrl+shift"),
       screenshot: screenshotFlag,
+      watch: watchArg,
     },
   },
   (a) => act("click", a),
@@ -517,11 +532,13 @@ server.registerTool(
   {
     description:
       "Type text at the current focus. Any language works and the user's input method doesn't matter. Newlines press Enter. Click the input box first if unsure where focus is. " +
+      "Characters on the keyboard are pressed as real keys, so games and web pages that read key codes see them (while an input method is in Chinese/Japanese/Korean mode, only digits are). " +
       "Text over 200 characters is pasted through the clipboard (put back afterwards), which is many times faster; method keys forces keystrokes (for fields that block pasting, games, remote desktops).",
     inputSchema: {
       text: z.string().min(1),
       method: z.enum(["auto", "keys", "paste"]).optional().describe("auto (default): paste long text, type short text; keys: always keystrokes; paste: always paste"),
       screenshot: screenshotFlag,
+      watch: watchArg,
     },
   },
   (a) => act("type_text", a),
@@ -533,7 +550,7 @@ server.registerTool(
     description:
       "Press a key or key combination, e.g. enter, esc, tab, ctrl+c, ctrl+shift+esc, win+r, alt+f4, f5. " +
       "Keys go to the focused window; click the target window first if unsure where focus is.",
-    inputSchema: { keys: z.string().describe("Key names joined with +"), screenshot: screenshotFlag },
+    inputSchema: { keys: z.string().describe("Key names joined with +"), screenshot: screenshotFlag, watch: watchArg },
   },
   (a) => act("press_keys", a),
 );

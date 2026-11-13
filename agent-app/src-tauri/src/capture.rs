@@ -11,7 +11,7 @@ const JPEG_QUALITY: u8 = 80;
 /// MONITORINFO.dwFlags bit for the primary monitor
 const PRIMARY: u32 = 1;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Area {
     pub left: i32,
     pub top: i32,

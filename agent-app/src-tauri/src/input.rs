@@ -1,15 +1,17 @@
 //! Mouse and keyboard control (Windows SendInput). Coordinates are physical screen pixels.
 
 use std::time::Duration;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, POINT};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
 };
+use windows::Win32::UI::Input::Ime::ImmGetDefaultIMEWnd;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, SetCursorPos, WindowFromPoint,
+    GA_ROOT, GUITHREADINFO, GetAncestor, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, SMTO_ABORTIFHUNG,
+    SendMessageTimeoutW, SetCursorPos, WM_IME_CONTROL, WindowFromPoint,
 };
 
 const BLOCKED: &str = "Input was blocked by Windows: the target window may be running as administrator (call request_admin, then reconnect), or the lock screen / UAC prompt is showing";
@@ -245,9 +247,69 @@ pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32) -> Result<(), String> {
 /// between chunks keeps slow ones (Electron, remote sessions) from dropping any.
 const TYPE_CHUNK: usize = 24;
 
-/// Type any text (including CJK) without depending on the input method
+/// The keyboard layout of the window in front, and whether its input method is in native mode (Chinese,
+/// Japanese, Korean), where real keystrokes for letters would become candidates instead of text
+fn target_keyboard() -> (HKL, bool) {
+    // WM_IME_CONTROL queries
+    const IMC_GETCONVERSIONMODE: usize = 1;
+    const IMC_GETOPENSTATUS: usize = 5;
+    // IME_CMODE_NATIVE: typing native characters rather than letters
+    const CMODE_NATIVE: usize = 1;
+    unsafe {
+        let fg = GetForegroundWindow();
+        let tid = GetWindowThreadProcessId(fg, None);
+        let mut gi = GUITHREADINFO { cbSize: size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        let focus = if GetGUIThreadInfo(tid, &mut gi).is_ok() && !gi.hwndFocus.is_invalid() { gi.hwndFocus } else { fg };
+        let ime = ImmGetDefaultIMEWnd(focus);
+        let query = |cmd: usize| {
+            let mut r = 0usize;
+            let ok = SendMessageTimeoutW(ime, WM_IME_CONTROL, WPARAM(cmd), LPARAM(0), SMTO_ABORTIFHUNG, 100, Some(&mut r));
+            (ok.0 != 0).then_some(r)
+        };
+        let native = !ime.is_invalid() && query(IMC_GETOPENSTATUS).unwrap_or(0) != 0 && query(IMC_GETCONVERSIONMODE).unwrap_or(0) & CMODE_NATIVE != 0;
+        (GetKeyboardLayout(tid), native)
+    }
+}
+
+/// The real key presses for `ch` on keyboard layout `hkl` (with shift when it needs it), or None when the
+/// character has no key of its own there (CJK, emoji, AltGr symbols). Real key codes matter for games and
+/// web pages that read which key was pressed: a character sent as unicode reaches them with no key code.
+fn real_keys(ch: char, hkl: HKL, caps: bool) -> Option<Vec<INPUT>> {
+    if !(ch == ' ' || ch.is_ascii_graphic()) {
+        return None;
+    }
+    let r = unsafe { VkKeyScanExW(ch as u16, hkl) };
+    if r == -1 {
+        return None;
+    }
+    let (vk, mods) = (r as u16 & 0xff, (r as u16 >> 8) & 0xff);
+    // Only plain and shifted keys: ctrl / alt combinations would trigger shortcuts
+    if mods & !1 != 0 {
+        return None;
+    }
+    // Caps lock swaps the case of letters, so shift is needed the other way round
+    let shift = (mods & 1 != 0) ^ (caps && ch.is_ascii_alphabetic());
+    let scan = unsafe { MapVirtualKeyExW(vk as u32, MAPVK_VK_TO_VSC, Some(hkl)) } as u16;
+    let vk = VIRTUAL_KEY(vk);
+    let mut v = vec![];
+    if shift {
+        v.push(key(VK_LSHIFT, 0x2a, KEYBD_EVENT_FLAGS(0)));
+    }
+    v.push(key(vk, scan, KEYBD_EVENT_FLAGS(0)));
+    v.push(key(vk, scan, KEYEVENTF_KEYUP));
+    if shift {
+        v.push(key(VK_LSHIFT, 0x2a, KEYEVENTF_KEYUP));
+    }
+    Some(v)
+}
+
+/// Type any text (including CJK) without depending on the input method. Characters that have a key on the
+/// keyboard are pressed as real keys, so games and pages that read key codes see them; the rest (and all but
+/// digits while an input method is in Chinese / Japanese / Korean mode) is sent as unicode.
 pub fn type_text(text: &str) -> Result<(), String> {
     check_target(None)?;
+    let (hkl, native) = target_keyboard();
+    let caps = unsafe { GetKeyState(VK_CAPITAL.0 as i32) } & 1 != 0;
     let mut inputs: Vec<INPUT> = vec![];
     let mut chars = 0;
     let flush = |inputs: &mut Vec<INPUT>| -> Result<(), String> {
@@ -271,10 +333,16 @@ pub fn type_text(text: &str) -> Result<(), String> {
             chars = 0;
             continue;
         }
-        let mut buf = [0u16; 2];
-        for unit in ch.encode_utf16(&mut buf) {
-            inputs.push(key(VIRTUAL_KEY(0), *unit, KEYEVENTF_UNICODE));
-            inputs.push(key(VIRTUAL_KEY(0), *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+        // In native mode letters would become pinyin / kana and punctuation full-width, but digits pass straight through
+        match real_keys(ch, hkl, caps).filter(|_| !native || ch.is_ascii_digit()) {
+            Some(keys) => inputs.extend(keys),
+            None => {
+                let mut buf = [0u16; 2];
+                for unit in ch.encode_utf16(&mut buf) {
+                    inputs.push(key(VIRTUAL_KEY(0), *unit, KEYEVENTF_UNICODE));
+                    inputs.push(key(VIRTUAL_KEY(0), *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+                }
+            }
         }
         chars += 1;
         if chars >= TYPE_CHUNK {

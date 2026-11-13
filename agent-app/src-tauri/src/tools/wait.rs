@@ -34,7 +34,8 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
         let start = std::time::Instant::now();
         if stable {
             let at = winmgr::find(handle, &title).ok().and_then(|h| winmgr::rect_of(h.0 as isize)).map(|(l, t, r, b)| ((l + r) / 2, (t + b) / 2));
-            let ok = screen::wait_stable(screen::watch_area(at), Duration::from_millis(400), timeout);
+            // Slow to write a part off as moving on its own: a spinner means the page is still loading
+            let ok = screen::wait_stable(screen::watch_area(at), Duration::from_millis(400), timeout, Duration::from_millis(1500));
             let s = start.elapsed().as_secs_f64();
             return if ok { Ok(format!("Screen settled after {s:.1} s")) } else { Err(format!("The screen was still changing after {s:.1} s")) };
         }
@@ -60,7 +61,7 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
                         let (l, t, r, b) = w.rect;
                         if r - l > 16 && b - t > 16 && !w.minimized {
                             let area = capture::Area { left: l, top: t, width: r - l, height: b - t };
-                            screen::wait_stable(area, Duration::from_millis(120), Duration::from_millis(1500));
+                            screen::wait_stable(area, Duration::from_millis(120), Duration::from_millis(1500), screen::NOISE_QUICK);
                         }
                     }
                     win_line(g, w)
