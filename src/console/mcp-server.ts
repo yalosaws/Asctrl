@@ -3,7 +3,7 @@
 // Usage: configure `node src/console/mcp-server.ts` in your MCP client; RELAY_URL / RELAY_TOKEN / TECH_NAME env vars are optional.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -52,7 +52,24 @@ const INSTRUCTIONS = `Asctrl lets you see and operate a Windows computer. Work l
 
 Prefer set_value for forms (it fills, ticks, picks and verifies in one call), wait_for instead of guessing delays, and batch for a sequence you already know. If a reply says nothing changed, the action probably missed: look before repeating it. Never guess coordinates: use a target, or x and y you can see on the latest screenshot.`;
 
-const server = new McpServer({ name: "asctrl", version: "0.2.0" }, { instructions: INSTRUCTIONS });
+/** The app's orb, so connector lists show it instead of a letter. Sent inline: clients can't reach local files. */
+function orbIcons() {
+  const dir = path.resolve(import.meta.dirname, "../../agent-app/src-tauri/icons");
+  const sizes: [string, string][] = [["32x32.png", "32x32"], ["128x128.png", "128x128"], ["128x128@2x.png", "256x256"]];
+  return sizes.flatMap(([file, size]) => {
+    try {
+      const data = readFileSync(path.join(dir, file)).toString("base64");
+      return [{ src: `data:image/png;base64,${data}`, mimeType: "image/png", sizes: [size] }];
+    } catch {
+      return [];
+    }
+  });
+}
+
+const server = new McpServer(
+  { name: "asctrl", title: "Asctrl", version: "0.2.0", icons: orbIcons() },
+  { instructions: INSTRUCTIONS },
+);
 
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 type Reply = { content: Content[]; isError?: boolean };
