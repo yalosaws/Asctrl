@@ -185,7 +185,7 @@ Speed and reliability on a real desktop (moves the mouse and types for about 20 
 npm run bench
 ```
 
-It opens `test/bench-app.ps1` (a window with ordinary controls, a canvas only OCR can read and a dialog that opens late) and an Explorer folder, and runs 13 tasks the way an AI would: fill and submit a form in two calls, type 500 mixed characters and read them back, tick a checkbox idempotently, click by coordinates, catch a click that did nothing, follow a window that moved and refuse a click after a resize, click text on a canvas, wait for a late dialog, a batch. Each result is checked, and the time per task and per tool is printed.
+It opens `test/bench-app.ps1` (a window with ordinary controls, a canvas only OCR can read and a dialog that opens late) and an Explorer folder, and runs 14 tasks the way an AI would: fill and submit a form in two calls, type 500 mixed characters and read them back (with the clipboard coming back as it was), tick a checkbox idempotently, click by coordinates read before the screenshot was taken, catch a click that did nothing, notice a screenshot framed differently, follow a window that moved and refuse a click after a resize, click text on a canvas, wait for a late dialog, a batch. Each result is checked, and the time per task and per tool is printed.
 
 Where the time goes, action by action (the same few actions with and without the report, several times each; moves the mouse for a few seconds):
 
@@ -198,6 +198,32 @@ Single steps by hand:
 ```bash
 node test/demo-step.ts local - @steps.json
 ```
+
+## Status (version 0.2.0, November 2026)
+
+What has been shown, on one Windows 11 machine (2560x1440 at 150 %, one display):
+
+- Unit tests 24 / 24, end-to-end 61 / 61, benchmark 14 / 14 tasks in 10.6 s.
+- Per call: pressing a control directly 140–215 ms, a real mouse click about 160 ms, switching windows about 300 ms, `observe` about 35 ms, a screenshot about 50 ms. The version before this one took 451, 586, 751, 41 and 96 ms for the same.
+
+What has not been shown:
+
+- **No AI has driven it through real tasks yet.** Every test is a script with fixed steps: they measure whether the tools are fast and correct, not whether an agent finishes tasks more often. This is the largest gap, and the next thing to do.
+- **Real programs are barely covered.** The benchmark uses a small WinForms window and one Explorer folder. Web pages in a browser, Electron programs (VS Code, WeChat), Office, games and several displays are untested. Web pages are the commonest case and the least certain path here.
+- **No comparison with any other framework**, and no public benchmark has been run.
+- **Little or no test coverage**: drag, scroll, input methods, several displays, windows running as administrator, right-to-left layouts.
+- The code has had no independent review.
+
+Known limits:
+
+- Screenshots use GDI: a window behind others can't be captured, and some hardware-accelerated content may come out blank.
+- No numbered marks drawn on screenshots (Set-of-Marks), so UI a program draws itself is reached by text read off the pixels or by coordinates only.
+- When the keyboard focus leaves a text box, Windows fades its border for about 250 ms and the action waits for that (about 380 ms instead of 170 ms).
+- Single clicks repeated on the same spot are kept about 550 ms apart, so Windows does not take them for a double click. Pressing a control directly has no such wait.
+- The overlay is left out of screen captures, so where its virtual cursor lands is checked by eye only.
+- Windows only.
+
+Suggested order from here: have a real agent do real tasks in a browser, Settings and Office and fix what fails; an independent code review; then the limits above.
 
 ## Security
 
