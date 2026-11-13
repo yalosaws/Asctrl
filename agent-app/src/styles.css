@@ -237,46 +237,13 @@ body.demo .fake-taskbar {
     transform: rotate(1turn);
   }
 }
-#orb.waiting .orb-arc {
+/* Thinking shows the same arcs: the next step is being worked out */
+#orb.waiting .orb-arc,
+#orb.thinking .orb-arc {
   opacity: 1;
   animation-play-state: running;
 }
 
-/* Thinking: a single thin ring of the orb's own colours, drawn slowly in from outside until it meets
-   the rim and vanishes. Inward reads as taking in; it never looks like the arcs of a running command. */
-.orb-think {
-  position: absolute;
-  left: -19px;
-  top: -19px;
-  width: 38px;
-  height: 38px;
-  border-radius: 50%;
-  background: conic-gradient(var(--loop));
-  -webkit-mask-image: radial-gradient(farthest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1px));
-  mask-image: radial-gradient(farthest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1px));
-  opacity: 0;
-  animation: think-in 2.6s cubic-bezier(0.55, 0, 0.75, 0.6) infinite paused;
-}
-#orb.thinking .orb-think {
-  animation-play-state: running;
-}
-@keyframes think-in {
-  0% {
-    opacity: 0;
-    transform: scale(1.9) rotate(0deg);
-  }
-  45% {
-    opacity: 0.85;
-  }
-  92% {
-    opacity: 0.6;
-    transform: scale(1) rotate(120deg);
-  }
-  100% {
-    opacity: 0;
-    transform: scale(0.96) rotate(130deg);
-  }
-}
 .orb-body {
   position: absolute;
   left: -16px;
@@ -1169,9 +1136,5 @@ body:not([data-state="connected"]) #btn-end {
   .orb-float,
   .orb-halo {
     animation: none;
-  }
-  #orb.thinking .orb-think {
-    animation: none;
-    opacity: 0.6;
   }
 }

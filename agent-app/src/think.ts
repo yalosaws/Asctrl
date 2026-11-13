@@ -1,6 +1,6 @@
 // Waiting made visible. The app only sees tool calls, so the quiet stretch between one call ending and
 // the next starting is the technician's AI reading the result and deciding: the orb shows it thinking.
-// A tool that runs long shows the time dial too, so no wait is ever a frozen orb.
+// Tools that only wait or scan get the circling arcs of a running command, so no wait is a frozen orb.
 
 import { orb } from "./orb";
 import { ripple } from "./light";
@@ -11,8 +11,6 @@ const QUIET_MS = 450;
 const FIRST_MS = 900;
 /** No call this long means the AI has most likely finished its turn: stop thinking */
 const THINK_MAX_MS = 60_000;
-/** A tool running longer than this gets the time dial */
-const LONG_MS = 1200;
 /** Tools that only wait or scan and draw nothing of their own: they get the circling arcs */
 const WAITS = new Set(["wait", "wait_for", "find_text"]);
 
@@ -21,27 +19,24 @@ let running = 0;
 let waits = 0;
 let quietTimer: number | undefined;
 let capTimer: number | undefined;
-let longTimer: number | undefined;
 
 function clearTimers() {
   window.clearTimeout(quietTimer);
   window.clearTimeout(capTimer);
-  window.clearTimeout(longTimer);
 }
 
 function think() {
   if (!live || running > 0) return;
   orb.setThinking(true);
-  orb.setDial(true);
   window.clearTimeout(capTimer);
-  capTimer = window.setTimeout(() => stop(false), THINK_MAX_MS);
+  capTimer = window.setTimeout(() => stop(), THINK_MAX_MS);
 }
 
-function stop(decided: boolean) {
+/** `decided`: thinking ended because the next action began, so the orb lands it with a small ripple */
+function stop(decided = false) {
   window.clearTimeout(capTimer);
   if (!orb.isThinking) return;
   orb.setThinking(false, decided);
-  orb.setDial(false);
   if (decided) ripple(orb.pos, { size: 46, ms: 520, from: 1.5, to: 0.4 });
 }
 
@@ -60,8 +55,7 @@ export function setSession(state: string) {
     return;
   }
   clearTimers();
-  stop(false);
-  orb.setDial(false);
+  stop();
   // A permission question pauses the session with the calling tool still running; anything else ends it
   if (state !== "admin" && state !== "reboot") {
     running = 0;
@@ -73,17 +67,10 @@ export function setSession(state: string) {
 export function toolStarted(tool: string) {
   running++;
   window.clearTimeout(quietTimer);
-  // The next action has been decided: the motes are drawn back in as the orb sets off
   stop(true);
   if (WAITS.has(tool)) {
     waits++;
     orb.setWaiting(true);
-  }
-  if (running === 1) {
-    window.clearTimeout(longTimer);
-    longTimer = window.setTimeout(() => {
-      if (live && running > 0) orb.setDial(true);
-    }, LONG_MS);
   }
 }
 
@@ -93,8 +80,5 @@ export function toolEnded(tool: string) {
     waits = Math.max(0, waits - 1);
     if (waits === 0) orb.setWaiting(false);
   }
-  if (running > 0) return;
-  window.clearTimeout(longTimer);
-  orb.setDial(false);
-  if (live) quietSoon(QUIET_MS);
+  if (running === 0 && live) quietSoon(QUIET_MS);
 }

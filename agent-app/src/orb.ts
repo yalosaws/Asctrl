@@ -13,8 +13,8 @@ const SPIN: Record<Mood, number> = { idle: 0.6, ready: 1, work: 2.8, focus: 1.7,
 const SPIN_MS = 5200;
 /** Spin speed while flinging cursors out (about 0.4 s a turn) */
 const WHIRL = 12;
-/** Spin speed while thinking: the colours slow to a drift and the ring carries the motion */
-const MUSE = 0.45;
+/** Spin speed while thinking: the colour wheel winds up as the next step is worked out */
+const MUSE = 3.2;
 
 const q = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
@@ -137,7 +137,7 @@ class Orb {
     this.ramping = true;
     onFrame((dt) => {
       const whirling = performance.now() < this.whirlUntil;
-      const goal = whirling ? WHIRL : this.thinking ? Math.min(MUSE, SPIN[this.mood]) : SPIN[this.mood];
+      const goal = whirling ? WHIRL : this.thinking ? Math.max(MUSE, SPIN[this.mood]) : SPIN[this.mood];
       // Quick to spin up, slower to wind down
       this.rate += (goal - this.rate) * Math.min(1, dt * (whirling ? 9 : 3.5));
       if (!whirling && Math.abs(goal - this.rate) < 0.02) this.rate = goal;
@@ -158,16 +158,18 @@ class Orb {
     this.el.classList.toggle("waiting", on);
   }
 
-  get isThinking() {
-    return this.thinking;
-  }
-
-  /** A ring of light is drawn in toward the orb while the next step is being decided */
-  setThinking(on: boolean) {
+  /** The arcs circle and the colour wheel spins up while the next step is being decided. `decided` adds
+   *  a small bump as it lands, for when thinking ends because the next action has begun. */
+  setThinking(on: boolean, decided = false) {
     if (on === this.thinking) return;
     this.thinking = on;
     this.el.classList.toggle("thinking", on);
+    if (!on && decided) this.bump(0.45);
     this.ramp();
+  }
+
+  get isThinking() {
+    return this.thinking;
   }
 
   private wake() {
