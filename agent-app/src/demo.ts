@@ -110,6 +110,8 @@ export async function runDemo(h: Hooks) {
     await sleep(1600);
     await s("run_powershell", { script: "Get-NetAdapter | Select Name, Status, LinkSpeed" }, {}, 1900, true, NET);
     await sleep(1400);
+    await s("wait_for", { text: "Connected" }, {}, 4200, true, "Found \"Connected\" after 4.2 s");
+    await sleep(7000);
     await s("run_powershell", { script: "ipconfig /flushdns" }, {}, 1200, true, "Windows IP Configuration\n\nSuccessfully flushed the DNS Resolver Cache.");
     await sleep(3600);
     await s("read_file", { path: "C:\\Windows\\System32\\drivers\\etc\\hosts" }, {}, 900, true, HOSTS);

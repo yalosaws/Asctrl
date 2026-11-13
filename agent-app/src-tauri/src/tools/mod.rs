@@ -683,11 +683,22 @@ async fn run_tool_inner(ctx: &Ctx, tool: &str, args: &Value) -> Output {
             let title = str_arg(args, "title").to_string();
             let action = str_arg(args, "action").to_string();
             let g = *ctx.geom.lock().unwrap();
+            // The outline goes round the window first, then the window changes, and the overlay hears where it went
+            // right away (not after the screen settles and the screenshot is taken), so the outline moves with it
+            if let Some(p) = pace::current() {
+                p.wait(0).await;
+            }
+            let fx_id = pace::CALL_ID.try_with(Clone::clone).ok();
             let r = tokio::task::spawn_blocking(move || {
                 let h = winmgr::find(handle, &title)?;
                 let at = winmgr::rect_of(h.0 as isize).map(|(l, t, r, b)| ((l + r) / 2, (t + b) / 2));
                 let before = screen::before(at);
                 let done = winmgr::act(h, &action)?;
+                if let Some(id) = fx_id {
+                    // The new position is set as soon as the call returns; Windows only animates the picture
+                    let rect = winmgr::rect_of(h.0 as isize).map(rect_json);
+                    pace::emit(serde_json::json!({ "phase": "step", "id": id, "tool": "focus_window", "index": 0, "ok": true, "geo": { "rect": rect } }));
+                }
                 Ok::<_, String>((done, Some(screen::settle(&before, Duration::from_millis(150), Duration::from_millis(800)))))
             })
             .await;
@@ -1003,7 +1014,12 @@ pub fn fx_before(ctx: &Ctx, tool: &str, args: &Value) -> Value {
         }
         "scroll" | "mouse_move" => json!({ "at": pt("x", "y") }),
         "mouse_down" | "mouse_up" => json!({ "at": pt("x", "y").or_else(cur) }),
-        "drag" => json!({ "from": pt("fromX", "fromY"), "to": pt("toX", "toY") }),
+        "drag" => {
+            // Framed like a click: the window the drag starts in, so the orb stays put between clicks and drags there
+            let from = to_screen(ctx, args, "fromX", "fromY").ok();
+            let zone = from.and_then(|(x, y)| winmgr::top_window_at(x, y)).and_then(winmgr::rect_of).map(rect_json);
+            json!({ "from": from.map(|(x, y)| json!([x, y])), "to": pt("toX", "toY"), "zone": zone, "zoneIsWindow": true })
+        }
         "zoom" => json!({ "from": pt("x0", "y0"), "to": pt("x1", "y1") }),
         "type_text" | "press_keys" | "hold_key" => json!({ "at": cur() }),
         // One virtual cursor per control, flying out of the orb; the user's pointer stays where it is.

@@ -105,8 +105,8 @@ export function capture(r: R, to: () => Pt, o: { ms?: number } = {}): Promise<vo
 }
 
 /** Press-and-hold marker */
-export function hold(p: Pt, tone: Tone = "aurora") {
-  const h = at("hold", p, tone);
+export function hold(p: Pt, tone: Tone = "aurora", color?: string) {
+  const h = at("hold", p, tone, color);
   play(h, [{ transform: "scale(2)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }], { spring: SPRING.pop });
   return h;
 }
@@ -129,11 +129,12 @@ export function streaks(p: Pt, dir: "up" | "down" | "left" | "right") {
   setTimeout(() => g.remove(), 1500);
 }
 
-/** A thin line of light drawn from a to b (drag path); returns the element for the caller to fade out */
-export function strand(a: Pt, b: Pt, ms: number) {
+/** A thin line of light drawn from a to b (drag path), in a cursor's colour when given; returns the element for the caller to fade out */
+export function strand(a: Pt, b: Pt, ms: number, color?: string) {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const s = at("strand", a);
+  if (color) s.style.background = `linear-gradient(90deg, color-mix(in srgb, ${color} 30%, transparent), ${color})`;
   s.style.width = `${Math.hypot(dx, dy)}px`;
   s.style.rotate = `${Math.atan2(dy, dx)}rad`;
   play(s, [{ transform: "scaleX(0)" }, { transform: "scaleX(1)" }], { duration: ms, easing: EASE.inOut });

@@ -9,6 +9,7 @@ import { collapse, expand, isShown, relayout as relayoutEdge } from "./edge";
 import { fxEnd, fxStart, fxStep, type FxEvent } from "./fx";
 import { EASE, play, sleep, SPRING } from "./motion";
 import { runDemo } from "./demo";
+import { setSession } from "./think";
 
 type Status =
   | { state: "connecting" }
@@ -207,6 +208,7 @@ $("btn-deny").addEventListener("click", () => respond(false));
 function render(s: Status) {
   state = s.state;
   document.body.dataset.state = s.state;
+  setSession(s.state);
   const asking = s.state === "admin" || s.state === "reboot";
 
   if (asking) {

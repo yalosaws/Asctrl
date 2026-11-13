@@ -6,11 +6,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { center, home, isTauri, monitorAt, monitors, primary, pt, rect, type Pt, type R } from "./geo";
 import { orb } from "./orb";
+import { toolEnded, toolStarted } from "./think";
 import { Cursor } from "./cursor";
-import { bloom, capture, dart, hold, Outline, ripple, streaks, strand, sweep, type Tone } from "./light";
+import { bloom, capture, dart, hold, Outline, ripple, streaks, sweep, type Tone } from "./light";
 import { breathe, pulse } from "./edge";
 import { closeCard, deckRect, fillEntries, fillLines, openCard, progress, scan, skeleton, termEnd, termStart, type Card } from "./panel";
-import { easeInOutCubic, el, fadeOut, play, sleep, SPRING, tween } from "./motion";
+import { el, fadeOut, play, sleep, SPRING } from "./motion";
 
 export interface FxEvent {
   phase: "start" | "step" | "end";
@@ -316,26 +317,32 @@ function scrollStart(e: FxEvent) {
   streaks(p, horiz ? (amount >= 0 ? "right" : "left") : amount >= 0 ? "down" : "up");
 }
 
-async function dragStart(e: FxEvent) {
+/** Drags in flight: the cursor doing each one and when its pull is over */
+const drags = new Map<string, { c: Cursor; run: Promise<void> }>();
+
+/** Like a click: the orb frames the area and stays over it, and a virtual cursor flies out to the start point,
+ *  presses, pulls a line to the end point and lets go */
+function dragStart(e: FxEvent) {
   const a = pt(e.geo?.from);
   const b = pt(e.geo?.to);
   if (!a || !b) return;
-  orb.goTo(a, "fast");
-  const grip = hold(a);
-  await sleep(340);
-  const ms = 780;
-  const line = strand(a, b, ms);
-  // The orb itself pulls the line to the end point
-  await tween(ms, (t, dt) => {
-    const k = easeInOutCubic(t);
-    orb.pin({ x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k }, dt);
-  });
-  orb.unpin();
-  near(b, "normal");
-  bloom(b, { size: 120, ms: 600 });
-  ripple(b, { size: 34 });
-  void fadeOut(grip, 360, { transform: "scale(1.8)" });
-  void fadeOut(line, 520);
+  const given = rect(e.geo?.zone);
+  const dot = (p: Pt): R => ({ x: p.x, y: p.y, w: 0, h: 0 });
+  const inPlace = given && e.geo?.zoneIsWindow === true ? frameZone(given, true) : frameZone(zoneOf([dot(a), dot(b)]));
+  orb.whirl(1000);
+  const c = new Cursor();
+  const ms = Math.min(700, Math.max(280, Math.hypot(b.x - a.x, b.y - a.y) * 0.9));
+  drags.set(e.id, { c, run: inPlace.then(() => c.go(a)).then(() => c.drag(b, ms)) });
+}
+
+async function dragEnd(e: FxEvent) {
+  const d = drags.get(e.id);
+  drags.delete(e.id);
+  if (!d) return;
+  await d.run;
+  // Already let go at the end point: no extra press, just back into the orb (or red on failure)
+  await d.c.finish(!!e.ok, 0);
+  unframeLater();
 }
 
 // ---- Windows ----
@@ -344,25 +351,50 @@ const winCtx = new Map<string, Outline>();
 
 const aboveWindow = (r: R): Pt => ({ x: r.x + r.w / 2, y: Math.max(monitorAt(center(r)).work.y + 34, r.y - 30) });
 
+/** How long the outline takes to follow the window: about as long as Windows animates a maximize or restore */
+const WIN_FOLLOW_MS = 260;
+/** Calls whose window change was already drawn the moment it happened (step event) */
+const winDone = new Set<string>();
+
 function winStart(e: FxEvent) {
   const r0 = rect(e.geo?.rect);
-  if (!r0) return;
+  if (!r0) return void landed(e.id, 0);
   orb.goTo(aboveWindow(r0), "fast");
   winCtx.set(e.id, new Outline(r0).popIn().trace());
-  ready.set(e.id, sleep(420));
+  // The window waits until the outline is round it, then changes (the agent waits for landed)
+  const r = sleep(240);
+  ready.set(e.id, r);
+  void r.then(() => landed(e.id, 0));
+}
+
+/** The window has just changed: the outline follows it now, not when the result comes back */
+function winStep(e: FxEvent) {
+  winDone.add(e.id);
+  ready.delete(e.id);
+  void winApply(e.id, str(started.get(e.id)?.args?.action) || "focus", rect(e.geo?.rect), WIN_FOLLOW_MS);
 }
 
 async function winEnd(e: FxEvent) {
+  // Already drawn when it happened
+  if (winDone.delete(e.id)) return;
   const action = str(e.args?.action) || "focus";
-  await whenReady(e.id);
-  const o = winCtx.get(e.id);
-  winCtx.delete(e.id);
-  const r1 = rect(e.geo?.rect);
   if (!e.ok) {
+    await whenReady(e.id);
+    const o = winCtx.get(e.id);
+    winCtx.delete(e.id);
     o?.shake();
     void o?.out("fade", 400, 600);
     return;
   }
+  // An agent that sends no step event: follow once the result is in
+  await whenReady(e.id);
+  await winApply(e.id, action, rect(e.geo?.rect), 500);
+}
+
+/** Move the outline to where the window went (r1; null when minimized or closed) */
+async function winApply(id: string, action: string, r1: R | null, ms: number) {
+  const o = winCtx.get(id);
+  winCtx.delete(id);
   if (action === "close" && o) {
     bloom(center(o.r), { size: Math.min(520, Math.max(o.r.w, o.r.h) * 0.6), ms: 700 });
     void o.out("burst", 520);
@@ -371,7 +403,7 @@ async function winEnd(e: FxEvent) {
   if (action === "minimize" && o) {
     const w = monitorAt(center(o.r)).work;
     const to: R = { x: w.x + w.w / 2 - 40, y: w.y + w.h - 6, w: 80, h: 8 };
-    await o.moveTo(to, 520);
+    await o.moveTo(to, ms);
     ripple(center(to), { size: 40 });
     void o.out("fade", 220);
     return;
@@ -380,7 +412,7 @@ async function winEnd(e: FxEvent) {
   // Move / maximize / restore: the same outline morphs to the new spot; if there was none (the window was minimized), pop one in
   orb.goTo(aboveWindow(r1), "fast");
   let ol = o;
-  if (ol) await ol.moveTo(r1, 500);
+  if (ol) await ol.moveTo(r1, ms);
   else {
     ol = new Outline(r1).popIn().trace();
     await sleep(360);
@@ -575,6 +607,7 @@ const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
 
 export function fxStart(e: FxEvent) {
   started.set(e.id, { args: e.args, geo: e.geo });
+  toolStarted(e.tool);
   // Screenshots only breathe the edge at the end; listing windows changes nothing and draws nothing
   if (e.tool === "screenshot" || e.tool === "list_windows" || e.tool === "list_elements") return;
   attend();
@@ -594,7 +627,7 @@ export function fxStart(e: FxEvent) {
     case "scroll":
       return scrollStart(e);
     case "drag":
-      return void dragStart(e);
+      return dragStart(e);
     case "type_text":
     case "press_keys":
     case "hold_key":
@@ -615,6 +648,7 @@ export function fxStart(e: FxEvent) {
 
 /** One action of a click or element_action call has just really happened */
 export function fxStep(e: FxEvent) {
+  if (e.tool === "focus_window") return winStep(e);
   dispatchStep(e);
 }
 
@@ -623,6 +657,7 @@ export function fxEnd(ev: FxEvent) {
   started.delete(ev.id);
   const e: FxEvent = { ...ev, args: ev.args ?? st?.args ?? {}, geo: { ...(st?.geo ?? {}), ...(ev.geo ?? {}) } };
   const ok = !!e.ok;
+  toolEnded(e.tool);
   // Never woke the orb at start, so there is nothing to release
   if (e.tool === "list_windows" || e.tool === "list_elements") return;
   switch (e.tool) {
@@ -635,6 +670,9 @@ export function fxEnd(ev: FxEvent) {
     case "click":
     case "element_action":
       void dispatchEnd(e);
+      break;
+    case "drag":
+      void dragEnd(e);
       break;
     case "focus_window":
       void winEnd(e);

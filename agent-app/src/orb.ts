@@ -13,6 +13,8 @@ const SPIN: Record<Mood, number> = { idle: 0.6, ready: 1, work: 2.8, focus: 1.7,
 const SPIN_MS = 5200;
 /** Spin speed while flinging cursors out (about 0.4 s a turn) */
 const WHIRL = 12;
+/** Spin speed while thinking: the colours slow to a drift and the ring carries the motion */
+const MUSE = 0.45;
 
 const q = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
@@ -31,6 +33,7 @@ class Orb {
   private rate = SPIN.idle;
   private whirlUntil = 0;
   private ramping = false;
+  private thinking = false;
 
   pos: Pt = { x: -200, y: -200 };
   vel: Pt = { x: 0, y: 0 };
@@ -134,7 +137,7 @@ class Orb {
     this.ramping = true;
     onFrame((dt) => {
       const whirling = performance.now() < this.whirlUntil;
-      const goal = whirling ? WHIRL : SPIN[this.mood];
+      const goal = whirling ? WHIRL : this.thinking ? Math.min(MUSE, SPIN[this.mood]) : SPIN[this.mood];
       // Quick to spin up, slower to wind down
       this.rate += (goal - this.rate) * Math.min(1, dt * (whirling ? 9 : 3.5));
       if (!whirling && Math.abs(goal - this.rate) < 0.02) this.rate = goal;
@@ -148,6 +151,23 @@ class Orb {
 
   setBusy(on: boolean) {
     this.el.classList.toggle("busy", on);
+  }
+
+  /** Circling arcs for a tool that only waits or scans (kept apart from the terminal's busy flag) */
+  setWaiting(on: boolean) {
+    this.el.classList.toggle("waiting", on);
+  }
+
+  get isThinking() {
+    return this.thinking;
+  }
+
+  /** A ring of light is drawn in toward the orb while the next step is being decided */
+  setThinking(on: boolean) {
+    if (on === this.thinking) return;
+    this.thinking = on;
+    this.el.classList.toggle("thinking", on);
+    this.ramp();
   }
 
   private wake() {

@@ -5,7 +5,7 @@
 
 import type { Pt } from "./geo";
 import { orb } from "./orb";
-import { bloom, ripple } from "./light";
+import { bloom, hold, ripple, strand } from "./light";
 import { clamp, done, easeInOutCubic, el, fadeOut, onFrame, play, sleep, SPRING, tween } from "./motion";
 
 const layer = document.getElementById("marks") as HTMLDivElement;
@@ -160,6 +160,26 @@ export class Cursor {
     aim.style.top = `${p.y}px`;
     this.aim = aim;
     play(aim, [{ transform: "scale(2.2)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }], { spring: SPRING.snap });
+  }
+
+  /** Press where it stands, pull a line of its colour to `to` over `ms`, then let go there */
+  async drag(to: Pt, ms: number) {
+    const from = { ...this.pos };
+    const aim = this.aim;
+    this.aim = undefined;
+    if (aim) void fadeOut(aim, 200, { transform: "scale(.5)" });
+    const grip = hold(from, "aurora", this.color);
+    // Held down for the whole pull
+    play(this.arrow, [{ scale: "1" }, { scale: ".8" }], { duration: 120, fill: "forwards" });
+    const line = strand(from, to, ms, this.color);
+    await tween(ms, (t) => {
+      const e = easeInOutCubic(t);
+      this.place({ x: lerp(from.x, to.x, e), y: lerp(from.y, to.y, e) });
+    });
+    play(this.arrow, [{ scale: ".8" }, { scale: "1" }], { duration: 140, fill: "forwards" });
+    ripple(to, { size: 34, color: this.color });
+    void fadeOut(grip, 360, { transform: "scale(1.8)" });
+    void fadeOut(line, 520);
   }
 
   /** Never ran (a sequence stopped before this step): fade away quietly, no press and no red */
