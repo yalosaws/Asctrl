@@ -8,15 +8,25 @@ use super::*;
 use crate::fx::Fx;
 use serde_json::json;
 
-fn anim(call: &str, part: &str, loc: &Located) -> Fx {
+/// The animation, and the work area it framed (to tell afterwards whether that area went away)
+fn anim(call: &str, part: &str, loc: &Located) -> (Fx, Value) {
     let area = uia::work_area();
-    Fx::start(
+    let zone = json!(area.map(|(r, _)| fx::rect_json(r)));
+    let fx = Fx::start(
         call,
         part,
         "element_action",
         json!({}),
-        json!({ "targets": [fx::pt_json(loc.point)], "zone": area.map(|(r, _)| fx::rect_json(r)), "zoneIsWindow": area.is_some_and(|(_, w)| w) }),
-    )
+        json!({ "targets": [fx::pt_json(loc.point)], "zone": zone, "zoneIsWindow": area.is_some_and(|(_, w)| w) }),
+    );
+    (fx, zone)
+}
+
+/// Let the frame go at once when the area it was drawn round is no longer the work area (a popup closed)
+fn drop_zone_if_gone(call: &str, zone: Value) {
+    if json!(uia::work_area().map(|(r, _)| fx::rect_json(r))) != zone {
+        fx::zone_gone(call, zone);
+    }
 }
 
 /// Fill a field the way a person would when it won't take a value directly: focus it, select everything,
@@ -69,7 +79,7 @@ fn type_into(loc: &Located, value: &str, call: &str, part: &str, prior: Option<S
 fn set_one(ask: &Ask, value: &str, call: &str, part: &str, watch: &mut dyn FnMut(&Located)) -> Result<(String, Located), Miss> {
     let loc = locate::resolve(ask)?;
     watch(&loc);
-    let fx = anim(call, part, &loc);
+    let (fx, _) = anim(call, part, &loc);
     let prior = loc.live.as_ref().filter(|l| !l.is_password()).and_then(|l| l.value());
     let r = match &loc.live {
         Some(l) => match l.set(value) {
@@ -194,12 +204,14 @@ pub(super) async fn element_action(ctx: &Ctx, args: &Value) -> Output {
             return Err(format!("{} was read off the pixels, so it is not a control that can be operated this way; use click", loc.desc).into());
         };
         let before = pace.before(Some(loc.point));
-        let fx = anim(&call, "a", &loc);
+        let (fx, zone) = anim(&call, "a", &loc);
         let r = live.act(&action, &value);
         fx.step(0, r.is_ok());
         fx.end(r.is_ok());
         let done = r?;
-        Ok(Did { done, change: pace.after_direct(before), hwnd: loc.scene, fresh: false, delivered: true })
+        let change = pace.after_direct(before);
+        drop_zone_if_gone(&call, zone);
+        Ok(Did { done, change, hwnd: loc.scene, fresh: false, delivered: true })
     })
     .await;
     drop(turn);

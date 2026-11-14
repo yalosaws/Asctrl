@@ -67,6 +67,35 @@ impl Fx {
     }
 }
 
+/// The area a click framed is gone (it was a popup the click closed, like a browser's translate bubble): the
+/// overlay lets the frame go now rather than after its usual linger. `zone` is the one sent at the start.
+pub fn zone_gone(call: &str, zone: Value) {
+    if call.is_empty() || zone.is_null() {
+        return;
+    }
+    emit(json!({ "phase": "step", "id": format!("{call}.gone"), "tool": "zone", "index": 0, "ok": true, "geo": { "zone": zone } }));
+}
+
+/// Watch the window a click was framed in for a moment after the click, and the moment it closes (a popup's
+/// close button, a dialog's OK) let the frame go with it. Polls on its own thread, so the action's reply never waits.
+pub fn zone_gone_when_closed(call: &str, hwnd: isize, zone: Value) {
+    if call.is_empty() || zone.is_null() {
+        return;
+    }
+    let call = call.to_string();
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(1500) {
+            // Hidden counts: a popup hides its window (after fading itself out) a moment before destroying it
+            if crate::winmgr::rect_of(hwnd).is_none() {
+                zone_gone(&call, zone);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+    });
+}
+
 /// A click-style animation at a screen point: the window it lands in is framed, a cursor flies there and
 /// presses. Returns right away.
 pub fn click(call: &str, part: &str, at: (i32, i32), count: u32, ok: bool) {

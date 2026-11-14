@@ -381,6 +381,8 @@ pub fn set_bounds(h: HWND, x: Option<i32>, y: Option<i32>, w: Option<i32>, hgt: 
 pub fn open(target: &str, args: &str, cwd: &str, wait: std::time::Duration) -> Result<Option<isize>, String> {
     let before: std::collections::HashSet<isize> = list().iter().map(|w| w.handle).collect();
     let fg0 = foreground();
+    // A URL opened in the browser that is already in front shows up only as a new tab: its title changes
+    let title0 = title_of(fg0);
     // Otherwise the new program's window would open behind the current one: take the right to set the
     // foreground, and pass it on to the program being launched
     unlock_foreground();
@@ -410,6 +412,9 @@ pub fn open(target: &str, args: &str, cwd: &str, wait: std::time::Duration) -> R
             return Some(w.handle);
         }
         let fg = foreground();
+        if fg != 0 && fg == fg0 && title_of(fg) != title0 {
+            return Some(fg);
+        }
         (fg != 0 && fg != fg0 && before.contains(&fg)).then_some(fg)
     };
     let start = std::time::Instant::now();

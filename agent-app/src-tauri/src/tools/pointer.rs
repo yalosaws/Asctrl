@@ -68,7 +68,8 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
         }
         let direct = loc.live.as_ref().is_some_and(|l| forced || (mode != "mouse" && plain && !l.is_web()));
         let before = pace.before(Some(loc.point));
-        let anim = Fx::start(&call, "a", "click", json!({ "count": count }), json!({ "at": fx::pt_json(loc.point), "zone": zone(loc.hwnd), "zoneIsWindow": true }));
+        let framed = zone(loc.hwnd);
+        let anim = Fx::start(&call, "a", "click", json!({ "count": count }), json!({ "at": fx::pt_json(loc.point), "zone": framed, "zoneIsWindow": true }));
         let mut done: Option<String> = None;
         let mut delivered = false;
         if direct && let Some(l) = &loc.live {
@@ -109,6 +110,7 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
         }
         anim.step(0, true);
         anim.end(true);
+        fx::zone_gone_when_closed(&call, loc.hwnd, framed);
         let change = if delivered { pace.after_direct(before) } else { pace.after(before) };
         Ok(Did { done: done.unwrap_or_default() + &loc.note, change, hwnd: loc.scene, fresh: false, delivered })
     })

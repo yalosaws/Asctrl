@@ -173,6 +173,9 @@ function zoneOf(rs: R[]): R {
   return { x, y, w: Math.min(m.x + m.w - 2, r.x + r.w) - x, h: Math.min(m.y + m.h - 2, r.y + r.h) - y };
 }
 
+/** Two frames this close are the same frame */
+const sameRect = (a: R, b: R) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.w - b.w) + Math.abs(a.h - b.h) < 8;
+
 /** Where the orb waits: centred above the zone, or below it when there is no room above, or inside its top edge */
 function zoneSpot(r: R): Pt {
   const work = monitorAt(center(r)).work;
@@ -188,7 +191,7 @@ function zoneSpot(r: R): Pt {
  * moves to a different area. Resolves once the orb is in place.
  */
 function frameZone(r: R, hug = false): Promise<void> {
-  const same = (a: R, b: R) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.w - b.w) + Math.abs(a.h - b.h) < 8;
+  const same = sameRect;
   if (zone) window.clearTimeout(zone.timer);
   if (zone && !same(zone.r, r)) {
     void zone.ol.out("fade", 300);
@@ -204,18 +207,29 @@ function frameZone(r: R, hug = false): Promise<void> {
 }
 
 /** Let the frame go a while after the last action in it (long enough to span the pause between steps), then send the orb home */
-function unframeLater(ms = 8000) {
+function unframeLater(ms = 8000, fadeMs = 420) {
   const z = zone;
   if (!z) return;
   window.clearTimeout(z.timer);
   z.timer = window.setTimeout(() => {
     if (zone !== z) return;
-    void z.ol.out("fade", 420);
+    void z.ol.out("fade", fadeMs);
     zone = null;
     if (active > 0) return;
     orb.setMood("idle");
     orb.goTo(home(), "slow");
   }, ms);
+}
+
+/** The area a click framed has gone (the popup it was in closed): let the frame go now, not after the linger.
+ *  Only the frame drawn round that area, in either form frameZone may have drawn it; a later action may already
+ *  have framed somewhere else. */
+function zoneGone(e: FxEvent) {
+  const r = rect(e.geo?.zone);
+  if (!zone || !r || !(sameRect(zone.r, r) || sameRect(zone.r, zoneOf([r])))) return;
+  // The popup has already faded itself out by the time its window hides (Edge's take ~170 ms), so the frame
+  // has nothing left to fade with: let it go at once
+  unframeLater(0, 60);
 }
 
 /** Clicks and element actions: the orb frames the area, flies over it, then sends a virtual cursor to each target.
@@ -653,6 +667,7 @@ export function fxStart(e: FxEvent) {
 /** One action of a click or element_action call has just really happened */
 export function fxStep(e: FxEvent) {
   if (e.tool === "focus_window") return winStep(e);
+  if (e.tool === "zone") return zoneGone(e);
   dispatchStep(e);
 }
 
