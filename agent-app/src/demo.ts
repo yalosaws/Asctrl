@@ -97,7 +97,7 @@ export async function runDemo(h: Hooks) {
     await sleep(800);
     await s("press_keys", { keys: "ctrl+s" }, {}, 600);
     await sleep(1200);
-    // Several controls at once: one virtual cursor each, the third one fails
+    // Several controls at once: the orb splits into one pointer each, the third one fails
     const f = (x: number, y: number) => [b[0] + b[2] * x, b[1] + b[3] * y];
     await s(
       "element_action",

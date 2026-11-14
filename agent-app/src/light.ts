@@ -141,6 +141,12 @@ export function strand(a: Pt, b: Pt, ms: number, color?: string) {
   return s;
 }
 
+/** A band of light crosses a panel once (the panel clips it) */
+export function sheen(host: HTMLElement, delay = 140) {
+  const s = el("i", "sheen", host);
+  void playOut(s, [{ transform: "translateX(-130%) skewX(-18deg)" }, { transform: "translateX(330%) skewX(-18deg)" }], { duration: 900, delay, easing: EASE.inOut });
+}
+
 // ---- Outline ----
 
 const RADIUS = 10;

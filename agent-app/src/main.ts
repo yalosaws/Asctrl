@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { center, hit, home, initGeo, isTauri, primary, setHome, snap, syncHits, type OverlayInfo } from "./geo";
 import { orb } from "./orb";
-import { bloom, ripple } from "./light";
+import { bloom, ripple, sheen } from "./light";
 import { collapse, expand, isShown, relayout as relayoutEdge } from "./edge";
 import { fxEnd, fxStart, fxStep, type FxEvent } from "./fx";
 import { EASE, play, sleep, SPRING } from "./motion";
@@ -101,6 +101,7 @@ function showPanel(p: HTMLElement, on: boolean, interactive = false) {
     sizes.set(p, { w: p.offsetWidth, h: p.offsetHeight });
     placePanel(p, prefer);
     play(p, [{ opacity: 0, transform: "scale(.6)" }, { opacity: 1, transform: "scale(1)" }], { spring: SPRING.pop, fill: "none" });
+    if (p !== menu) sheen(p, 260);
   } else {
     const a = play(p, [{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(.7)" }], { duration: 220, easing: EASE.in });
     a.finished.then(() => (p.hidden = true), () => (p.hidden = true));

@@ -164,11 +164,19 @@ pub(super) async fn scroll(ctx: &Ctx, args: &Value) -> Output {
         let horizontal = matches!(dir.as_str(), "left" | "right");
         let signed = if matches!(dir.as_str(), "down" | "right") { amount } else { -amount };
         let before = pace.before(Some(point));
-        let anim = Fx::start(&call, "a", "scroll", json!({ "amount": signed, "horizontal": horizontal }), json!({ "at": fx::pt_json(point) }));
+        // The scroll bar is drawn on what actually scrolls (or along the window's edge), showing where it is
+        let area = crate::uia::scroll_area_at(point.0, point.1, horizontal);
+        let edge = area.as_ref().map(|a| a.rect).or_else(|| hwnd.and_then(winmgr::rect_of));
+        let geo = json!({ "at": fx::pt_json(point), "area": edge.map(fx::rect_json), "pos": area.as_ref().and_then(|a| a.pos), "view": area.as_ref().and_then(|a| a.view) });
+        let anim = Fx::start(&call, "a", "scroll", json!({ "amount": signed, "horizontal": horizontal }), geo);
         let r = input::scroll(point.0, point.1, signed, horizontal);
-        anim.end(r.is_ok());
-        r?;
+        if let Err(e) = r {
+            anim.end(false);
+            return Err(e.into());
+        }
         let change = pace.after(before);
+        let now = area.is_some().then(|| crate::uia::scroll_area_at(point.0, point.1, horizontal)).flatten();
+        anim.end_with(true, json!({ "pos": now.and_then(|a| a.pos) }));
         let still = change.as_ref().is_some_and(|c| !c.changed);
         let hint = if still { " (if nothing moved, the view is already at its end, or the pointer is not over what scrolls)" } else { "" };
         Ok(Did { done: format!("Scrolled {dir} {amount} at {desc}{note}{hint}"), change, hwnd, fresh: false, delivered: false })

@@ -213,6 +213,26 @@ body.demo .fake-taskbar {
     opacity: 0.7;
   }
 }
+/* A wreath of all the colours turning slowly round the orb, so its glow is never one flat tint */
+.orb-aura {
+  position: absolute;
+  left: -34px;
+  top: -34px;
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  background: conic-gradient(var(--loop));
+  -webkit-mask-image: radial-gradient(closest-side, transparent 44%, rgba(0, 0, 0, 0.75) 54%, transparent 100%);
+  mask-image: radial-gradient(closest-side, transparent 44%, rgba(0, 0, 0, 0.75) 54%, transparent 100%);
+  opacity: 0.7;
+  transition: opacity 0.4s;
+  animation: orb-arc 9s linear infinite reverse;
+}
+#orb[data-mood="ask"] .orb-aura,
+#orb[data-mood="error"] .orb-aura,
+#orb[data-mood="offline"] .orb-aura {
+  opacity: 0;
+}
 /* Two arcs of light that circle the orb while busy */
 .orb-arc {
   position: absolute;
@@ -261,6 +281,20 @@ body.demo .fake-taskbar {
   inset: -5px;
   background: conic-gradient(var(--loop));
 }
+/* Soft highlights turning the other way inside the ball, so the light seems to churn */
+.orb-swirl {
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 28% 34%, rgba(255, 255, 255, 0.6), transparent 40%),
+    radial-gradient(circle at 74% 70%, rgba(255, 255, 255, 0.4), transparent 36%),
+    radial-gradient(circle at 70% 24%, rgba(40, 20, 110, 0.3), transparent 34%);
+  animation: orb-arc 6.5s linear infinite reverse;
+}
+#orb[data-mood="offline"] .orb-swirl {
+  animation-play-state: paused;
+}
 .orb-tint {
   position: absolute;
   inset: 0;
@@ -278,6 +312,380 @@ body.demo .fake-taskbar {
     radial-gradient(circle at 34% 27%, rgba(255, 255, 255, 0.9) 0, rgba(255, 255, 255, 0.22) 24%, transparent 46%),
     radial-gradient(circle at 62% 84%, rgba(24, 12, 70, 0.4), transparent 58%);
 }
+/* ---------------- The working body (body.ts) ----------------
+   While it works the orb hides and this box on springs takes its place: the same colour wheel under a white
+   rim as a ball, a gradient-ringed panel, a frame, a bar. Size and corners are set per frame by script. */
+/* The orb is drawn by the body: #orb keeps only its position, the click target and the admin tag */
+#orb .orb-tail,
+#orb .orb-float {
+  display: none;
+}
+#cards {
+  z-index: 19;
+}
+#body {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 18;
+  overflow: hidden;
+  pointer-events: none;
+  box-shadow:
+    0 0 26px rgba(150, 120, 255, 0.5),
+    0 4px 12px rgba(0, 0, 0, 0.3);
+  transition: box-shadow 0.4s;
+  will-change: transform;
+}
+#body[hidden] {
+  display: none;
+}
+#body > * {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+#body .bd-skin {
+  transition: opacity 0.35s;
+}
+#body .bd-wheel {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  border-radius: 50%;
+  background: conic-gradient(var(--loop));
+  animation: bd-spin 4.8s linear infinite;
+}
+@keyframes bd-spin {
+  to {
+    rotate: 1turn;
+  }
+}
+#body .bd-gloss {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 90% at 30% 22%, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.08) 38%, transparent 55%),
+    radial-gradient(90% 80% at 70% 90%, rgba(20, 10, 60, 0.3), transparent 60%);
+}
+#body .bd-glass {
+  background: rgba(13, 14, 22, 0.95);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+#body .bd-ring {
+  padding: 2.5px;
+  background: conic-gradient(from 200deg, var(--loop));
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+#body .bd-rim {
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.92);
+  transition: opacity 0.3s;
+}
+#body .bd-tint {
+  background: #ff4d63;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+#body.err .bd-tint {
+  opacity: 0.78;
+}
+/* Moods tint the ball the way they tinted the old orb */
+#body[data-mood="focus"] .bd-tint {
+  background: #8fe6ff;
+  opacity: 0.28;
+}
+#body[data-mood="ask"] .bd-tint {
+  background: #ffab3d;
+  opacity: 0.72;
+}
+#body[data-mood="happy"] .bd-tint {
+  background: #45e3ae;
+  opacity: 0.6;
+}
+#body[data-mood="error"] .bd-tint {
+  background: #ff4d63;
+  opacity: 0.86;
+}
+#body[data-mood="offline"] .bd-tint {
+  background: #7d8296;
+  opacity: 0.94;
+}
+#body[data-mood="offline"] .bd-wheel {
+  animation-play-state: paused;
+}
+#body[data-mood="ask"] {
+  box-shadow:
+    0 0 26px rgba(255, 176, 64, 0.65),
+    0 4px 12px rgba(0, 0, 0, 0.3);
+}
+#body[data-mood="happy"] {
+  box-shadow:
+    0 0 26px rgba(91, 224, 200, 0.6),
+    0 4px 12px rgba(0, 0, 0, 0.3);
+}
+#body[data-mood="error"] {
+  box-shadow:
+    0 0 26px rgba(255, 90, 110, 0.65),
+    0 4px 12px rgba(0, 0, 0, 0.3);
+}
+#body[data-mood="offline"] {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+/* Busy, waiting or thinking: the colours turn faster and the glow breathes */
+#body.busy[data-mode="ball"] {
+  animation: bd-breathe 1.2s ease-in-out infinite alternate;
+}
+@keyframes bd-breathe {
+  to {
+    box-shadow:
+      0 0 38px rgba(179, 107, 255, 0.85),
+      0 4px 12px rgba(0, 0, 0, 0.3);
+  }
+}
+#body.ok {
+  box-shadow:
+    0 0 34px rgba(91, 224, 200, 0.85),
+    0 4px 12px rgba(0, 0, 0, 0.3);
+}
+#body .bd-content {
+  inset: auto;
+  left: 0;
+  top: 0;
+  border-radius: 0;
+  opacity: 0;
+  transition: opacity 0.25s;
+}
+#body[data-mode="panel"] .bd-skin,
+#body[data-mode="light"] .bd-skin,
+#body[data-mode="ring"] .bd-skin {
+  opacity: 0;
+  transition-delay: 0.08s;
+}
+#body[data-mode="panel"] .bd-glass,
+#body[data-mode="light"] .bd-glass {
+  opacity: 1;
+}
+/* The work panel is white: the body opens out into a white card of the same size, then the panel fades in over it */
+#body[data-mode="light"] .bd-glass {
+  background: #fff;
+}
+#body[data-mode="panel"] .bd-ring,
+#body[data-mode="light"] .bd-ring,
+#body[data-mode="ring"] .bd-ring {
+  opacity: 1;
+}
+#body[data-mode="panel"] .bd-rim,
+#body[data-mode="light"] .bd-rim,
+#body[data-mode="ring"] .bd-rim {
+  opacity: 0;
+}
+#body[data-mode="panel"] .bd-content {
+  opacity: 1;
+  transition: opacity 0.3s 0.32s;
+}
+#body[data-mode="ring"] .bd-content,
+#body[data-mode="capsule"] .bd-content,
+#body[data-mode="bar"] .bd-content {
+  opacity: 1;
+}
+#body[data-mode="ring"] {
+  box-shadow: 0 0 34px rgba(150, 120, 255, 0.35);
+}
+#body[data-mode="panel"],
+#body[data-mode="light"] {
+  box-shadow:
+    0 22px 60px rgba(0, 0, 0, 0.35),
+    0 0 40px rgba(130, 110, 255, 0.22);
+}
+
+/* What the body carries */
+.bd-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 100%;
+  padding: 0 14px;
+  font: 500 15px var(--mono);
+  color: #eef0fa;
+  white-space: pre;
+}
+.bd-strip .txt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  justify-content: flex-end;
+}
+.bd-strip .txt::after {
+  content: "";
+  flex: none;
+  width: 2px;
+  height: 17px;
+  margin-left: 2px;
+  align-self: center;
+  border-radius: 1px;
+  background: linear-gradient(var(--g1), var(--g3));
+  animation: bd-blink 1s steps(1) infinite;
+}
+.bd-strip .txt span {
+  white-space: pre;
+}
+.bd-strip .caps {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.bd-strip kbd {
+  min-width: 28px;
+  padding: 3px 7px 4px;
+  border-radius: 6px;
+  text-align: center;
+  background: linear-gradient(#2c2e44, #1b1c2b);
+  box-shadow:
+    inset 0 -2px 0 rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  font: 600 12px var(--font);
+  color: #eef0fa;
+  transition: transform 0.08s;
+}
+.bd-strip kbd.dn {
+  transform: translateY(2px) scale(0.92);
+}
+.bd-strip .plus {
+  color: #747892;
+  font: 12px var(--font);
+}
+@keyframes bd-blink {
+  50% {
+    opacity: 0;
+  }
+}
+.bd-thumb {
+  position: absolute;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
+}
+.bd-sheen {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 60px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.85), transparent);
+  animation: bd-sheen 1.1s cubic-bezier(0.6, 0, 0.4, 1) infinite;
+}
+@keyframes bd-sheen {
+  from {
+    transform: translateX(-70px);
+  }
+  to {
+    transform: translateX(260px);
+  }
+}
+.bd-corners {
+  position: absolute;
+  inset: 6px;
+}
+.bd-corners i {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2.5px solid #fff;
+}
+.bd-corners i:nth-child(1) {
+  left: 0;
+  top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  border-radius: 4px 0 0 0;
+}
+.bd-corners i:nth-child(2) {
+  right: 0;
+  top: 0;
+  border-left: 0;
+  border-bottom: 0;
+  border-radius: 0 4px 0 0;
+}
+.bd-corners i:nth-child(3) {
+  left: 0;
+  bottom: 0;
+  border-right: 0;
+  border-top: 0;
+  border-radius: 0 0 0 4px;
+}
+.bd-corners i:nth-child(4) {
+  right: 0;
+  bottom: 0;
+  border-left: 0;
+  border-top: 0;
+  border-radius: 0 0 4px 0;
+}
+.bd-flash {
+  position: absolute;
+  inset: 0;
+  background: #fff;
+  opacity: 0;
+}
+
+/* Pointers split off the orb, and the liquid they split and merge through */
+#ptrs {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 21;
+  overflow: visible;
+  pointer-events: none;
+}
+.ptr-under {
+  fill: rgba(12, 10, 32, 0.4);
+  stroke: rgba(12, 10, 32, 0.4);
+  stroke-width: 4.6;
+  stroke-linejoin: round;
+}
+.ptr-body {
+  stroke: #fff;
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+#goo {
+  position: fixed;
+  z-index: 21;
+  pointer-events: none;
+  filter: url(#goo-f);
+}
+#goo[hidden] {
+  display: none;
+}
+.goo-blob,
+.goo-drop {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 50%;
+}
+.goo-blob {
+  width: 32px;
+  height: 32px;
+  margin: -16px 0 0 -16px;
+  background: conic-gradient(var(--loop));
+}
+.goo-drop {
+  width: 20px;
+  height: 20px;
+  margin: -10px 0 0 -10px;
+}
+
 #orb-hit {
   position: absolute;
   left: -32px;
@@ -410,7 +818,7 @@ body.demo .fake-taskbar {
 @keyframes digit-in {
   from {
     opacity: 0;
-    transform: translateY(16px) scale(0.8);
+    transform: perspective(240px) translateY(18px) rotateX(-85deg) scale(0.8);
   }
 }
 
@@ -593,6 +1001,18 @@ body:not([data-state="connected"]) #btn-end {
     0 0 30px rgba(150, 120, 255, 0.45);
   will-change: transform, opacity;
 }
+/* A band of light that crosses a panel once as it opens */
+.sheen {
+  position: absolute;
+  left: 0;
+  top: -10%;
+  width: 45%;
+  height: 120%;
+  z-index: 5;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(91, 140, 255, 0.16), rgba(179, 107, 255, 0.24), rgba(255, 122, 182, 0.22), rgba(255, 184, 107, 0.14), transparent);
+  will-change: transform;
+}
 .hold,
 .streaks,
 .aim {
@@ -654,109 +1074,6 @@ body:not([data-state="connected"]) #btn-end {
   box-shadow: 0 0 10px rgba(179, 107, 255, 0.7);
 }
 
-/* Virtual cursor: a drop of one orb colour (--c) flung off the rim that turns into a pointer.
-   root carries the position, drop and body their own scale and turn */
-.vcursor {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 0;
-  height: 0;
-  will-change: transform, opacity;
-}
-.vc-drop {
-  position: absolute;
-  left: -6px;
-  top: -6px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 35%, #fff 0 18%, var(--c) 52%);
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.7),
-    0 0 14px var(--c);
-  will-change: transform, opacity;
-}
-.vc-body {
-  position: absolute;
-  left: 0;
-  top: 0;
-  transform-origin: 0 0;
-  will-change: transform, opacity;
-}
-/* A soft shadow under the pointer and a faint glow of its colour (static, moved by the compositor) */
-.vc-body::before {
-  content: "";
-  position: absolute;
-  left: -6px;
-  top: -2px;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 50% 50%, rgba(10, 8, 30, 0.34), rgba(10, 8, 30, 0.12) 45%, transparent 70%);
-  transform: translate(3px, 4px);
-}
-.vc-body::after {
-  content: "";
-  position: absolute;
-  left: -10px;
-  top: -10px;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: radial-gradient(circle, color-mix(in srgb, var(--c) 30%, transparent), transparent 64%);
-  z-index: -1;
-}
-.vc-body svg {
-  position: absolute;
-  left: -6px;
-  top: -6px;
-  overflow: visible;
-}
-.vc-body path {
-  stroke-linejoin: round;
-}
-/* A dark hairline outside the white rim keeps the pointer visible on white windows */
-.vc-line {
-  fill: rgba(16, 12, 40, 0.3);
-  stroke: rgba(16, 12, 40, 0.3);
-  stroke-width: 6.4;
-}
-.vc-rim {
-  fill: #fff;
-  stroke: #fff;
-  stroke-width: 5;
-}
-.vc-fill {
-  stroke-width: 1.6;
-}
-.vc-gloss {
-  stroke: none;
-}
-/* Where a cursor is pressing: a soft disc of its colour with a bright centre, breathing gently */
-.vc-contact {
-  position: absolute;
-  width: 0;
-  height: 0;
-}
-.vc-contact::before {
-  content: "";
-  position: absolute;
-  left: -11px;
-  top: -11px;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: radial-gradient(circle, #fff 0 14%, color-mix(in srgb, var(--c) 70%, transparent) 30%, color-mix(in srgb, var(--c) 18%, transparent) 62%, transparent 72%);
-  animation: vc-breathe 1.1s ease-in-out infinite alternate;
-}
-@keyframes vc-breathe {
-  to {
-    transform: scale(1.35);
-    opacity: 0.7;
-  }
-}
-/* Name tag: a small pill hanging off the pointer, square at the corner nearest the tip */
 /* Outline */
 .ol {
   position: absolute;
@@ -1134,7 +1451,10 @@ body:not([data-state="connected"]) #btn-end {
 
 @media (prefers-reduced-motion: reduce) {
   .orb-float,
-  .orb-halo {
+  .orb-halo,
+  .orb-aura,
+  .orb-swirl,
+  .bd-wheel {
     animation: none;
   }
 }

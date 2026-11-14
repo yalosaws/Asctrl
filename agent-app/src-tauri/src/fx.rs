@@ -63,7 +63,12 @@ impl Fx {
     }
 
     pub fn end(self, ok: bool) {
-        emit(json!({ "phase": "end", "id": self.id, "tool": self.tool, "ok": ok, "text": "", "geo": {} }));
+        self.end_with(ok, json!({}));
+    }
+
+    /// Ended, with where things stand now (e.g. a scroll's new position)
+    pub fn end_with(self, ok: bool, geo: Value) {
+        emit(json!({ "phase": "end", "id": self.id, "tool": self.tool, "ok": ok, "text": "", "geo": geo }));
     }
 }
 

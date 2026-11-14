@@ -5,7 +5,7 @@
 
 import { dock, home, primary, snap, type Pt, type R } from "./geo";
 import { orb } from "./orb";
-import { bloom } from "./light";
+import { bloom, sheen } from "./light";
 import { done, EASE, el, play, playOut, sleep, SPRING } from "./motion";
 
 const layer = document.getElementById("cards") as HTMLDivElement;
@@ -63,13 +63,29 @@ function origin(p: Pt) {
   return `${h.x - p.x}px ${h.y - p.y}px`;
 }
 
+// ---- Opening out of the orb ----
+// The orb's body (body.ts) opens out into the panel's rectangle and the panel fades in over it; when the panel
+// closes it fades away over the body, which closes back into the ball. If the body is busy elsewhere the panel
+// unfolds from the orb's home on its own, as before.
+
+export interface PanelHooks {
+  /** Resolves true once something stands exactly where the panel will be, false to open on its own */
+  open(r: R): Promise<boolean>;
+  /** True when something takes over the closing (the panel then only fades) */
+  close(r: R): boolean;
+}
+let hooks: PanelHooks | null = null;
+export function setPanelHooks(h: PanelHooks) {
+  hooks = h;
+}
+
 function open() {
   window.clearTimeout(closeTimer);
-  orb.goTo(home(), "fast");
   if (root) return;
   const p = place();
   root = el("div", "deck", layer);
   Object.assign(root.style, { left: `${p.x}px`, top: `${p.y}px`, width: `${W}px`, height: `${H}px`, transformOrigin: origin(p) });
+  const shell = root;
 
   // The terminal has no title bar or icon; the first line is the command
   const term = el("div", "deck-view term", root);
@@ -79,8 +95,21 @@ function open() {
   term.style.opacity = file.style.opacity = "0";
   active = null;
 
-  play(root, [{ transform: "scale(.05)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }], { spring: SPRING.pop });
-  orb.bump(0.7);
+  // Hidden until the body has opened out where it goes; the content can already go in meanwhile
+  shell.style.opacity = "0";
+  const unfold = (fromBody: boolean) => {
+    if (root !== shell) return;
+    shell.style.opacity = "";
+    if (fromBody) play(shell, [{ opacity: 0 }, { opacity: 1 }], { duration: 200 });
+    else {
+      orb.goTo(home(), "fast");
+      play(shell, [{ transform: "scale(.05)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }], { spring: SPRING.pop });
+      orb.bump(0.7);
+    }
+    sheen(shell, fromBody ? 80 : 220);
+  };
+  if (hooks) void hooks.open({ x: p.x, y: p.y, w: W, h: H }).then(unfold, () => unfold(false));
+  else unfold(false);
 }
 
 function show(v: View) {
@@ -101,6 +130,9 @@ function scheduleClose(ms: number) {
     if (!w) return;
     root = views = termBody = null;
     active = current = null;
+    const p = place();
+    // The body under the panel takes the closing: the panel fades off it and it closes back into the ball
+    if (hooks?.close({ x: p.x, y: p.y, w: W, h: H })) return void playOut(w, [{ opacity: 1 }, { opacity: 0 }], { duration: 220 });
     void playOut(w, [{ transform: "scale(1)", opacity: 1 }, { transform: "scale(.05)", opacity: 0 }], { duration: 420, easing: "cubic-bezier(.6,0,.7,.2)" }).then(() => {
       orb.bump(0.9);
       bloom(orb.pos, { size: 130, ms: 560 });

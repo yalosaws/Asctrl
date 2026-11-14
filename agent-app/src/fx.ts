@@ -1,17 +1,17 @@
 // One animation per tool call. `start` fires when the tool begins, `end` when its result arrives.
 // The orb ties consecutive actions together: it is one continuously moving object that flies from
-// the last spot straight to the next, never teleporting.
-// If the result arrives before the start animation lands, the end animation waits for it (see `ready`).
+// the last spot straight to the next, never teleporting, and while it works it becomes the thing doing
+// the work (body.ts): pointers it splits into, a strip it types in, a frame round a window, the panel.
 
 import { invoke } from "@tauri-apps/api/core";
-import { center, home, isTauri, monitorAt, monitors, primary, pt, rect, type Pt, type R } from "./geo";
+import { center, home, isTauri, monitorAt, monitors, pt, rect, type Pt, type R } from "./geo";
 import { orb } from "./orb";
 import { toolEnded, toolStarted } from "./think";
-import { Cursor } from "./cursor";
-import { bloom, capture, dart, hold, Outline, ripple, streaks, sweep, type Tone } from "./light";
+import { BALL, beat, body, busy, DROP_AT, holdUntil, job, keep, more, tempo, type Pointer } from "./body";
+import { bloom, dart, Outline, ripple, strand } from "./light";
 import { breathe, pulse } from "./edge";
-import { closeCard, deckRect, fillEntries, fillLines, openCard, progress, scan, skeleton, termEnd, termStart, type Card } from "./panel";
-import { el, fadeOut, play, sleep, SPRING } from "./motion";
+import { closeCard, deckRect, fillEntries, fillLines, openCard, progress, scan, setPanelHooks, skeleton, termEnd, termStart, type Card } from "./panel";
+import { el, fadeOut, play, sleep, SPRING, tween } from "./motion";
 
 export interface FxEvent {
   phase: "start" | "step" | "end";
@@ -48,51 +48,64 @@ let errorTimer: number | undefined;
 /** How long a failure keeps the orb red */
 const ERROR_MS = 1600;
 
+/** Red is a short flash, not a state */
+function flashError() {
+  orb.setMood("error");
+  window.clearTimeout(errorTimer);
+  errorTimer = window.setTimeout(() => {
+    if (orb.currentMood === "error") orb.setMood(active > 0 ? "work" : "idle");
+  }, ERROR_MS);
+}
+
+function goHomeWhenFree() {
+  // While a work area is framed, or the body still has work queued, the orb stays
+  if (active > 0 || zone) return;
+  if (busy()) return void (homeTimer = window.setTimeout(goHomeWhenFree, 600));
+  orb.setMood("idle");
+  orb.goTo(home(), "slow");
+}
+
 function release(ok = true, delay = 1500) {
   active = Math.max(0, active - 1);
-  if (!ok) {
-    // Red is a short flash, not a state: the frame and the trip home can wait several seconds, the colour doesn't
-    orb.setMood("error");
-    window.clearTimeout(errorTimer);
-    errorTimer = window.setTimeout(() => {
-      if (orb.currentMood === "error") orb.setMood(active > 0 ? "work" : "idle");
-    }, ERROR_MS);
-  }
+  if (!ok) flashError();
   window.clearTimeout(homeTimer);
-  homeTimer = window.setTimeout(() => {
-    // While a work area is framed the orb waits over it; it goes home when the frame goes
-    if (active > 0 || zone) return;
-    orb.setMood("idle");
-    orb.goTo(home(), "slow");
-  }, delay);
+  homeTimer = window.setTimeout(goHomeWhenFree, delay);
 }
-
-/** Fly next to a target point (without covering it) */
-function near(p: Pt, speed: "normal" | "fast" = "fast") {
-  const work = monitorAt(p).work;
-  const dx = p.x + 80 > work.x + work.w ? -52 : 52;
-  const dy = p.y + 80 > work.y + work.h ? -46 : 46;
-  orb.goTo({ x: p.x + dx, y: p.y + dy }, speed);
-}
-
-/** When each start animation lands; the end animation waits for it */
-const ready = new Map<string, Promise<void>>();
-const whenReady = (id: string) => {
-  const p = ready.get(id) ?? Promise.resolve();
-  ready.delete(id);
-  return p;
-};
 
 /** The orb takes something in */
 function swallow() {
   orb.bump(1.2);
   bloom(orb.pos, { size: 150, ms: 620 });
-  ripple(orb.pos, { size: 50, ms: 560 });
 }
 
-// ---- Screenshot ----
+// ---- Results the body waits on ----
 
-const shots = new Map<string, { stop: (() => void)[]; ol?: Outline }>();
+/** Each call's result, for jobs that wait on it */
+const ends = new Map<string, { p: Promise<FxEvent>; r: (e: FxEvent) => void }>();
+function endOf(id: string): Promise<FxEvent> {
+  let d = ends.get(id);
+  if (!d) {
+    let r!: (e: FxEvent) => void;
+    const p = new Promise<FxEvent>((res) => (r = res));
+    ends.set(id, (d = { p, r }));
+  }
+  return d.p;
+}
+
+/** Where a pointer last clicked and when: typing that follows opens right below it */
+let lastPoint: Pt | null = null;
+let lastAt = 0;
+
+/** Keep a point inside its monitor's work area, `m` pixels in */
+function inside(p: Pt, m = 30): Pt {
+  const w = monitorAt(p).work;
+  return { x: Math.min(w.x + w.w - m, Math.max(w.x + m, p.x)), y: Math.min(w.y + w.h - m, Math.max(w.y + m, p.y)) };
+}
+
+/** Fly the ball (as a ball) to p */
+const fly = (p: Pt) => body.to({ cx: p.x, cy: p.y, ...BALL }, { cx: 170, cy: 170, w: 220, h: 220, r: 220 }, 0.82);
+
+// ---- Screenshot ----
 
 function shotRegions(args: Record<string, unknown>): R[] {
   const d = num(args.display);
@@ -107,45 +120,34 @@ function screenshotEnd(e: FxEvent) {
   breathe(shot ? [shot] : shotRegions(e.args ?? {}));
 }
 
-// ---- Zoom ----
+// ---- Zoom: the ball opens into a viewfinder round the area, flashes, and closes back round what it saw ----
 
 function zoomStart(e: FxEvent) {
   const a = pt(e.geo?.from);
   const b = pt(e.geo?.to);
   if (!a || !b) return;
-  const r: R = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
-  near({ x: r.x + r.w, y: r.y + r.h });
-  const ol = new Outline(r).popIn().trace(620);
-  shots.set(e.id, { stop: [sweep(r, { loop: true })], ol });
+  const r: R = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.max(24, Math.abs(a.x - b.x)), h: Math.max(24, Math.abs(a.y - b.y)) };
   orb.setMood("focus");
-  ready.set(e.id, sleep(560));
-}
-
-async function zoomEnd(e: FxEvent) {
-  const s = shots.get(e.id);
-  shots.delete(e.id);
-  await whenReady(e.id);
-  s?.stop.forEach((f) => f());
-  const ol = s?.ol;
-  if (!ol) return;
-  if (!e.ok) {
-    ol.shake();
-    void ol.out("fade", 400, 500);
-    return;
-  }
-  void ol.out("sink", 420);
-  await capture(ol.r, () => orb.pos, { ms: 640 });
-  swallow();
+  const end = endOf(e.id);
+  void job(async () => {
+    await fly({ x: r.x + r.w, y: r.y + r.h });
+    body.content(r.w, r.h, '<div class="bd-corners"><i></i><i></i><i></i><i></i></div><div class="bd-flash"></div>');
+    await body.open(r, "ring", 10);
+    const res = await Promise.race([end, holdUntil(end, 15_000).then(() => null)]);
+    if (res && !res.ok) return body.flash("err", 900);
+    body.content(r.w, r.h).querySelector(".bd-flash")?.animate([{ opacity: 0.85 }, { opacity: 0 }], { duration: 420, easing: "ease-out" });
+    await beat(380);
+    await body.ball(center(r));
+    body.kick("w", 320);
+    body.kick("h", 320);
+    await beat(200);
+  });
 }
 
 // ---- Mouse ----
 
-let holdMark: HTMLElement | null = null;
-const TONE = (b: string): Tone => (b === "right" ? "warm" : b === "middle" ? "mint" : "aurora");
-
-/** Virtual cursors out for each call, by action index (an action with nothing to point at has none), with their
- *  flights and which of them have pressed */
-const sent = new Map<string, { cursors: (Cursor | null)[]; flights: Promise<void>[]; pressed: Set<number>; count: number }>();
+/** What each click call is waiting to hear, per action: true pressed, false failed, null never ran */
+const sent = new Map<string, { outcome: { p: Promise<boolean | null>; r: (v: boolean | null) => void }[] }>();
 
 // ---- Work zone: the area being operated on, framed while the orb works there ----
 
@@ -176,34 +178,26 @@ function zoneOf(rs: R[]): R {
 /** Two frames this close are the same frame */
 const sameRect = (a: R, b: R) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.w - b.w) + Math.abs(a.h - b.h) < 8;
 
-/** Where the orb waits: centred above the zone, or below it when there is no room above, or inside its top edge */
-function zoneSpot(r: R): Pt {
-  const work = monitorAt(center(r)).work;
-  const x = Math.min(work.x + work.w - 30, Math.max(work.x + 30, r.x + r.w / 2));
-  if (r.y - 34 >= work.y + 24) return { x, y: r.y - 34 };
-  if (r.y + r.h + 34 <= work.y + work.h - 24) return { x, y: r.y + r.h + 34 };
-  return { x, y: r.y + 30 };
-}
-
 /**
- * Frame the area being worked on (where all the window's operable controls are) and bring the orb over it.
- * The frame is drawn once and stays put while actions keep landing in it; it is only redrawn when the work
- * moves to a different area. Resolves once the orb is in place.
+ * Frame the area being worked on (where all the window's operable controls are). The frame is drawn once and
+ * stays put while actions keep landing in it; it is only redrawn when the work moves to a different area.
  */
-function frameZone(r: R, hug = false): Promise<void> {
-  const same = sameRect;
+function frameZone(r: R, hug = false) {
   if (zone) window.clearTimeout(zone.timer);
-  if (zone && !same(zone.r, r)) {
+  if (zone && !sameRect(zone.r, r)) {
     void zone.ol.out("fade", 300);
     zone = null;
   }
   // Around a whole window the ring overlaps its edge by 1.5 px (the ring is 2.5 wide), so rounding to device
   // pixels can never open a gap between them; around a group of controls it has room
   if (!zone) zone = { r, ol: new Outline(r, "", hug ? 1 : 3).popIn().trace(560) };
-  const spot = zoneSpot(zone.r);
-  const far = Math.hypot(orb.pos.x - spot.x, orb.pos.y - spot.y) > 24;
-  orb.goTo(spot, "fast");
-  return far ? sleep(80) : Promise.resolve();
+}
+
+/** The frame the agent gave (the work area or the window), or one round the given points */
+function frameFor(e: FxEvent, points: Pt[]) {
+  const given = rect(e.geo?.zone);
+  if (given && e.geo?.zoneIsWindow === true) frameZone(given, true);
+  else frameZone(given ? zoneOf([given]) : zoneOf(points.map((p) => ({ x: p.x, y: p.y, w: 0, h: 0 }))));
 }
 
 /** Let the frame go a while after the last action in it (long enough to span the pause between steps), then send the orb home */
@@ -215,9 +209,7 @@ function unframeLater(ms = 8000, fadeMs = 420) {
     if (zone !== z) return;
     void z.ol.out("fade", fadeMs);
     zone = null;
-    if (active > 0) return;
-    orb.setMood("idle");
-    orb.goTo(home(), "slow");
+    goHomeWhenFree();
   }, ms);
 }
 
@@ -232,231 +224,466 @@ function zoneGone(e: FxEvent) {
   unframeLater(0, 60);
 }
 
-/** Clicks and element actions: the orb frames the area, flies over it, then sends a virtual cursor to each target.
- *  The agent holds each real click until its cursor has landed (landed() tells it), then reports the click as a
- *  step event, and that cursor presses right then: what is drawn happens when the click does. */
+/** The pointer presses (count times) once its action has happened, or shakes red if it failed */
+async function pressAt(p: Pointer, outcome: Promise<boolean | null>, count: number) {
+  // Normally the action has happened already; a slow one gets a few seconds before the press is drawn anyway
+  const r = await Promise.race([outcome, sleep(5000).then(() => true)]);
+  if (r === null) return;
+  lastPoint = { x: p.x, y: p.y };
+  lastAt = performance.now();
+  if (!r) {
+    flashError();
+    ripple({ x: p.x, y: p.y }, { size: 30, ms: 520, tone: "red" });
+    return p.fail();
+  }
+  for (let i = 0; i < count; i++) {
+    ripple({ x: p.x, y: p.y }, { size: 28, ms: 480, to: 1.7 + i * 0.3 });
+    await p.press();
+  }
+}
+
+/** Clicks and element actions: the ball flies over the targets, splits into one pointer per target, each
+ *  presses as its action happens, and they all run back together into the ball. */
 function dispatchStart(e: FxEvent) {
   const targets = Array.isArray(e.geo?.targets) ? (e.geo.targets as unknown[]).map(pt) : [pt(e.geo?.at)];
-  if (!targets.some(Boolean)) {
-    // Nothing to fly to: let every step go at once
-    targets.forEach((_, i) => landed(e.id, i));
-    return;
-  }
-  // The agent says where the work area is (all operable controls, or the window a click lands in);
-  // failing that, frame just the targets
-  const given = rect(e.geo?.zone);
-  const inPlace = given && e.geo?.zoneIsWindow === true ? frameZone(given, true) : frameZone(given ? zoneOf([given]) : zoneOf(targets.flatMap((p) => (p ? [{ x: p.x, y: p.y, w: 0, h: 0 }] : []))));
-  // In a sequence the cursors leave one after another, in step order; otherwise all together
-  const stagger = isSequence(e) ? SEQ_LAUNCH_MS : 0;
-  // The orb spins up on the way and flings each cursor off its rim as its colour comes round
-  orb.whirl(1000 + targets.length * Math.max(120, stagger));
-  const cursors = targets.map((p) => (p ? new Cursor() : null));
-  const flights = cursors.map((c, i) => {
-    const flight = c ? inPlace.then(() => sleep(i * stagger)).then(() => c.go(targets[i]!)) : Promise.resolve();
-    void flight.then(() => landed(e.id, i));
-    return flight;
+  const outcome = targets.map(() => {
+    let r!: (v: boolean | null) => void;
+    const p = new Promise<boolean | null>((res) => (r = res));
+    return { p, r };
   });
-  sent.set(e.id, { cursors, flights, pressed: new Set(), count: Math.max(1, Math.min(3, num(e.args?.count, 1))) });
+  sent.set(e.id, { outcome });
+  const aimed = targets.flatMap((p, i) => (p ? [{ p, i }] : []));
+  // A typing call was waiting for this click to focus its field: it queues up right behind it
+  const typing = e.id.endsWith(".f") ? focusing.get(e.id.slice(0, -2)) : undefined;
+  if (!aimed.length) return typing?.();
+  frameFor(
+    e,
+    aimed.map((a) => a.p),
+  );
+  const count = Math.max(1, Math.min(3, num(e.args?.count, 1)));
+  void job(async () => {
+    const xs = aimed.map((a) => a.p.x);
+    const gather = inside({ x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.min(...aimed.map((a) => a.p.y)) - 64 });
+    await fly(gather);
+    const ps = await body.split(aimed.map((a) => a.p));
+    await Promise.all(ps.map((p, k) => pressAt(p, outcome[aimed[k].i].p, count)));
+    await beat(more() ? 80 : 260);
+    // More work waiting: the pointers run together where the last one is, so the next shape starts right there
+    const last = ps[ps.length - 1];
+    await body.merge(ps, more() ? { x: last.x + DROP_AT.x, y: last.y + DROP_AT.y } : gather);
+    unframeLater();
+  });
+  typing?.();
 }
 
-/** In a sequence, how far apart the cursors leave the orb */
-const SEQ_LAUNCH_MS = 90;
-const isSequence = (e: FxEvent) => e.args?.sequence === true && Array.isArray(e.args?.actions);
-
-function landed(id: string, index: number) {
-  if (isTauri) void invoke("fx_landed", { id, index }).catch(() => {});
-}
-
-/** The agent has just carried out step `index`: its cursor presses now (or flashes red) */
+/** The agent has just carried out step `index` */
 function dispatchStep(e: FxEvent) {
-  const call = sent.get(e.id);
   const i = num(e.index, -1);
-  const c = call?.cursors[i];
-  if (!call || !c || call.pressed.has(i)) return;
-  call.pressed.add(i);
-  // Normally it has landed already; if the agent stopped waiting for it, press once it gets there
-  void call.flights[i].then(() => c.finish(!!e.ok, call.count));
+  sent.get(e.id)?.outcome[i]?.r(!!e.ok);
 }
 
-async function dispatchEnd(e: FxEvent) {
+function dispatchEnd(e: FxEvent) {
   const call = sent.get(e.id);
   sent.delete(e.id);
   if (!call) return;
-  // Steps already pressed as they happened. What is left never ran: skipped after a failure in a sequence, or the
-  // whole call failed before acting. A batch reports each action on its own line ("2. ✗ …", "3. – skipped")
+  // Steps already reported their outcome as they happened. What is left never ran (skipped after a failure in a
+  // sequence) or the whole call failed before acting. A batch reports each action on its own line.
   const marks = (re: RegExp) => new Set([...(e.text ?? "").matchAll(re)].map((m) => Number(m[1]) - 1));
   const failed = marks(/^(\d+)\. ✗/gm);
   const skipped = marks(/^(\d+)\. – skipped/gm);
   const perStep = Array.isArray(e.args?.actions) && (e.ok || failed.size + skipped.size > 0);
-  await Promise.all(
-    call.cursors.map(async (c, i) => {
-      if (!c || call.pressed.has(i)) return;
-      await call.flights[i];
-      if (skipped.has(i)) return void c.cancel();
-      // No step event came for it (an agent without pacing, the demo): press it now with its own outcome
-      return void c.finish(perStep ? !failed.has(i) : !!e.ok, call.count);
-    }),
-  );
-  unframeLater();
+  call.outcome.forEach((o, i) => o.r(skipped.has(i) ? null : perStep ? !failed.has(i) : !!e.ok));
+}
+
+/** A pointer that stays out between mouse_down and mouse_up */
+let held: Pointer | null = null;
+
+async function pointTo(p: Pt): Promise<Pointer> {
+  if (held) {
+    await held.moveTo(p, 300);
+    return held;
+  }
+  await fly({ x: p.x + 40, y: p.y + 40 });
+  const ptr = await body.pointer();
+  await ptr.moveTo(p, Math.min(520, Math.max(240, Math.hypot(ptr.x - p.x, ptr.y - p.y) * 1.2)));
+  return ptr;
 }
 
 function moveStart(e: FxEvent) {
   const p = pt(e.geo?.at);
   if (!p) return;
-  near(p);
-  ripple(p, { size: 26, ms: 520, from: 1.8, to: 0.5 });
+  void job(async () => {
+    const ptr = await pointTo(p);
+    lastPoint = p;
+    lastAt = performance.now();
+    if (ptr === held) return;
+    await beat(320);
+    await body.unpointer(ptr);
+  });
 }
 
+/** Button held: the pointer stays out, pressed, until the button comes up */
 function downStart(e: FxEvent) {
   const p = pt(e.geo?.at);
   if (!p) return;
-  near(p);
-  holdMark?.remove();
-  holdMark = hold(p, TONE(str(e.args?.button)));
+  keep(true);
+  void job(async () => {
+    const ptr = await pointTo(p);
+    ripple(p, { size: 26, ms: 420, from: 1.6, to: 0.6 });
+    await ptr.hold(true);
+    held = ptr;
+  });
 }
 
 function upStart(e: FxEvent) {
   const p = pt(e.geo?.at);
-  if (holdMark) void fadeOut(holdMark, 320, { transform: "scale(1.9)" });
-  holdMark = null;
-  if (p) ripple(p, { size: 34 });
+  void job(async () => {
+    const ptr = held ?? (p ? await pointTo(p) : null);
+    held = null;
+    keep(false);
+    if (!ptr) return;
+    if (p) await ptr.moveTo(p, 200);
+    await ptr.hold(false);
+    ripple({ x: ptr.x, y: ptr.y }, { size: 30, ms: 480 });
+    await beat(160);
+    await body.unpointer(ptr);
+  });
 }
 
+/** Scroll: the ball lies down along the edge of what scrolls, where its own scrollbar is, as a scrollbar the
+ *  same length; its thumb sits where the page is and runs to where the page went */
 function scrollStart(e: FxEvent) {
   const p = pt(e.geo?.at);
   if (!p) return;
-  near(p);
+  const end = endOf(e.id);
   const amount = num(e.args?.amount, 3);
   const horiz = e.args?.horizontal === true;
-  streaks(p, horiz ? (amount >= 0 ? "right" : "left") : amount >= 0 ? "down" : "up");
+  const sign = amount >= 0 ? 1 : -1;
+  const area = rect(e.geo?.area);
+  const pos0 = typeof e.geo?.pos === "number" ? (e.geo.pos as number) / 100 : null;
+  const view = typeof e.geo?.view === "number" ? (e.geo.view as number) / 100 : null;
+  const T = 10;
+  // The track: along the right (or bottom) edge of the scrolling area, inset a little; without one, at the spot
+  const track: R = area
+    ? horiz
+      ? { x: area.x + 6, y: area.y + area.h - T - 3, w: Math.max(80, area.w - 12), h: T }
+      : { x: area.x + area.w - T - 3, y: area.y + 6, w: T, h: Math.max(80, area.h - 12) }
+    : (() => {
+        const c = inside(p, 95);
+        return horiz ? { x: c.x - 85, y: c.y - T / 2, w: 170, h: T } : { x: c.x - T / 2, y: c.y - 85, w: T, h: 170 };
+      })();
+  const L = horiz ? track.w : track.h;
+  const len = Math.max(26, Math.min(L * 0.6, view !== null ? L * view : L * 0.3));
+  const room = L - len - 4;
+  void job(async () => {
+    const box = horiz ? { w: L, h: T } : { w: T, h: L };
+    await fly({ x: track.x + track.w / 2, y: track.y + track.h / 2 });
+    const inner = body.content(box.w, box.h, '<div class="bd-thumb"></div>');
+    const thumb = inner.querySelector(".bd-thumb") as HTMLDivElement;
+    const set = (f: number) => {
+      const at = 2 + room * Math.min(1, Math.max(0, f));
+      Object.assign(thumb.style, horiz ? { left: `${at}px`, top: "2px", width: `${len}px`, height: `${T - 4}px` } : { top: `${at}px`, left: "2px", height: `${len}px`, width: `${T - 4}px` });
+    };
+    // Where the page is now; without it, the thumb starts at the end it moves away from
+    const from = pos0 ?? (sign > 0 ? 0.1 : 0.9);
+    set(from);
+    body.mode("capsule");
+    await body.to({ cx: track.x + track.w / 2, cy: track.y + track.h / 2, ...box, r: T / 2 }, horiz ? { w: 110, h: 240, r: 240 } : { w: 240, h: 110, r: 240 });
+    const r = await Promise.race([end, sleep(2500).then(() => null)]);
+    const now = typeof r?.geo?.pos === "number" ? (r.geo.pos as number) / 100 : null;
+    // Where it went: the program says, or a guess in the right direction
+    const to = now ?? Math.min(1, Math.max(0, from + sign * Math.min(0.35, Math.abs(amount) * 0.06)));
+    if (Math.abs(to - from) < 0.002) {
+      // Already at the end: the bar bumps against it
+      body.kick(horiz ? "cx" : "cy", sign * 160);
+    } else {
+      await tween(Math.min(520, 240 + Math.abs(to - from) * 900) / tempo(), (t) => set(from + (to - from) * (1 - (1 - t) ** 3)));
+    }
+    await beat(more() ? 120 : 360);
+  });
 }
 
-/** Drags in flight: the cursor doing each one and when its pull is over */
-const drags = new Map<string, { c: Cursor; run: Promise<void> }>();
-
-/** Like a click: the orb frames the area and stays over it, and a virtual cursor flies out to the start point,
- *  presses, pulls a line to the end point and lets go */
+/** Drag: the ball pours into a pointer, which grabs at the start, carries along a line of light to the end and
+ *  lets go there */
 function dragStart(e: FxEvent) {
   const a = pt(e.geo?.from);
   const b = pt(e.geo?.to);
   if (!a || !b) return;
-  const given = rect(e.geo?.zone);
-  const dot = (p: Pt): R => ({ x: p.x, y: p.y, w: 0, h: 0 });
-  const inPlace = given && e.geo?.zoneIsWindow === true ? frameZone(given, true) : frameZone(zoneOf([dot(a), dot(b)]));
-  orb.whirl(1000);
-  const c = new Cursor();
-  const ms = Math.min(700, Math.max(280, Math.hypot(b.x - a.x, b.y - a.y) * 0.9));
-  drags.set(e.id, { c, run: inPlace.then(() => c.go(a)).then(() => c.drag(b, ms)) });
+  frameFor(e, [a, b]);
+  const end = endOf(e.id);
+  const ms = Math.min(800, Math.max(320, Math.hypot(b.x - a.x, b.y - a.y) * 0.9));
+  void job(async () => {
+    const ptr = await pointTo(a);
+    ripple(a, { size: 26, ms: 420, from: 1.6, to: 0.6 });
+    await ptr.hold(true);
+    const line = strand(a, b, ms);
+    await ptr.moveTo(b, ms, Math.min(30, Math.hypot(b.x - a.x, b.y - a.y) * 0.08));
+    await ptr.hold(false);
+    ripple(b, { size: 30, ms: 480 });
+    void fadeOut(line, 520);
+    const r = await Promise.race([end, sleep(3000).then(() => null)]);
+    if (r && !r.ok) {
+      flashError();
+      await ptr.fail();
+    }
+    await beat(160);
+    await body.unpointer(ptr);
+    unframeLater();
+  });
 }
 
-async function dragEnd(e: FxEvent) {
-  const d = drags.get(e.id);
-  drags.delete(e.id);
-  if (!d) return;
-  await d.run;
-  // Already let go at the end point: no extra press, just back into the orb (or red on failure)
-  await d.c.finish(!!e.ok, 0);
-  unframeLater();
+// ---- Typing: the ball opens into a strip right under the field, and the text types out in it ----
+
+/** Typing calls waiting for the click that focuses their field (it is sent as "<call id>.f", after the
+ *  typing call's own start), so the pointer clicks the field before the strip opens */
+const focusing = new Map<string, () => void>();
+
+function typeStart(e: FxEvent) {
+  const end = endOf(e.id);
+  const aimed = e.args?.target !== undefined || e.args?.x !== undefined;
+  const focused = new Promise<void>((res) => {
+    focusing.set(e.id, res);
+    window.setTimeout(res, aimed ? 1500 : 0);
+    void end.then(() => res());
+  });
+  void focused.then(() => {
+    focusing.delete(e.id);
+    void typeJob(e, end);
+  });
 }
 
-// ---- Windows ----
+function typeJob(e: FxEvent, end: Promise<FxEvent>) {
+  const keys = e.tool === "press_keys";
+  const text = [...str(keys ? e.args?.keys : e.args?.text)];
+  const H = 44;
+  const W = keys ? 240 : Math.min(440, Math.max(220, Math.min(text.length, 36) * 9.4 + 90));
+  // The animation never outlasts the typing: once the call is done the rest of the text appears at once
+  let done = false;
+  void end.then(() => (done = true));
+  return job(async () => {
+    // Right below the field just clicked, or where the orb is
+    const fresh = lastPoint && performance.now() - lastAt < 5000 ? lastPoint : null;
+    const base = fresh ?? body.pos;
+    const work = monitorAt(base).work;
+    const below = base.y + 40 + H < work.y + work.h - 10;
+    const c = inside({ x: base.x + (fresh ? W / 2 - 20 : 0), y: fresh ? base.y + (below ? 40 : -40) : base.y }, W / 2 + 10);
+    await fly({ x: c.x - W / 2 + 22, y: c.y });
+    const box = body.content(W, H, '<div class="bd-strip"><span class="txt"></span><span class="caps"></span></div>');
+    const txt = box.querySelector(".txt") as HTMLSpanElement;
+    const caps = box.querySelector(".caps") as HTMLSpanElement;
+    await body.open({ x: c.x - W / 2, y: c.y - H / 2, w: W, h: H }, "panel", 12);
+    const cap = (labels: string[]) => {
+      caps.replaceChildren();
+      labels.forEach((k, i) => {
+        if (i) el("span", "plus", caps, "+");
+        el("kbd", "", caps, k.length === 1 ? k.toUpperCase() : k[0].toUpperCase() + k.slice(1));
+      });
+      const ks = [...caps.querySelectorAll("kbd")];
+      ks.forEach((k) => k.classList.add("dn"));
+      window.setTimeout(() => ks.forEach((k) => k.classList.remove("dn")), 90);
+      body.kick("h", -55);
+    };
+    if (keys) {
+      const combos = text.join("").trim().split(/\s+/).filter(Boolean).slice(0, 6);
+      for (const [i, combo] of combos.entries()) {
+        cap(combo.split("+").filter(Boolean));
+        // Keys go fast: each combination shows long enough to read, the last one until the call is done
+        if (i < combos.length - 1) await beat(done ? 90 : 220);
+      }
+    } else {
+      // Long text: the strip shows its tail, typed at about the speed the keys really go in
+      const shown = text.length > 40 ? text.slice(-40) : text;
+      const step = Math.min(45, Math.max(10, 700 / Math.max(1, shown.length)));
+      const glyph = (ch: string) => (ch === "\n" ? "↵" : ch);
+      for (const [i, ch] of shown.entries()) {
+        if (done) {
+          // The typing is finished: the rest goes in at once
+          el("span", "", txt, shown.slice(i).map(glyph).join(""));
+          cap([shown[shown.length - 1] === "\n" ? "Enter" : shown[shown.length - 1] === " " ? "Space" : shown[shown.length - 1]]);
+          break;
+        }
+        el("span", "", txt, glyph(ch));
+        cap([ch === " " ? "Space" : ch === "\n" ? "Enter" : ch]);
+        await beat(step);
+      }
+    }
+    await holdUntil(end, 4000);
+    await beat(more() ? 60 : 200);
+  });
+}
 
-const winCtx = new Map<string, Outline>();
+// ---- Waiting: the ball draws out into a bar that light runs through ----
 
-const aboveWindow = (r: R): Pt => ({ x: r.x + r.w / 2, y: Math.max(monitorAt(center(r)).work.y + 34, r.y - 30) });
+function waitStart(e: FxEvent) {
+  const end = endOf(e.id);
+  void job(async () => {
+    const W = 200;
+    const c = inside(body.pos, W / 2 + 10);
+    await fly(c);
+    body.content(W, 10, '<div class="bd-sheen"></div>');
+    body.mode("bar");
+    await body.to({ w: W, h: 10, r: 5 }, { w: 110, h: 260, r: 260 });
+    const r = await Promise.race([end, holdUntil(end, 60_000).then(() => null)]);
+    body.content(W, 10);
+    if (r?.ok) body.flash("ok", 900);
+  });
+}
 
-/** How long the outline takes to follow the window: about as long as Windows animates a maximize or restore */
-const WIN_FOLLOW_MS = 260;
-/** Calls whose window change was already drawn the moment it happened (step event) */
-const winDone = new Set<string>();
+// ---- Windows: the ball opens into a frame round the window and moves with it ----
+
+const wins = new Map<string, { r: R; on: boolean; opening: Promise<void>; settle: () => void; settled: Promise<void> }>();
+
+const winTop = (r: R): Pt => inside({ x: r.x + r.w / 2, y: r.y + 14 });
+/** The frame lies on the window's visible edge: its outer line 1px outside, so the ring covers the edge itself
+ *  and no sliver of desktop shows between them */
+const around = (r: R): R => ({ x: r.x - 1, y: r.y - 1, w: r.w + 2, h: r.h + 2 });
+/** Windows 11 rounds window corners by 8px, except a maximized window, which fills its screen's work area */
+function cornerOf(r: R) {
+  const m = monitorAt(center(r)).work;
+  const fills = r.x <= m.x + 2 && r.y <= m.y + 2 && r.x + r.w >= m.x + m.w - 2 && r.y + r.h >= m.y + m.h - 2;
+  return fills ? 0 : 9;
+}
 
 function winStart(e: FxEvent) {
   const r0 = rect(e.geo?.rect);
   if (!r0) return void landed(e.id, 0);
-  orb.goTo(aboveWindow(r0), "fast");
-  winCtx.set(e.id, new Outline(r0).popIn().trace());
-  // The window waits until the outline is round it, then changes (the agent waits for landed)
-  const r = sleep(240);
-  ready.set(e.id, r);
-  void r.then(() => landed(e.id, 0));
+  let settle!: () => void;
+  const settled = new Promise<void>((res) => (settle = res));
+  const w = { r: r0, on: false, opening: Promise.resolve(), settle, settled };
+  wins.set(e.id, w);
+  void job(async () => {
+    await fly(winTop(w.r));
+    body.content(0, 0);
+    // From here a change of the window steers the frame, even while it is still opening out
+    w.on = true;
+    w.opening = body.open(around(w.r), "ring", cornerOf(w.r));
+    await w.opening;
+    // Even when the window already changed before the frame got there, the frame stays long enough to be seen
+    await Promise.all([holdUntil(w.settled, 6000), beat(700)]);
+    wins.delete(e.id);
+  });
+  landed(e.id, 0);
 }
 
-/** The window has just changed: the outline follows it now, not when the result comes back */
+function landed(id: string, index: number) {
+  if (isTauri) void invoke("fx_landed", { id, index }).catch(() => {});
+}
+
+/** Stiffness of the frame following the window: it keeps up with a maximize or restore without snapping */
+const WIN_FOLLOW = 460;
+/** Calls whose window change was already drawn the moment it happened (step event) */
+const winDone = new Set<string>();
+
+/** The window has just changed: the frame follows it now, not when the result comes back */
 function winStep(e: FxEvent) {
   winDone.add(e.id);
-  ready.delete(e.id);
-  void winApply(e.id, str(started.get(e.id)?.args?.action) || "focus", rect(e.geo?.rect), WIN_FOLLOW_MS);
+  void winApply(e.id, str(started.get(e.id)?.args?.action) || "focus", rect(e.geo?.rect));
 }
 
 async function winEnd(e: FxEvent) {
   // Already drawn when it happened
   if (winDone.delete(e.id)) return;
-  const action = str(e.args?.action) || "focus";
+  const w = wins.get(e.id);
   if (!e.ok) {
-    await whenReady(e.id);
-    const o = winCtx.get(e.id);
-    winCtx.delete(e.id);
-    o?.shake();
-    void o?.out("fade", 400, 600);
-    return;
+    if (w?.on) body.flash("err", 900);
+    await sleep(500);
+    return w?.settle();
   }
   // An agent that sends no step event: follow once the result is in
-  await whenReady(e.id);
-  await winApply(e.id, action, rect(e.geo?.rect), 500);
+  await winApply(e.id, str(e.args?.action) || "focus", rect(e.geo?.rect));
 }
 
-/** Move the outline to where the window went (r1; null when minimized or closed) */
-async function winApply(id: string, action: string, r1: R | null, ms: number) {
-  const o = winCtx.get(id);
-  winCtx.delete(id);
-  if (action === "close" && o) {
-    bloom(center(o.r), { size: Math.min(520, Math.max(o.r.w, o.r.h) * 0.6), ms: 700 });
-    void o.out("burst", 520);
-    return;
+/** Move the frame to where the window went (r1; null when minimized or closed) */
+async function winApply(id: string, action: string, r1: R | null) {
+  const w = wins.get(id);
+  if (!w) return;
+  // The body has not reached this window yet (other work first): it will frame where the window is now
+  if (!w.on) {
+    if (r1) w.r = r1;
+    return w.settle();
   }
-  if (action === "minimize" && o) {
-    const w = monitorAt(center(o.r)).work;
-    const to: R = { x: w.x + w.w / 2 - 40, y: w.y + w.h - 6, w: 80, h: 8 };
-    await o.moveTo(to, ms);
-    ripple(center(to), { size: 40 });
-    void o.out("fade", 220);
-    return;
+  await w.opening;
+  if (action === "close") {
+    // The frame closes in on the window's middle and becomes the ball again there
+    bloom(center(w.r), { size: Math.min(420, Math.max(w.r.w, w.r.h) * 0.5), ms: 700 });
+    await body.ball(center(w.r));
+  } else if (action === "minimize") {
+    const m = monitorAt(center(w.r)).work;
+    await body.to({ cx: m.x + m.w / 2, cy: m.y + m.h - 8, w: 90, h: 8, r: 4 }, { all: 150 });
+  } else if (r1) {
+    const g = around(r1);
+    await body.to({ cx: g.x + g.w / 2, cy: g.y + g.h / 2, w: g.w, h: g.h, r: cornerOf(r1) }, { all: WIN_FOLLOW }, 0.95);
+    await beat(600);
   }
-  if (!r1) return void o?.out("fade");
-  // Move / maximize / restore: the same outline morphs to the new spot; if there was none (the window was minimized), pop one in
-  orb.goTo(aboveWindow(r1), "fast");
-  let ol = o;
-  if (ol) await ol.moveTo(r1, ms);
-  else {
-    ol = new Outline(r1).popIn().trace();
-    await sleep(360);
-  }
-  ol.flash();
-  for (const p of [
-    { x: r1.x, y: r1.y },
-    { x: r1.x + r1.w, y: r1.y + r1.h },
-  ])
-    ripple(p, { size: 30, ms: 620 });
-  void ol.out("fade", 480, 900);
+  w.settle();
 }
 
-function openAppStart() {
-  orb.bump(1);
-  bloom(orb.pos, { size: 180, ms: 700 });
-  ripple(orb.pos, { size: 60, ms: 700 });
-}
-
-function openAppEnd(e: FxEvent) {
-  if (!e.ok) return;
-  // Land on the window that came up (found even if it opened behind); without one (a console program), the middle of the screen
-  const r = rect(e.geo?.rect);
-  const c = r ? center(r) : center(primary().work);
-  const size = r ? Math.min(520, Math.max(160, Math.max(r.w, r.h) * 0.7)) : 520;
-  void dart(orb.pos, c).then(() => {
-    bloom(c, { size, ms: 900 });
-    ripple(c, { size: size * 0.23, ms: 900, to: 3.2 });
+/** Open an app: the ball waits; once the window is up it flies onto it and opens into a frame round it */
+function openAppStart(e: FxEvent) {
+  const end = endOf(e.id);
+  void job(async () => {
+    body.kick("w", 200);
+    body.kick("h", 200);
+    const r = await Promise.race([end, holdUntil(end, 20_000).then(() => null)]);
+    if (!r?.ok) return;
+    const w = rect(r.geo?.rect);
+    if (!w) return;
+    await fly(center(w));
+    body.content(0, 0);
+    await body.open(around(w), "ring", cornerOf(w));
+    body.flash("ok", 700);
+    await beat(650);
+    await body.ball(center(w));
   });
 }
+
+// ---- The work panel opens out of the ball and closes back into it ----
+
+/** The body is standing in the panel's place under it, until the panel closes or other work needs the body */
+let underDeck = false;
+let deckClosed: (() => void) | null = null;
+
+setPanelHooks({
+  open(r: R) {
+    return new Promise<boolean>((resolve) => {
+      let answered = false;
+      const answer = (v: boolean) => {
+        if (!answered) (answered = true), resolve(v);
+      };
+      // Other work in front that the body can't leave yet: the panel opens on its own rather than wait
+      let begun = false;
+      window.setTimeout(() => begun || answer(false), 700);
+      void job(async () => {
+        if (answered) return;
+        begun = true;
+        await body.to({ cx: r.x + r.w - 40, cy: r.y + r.h - 40, ...BALL }, { all: 140 }, 0.8);
+        if (answered) return;
+        body.content(0, 0);
+        await body.open(r, "light", 18);
+        if (answered) return;
+        underDeck = true;
+        body.veil(true);
+        answer(true);
+        await holdUntil(new Promise<void>((res) => (deckClosed = res)), 180_000);
+        deckClosed = null;
+        // Other work took the body away while the panel stays: it comes out from under it
+        if (underDeck) {
+          underDeck = false;
+          body.veil(false);
+          return;
+        }
+        await body.ball({ x: r.x + r.w - 40, y: r.y + r.h - 40 });
+      });
+    });
+  },
+  close() {
+    if (!underDeck) return false;
+    underDeck = false;
+    body.veil(false);
+    deckClosed?.();
+    return true;
+  },
+});
 
 // ---- Files ----
 
@@ -647,18 +874,20 @@ export function fxStart(e: FxEvent) {
       return dragStart(e);
     case "type_text":
     case "press_keys":
+      return typeStart(e);
+    case "wait_for":
+      return waitStart(e);
     case "mouse_look":
     case "mouse":
     case "set_value":
     case "batch":
-    case "wait_for":
-      // Typing, key presses and camera turns show nothing on screen; actions that point at something
-      // send their own animation (a click, a drag…) once they know where it is
+      // Camera turns show nothing on screen; actions that point at something send their own animation
+      // (a click, a drag, typing…) once they know where it is
       return;
     case "focus_window":
       return winStart(e);
     case "open_app":
-      return openAppStart();
+      return openAppStart(e);
   }
   if (TERM.has(e.tool)) return termStart(e.id, termCommand(e));
   if (FILE.has(e.tool)) return fileStart(e);
@@ -677,27 +906,22 @@ export function fxEnd(ev: FxEvent) {
   const e: FxEvent = { ...ev, args: ev.args ?? st?.args ?? {}, geo: { ...(st?.geo ?? {}), ...(ev.geo ?? {}) } };
   const ok = !!e.ok;
   toolEnded(e.tool);
+  // Whatever body was waiting on this result can move on
+  const waiting = ends.get(e.id);
+  ends.delete(e.id);
+  waiting?.r(e);
   // Never woke the orb at start, so there is nothing to release. A look that took a picture breathes the edge.
   if (LOOKS.has(e.tool)) {
     if (e.tool === "screenshot" || e.geo?.shot) screenshotEnd(e);
     return;
   }
   switch (e.tool) {
-    case "zoom":
-      void zoomEnd(e);
-      break;
     case "click":
     case "element_action":
-      void dispatchEnd(e);
-      break;
-    case "drag":
-      void dragEnd(e);
+      dispatchEnd(e);
       break;
     case "focus_window":
       void winEnd(e);
-      break;
-    case "open_app":
-      openAppEnd(e);
       break;
     default:
       if (TERM.has(e.tool)) termEnd(e.id, ok, e.text ?? "");

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::System::Variant::{
     VARIANT, VariantClear, VariantGetElementCount, VariantToBooleanWithDefault, VariantToInt32Array, VariantToInt32WithDefault, VariantToStringAlloc,
@@ -1194,6 +1194,37 @@ impl Live {
 pub fn norm(s: &str) -> String {
     let s = s.split('\t').next().unwrap_or(s);
     s.chars().filter(|c| !c.is_whitespace() && *c != '&').flat_map(char::to_lowercase).collect::<String>().trim_end_matches(['.', '…', ':', '：']).to_string()
+}
+
+/// What scrolls under a screen point: its visible bounds, and for the given direction how far along it is and
+/// how much of it shows (both 0..100; None when the program does not say). For the overlay's scroll bar.
+pub struct ScrollArea {
+    pub rect: Rect,
+    pub pos: Option<f64>,
+    pub view: Option<f64>,
+}
+
+pub fn scroll_area_at(x: i32, y: i32, horizontal: bool) -> Option<ScrollArea> {
+    let auto = automation().ok()?;
+    let el = unsafe { auto.ElementFromPoint(POINT { x, y }) }.ok()?;
+    let walker = unsafe { auto.ControlViewWalker() }.ok()?;
+    let mut cur = el;
+    for _ in 0..30 {
+        if let Some(p) = pattern::<IUIAutomationScrollPattern>(&cur, UIA_ScrollPatternId) {
+            let can = unsafe { if horizontal { p.CurrentHorizontallyScrollable() } else { p.CurrentVerticallyScrollable() } }.map(|b| b.as_bool()).unwrap_or(false);
+            if can {
+                let r = unsafe { cur.CurrentBoundingRectangle() }.ok()?;
+                if r.right - r.left < 40 || r.bottom - r.top < 40 {
+                    return None;
+                }
+                let pos = unsafe { if horizontal { p.CurrentHorizontalScrollPercent() } else { p.CurrentVerticalScrollPercent() } }.ok().filter(|v| (0.0..=100.0).contains(v));
+                let view = unsafe { if horizontal { p.CurrentHorizontalViewSize() } else { p.CurrentVerticalViewSize() } }.ok().filter(|v| *v > 0.0 && *v <= 100.0);
+                return Some(ScrollArea { rect: (r.left, r.top, r.right, r.bottom), pos, view });
+            }
+        }
+        cur = unsafe { walker.GetParentElement(&cur) }.ok()?;
+    }
+    None
 }
 
 /// The nearest element at or above `el` that can scroll

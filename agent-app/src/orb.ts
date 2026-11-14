@@ -6,6 +6,9 @@ import { clamp, EASE, onFrame, play, SPRING } from "./motion";
 
 export type Mood = "idle" | "ready" | "work" | "focus" | "ask" | "happy" | "error" | "offline";
 
+/** What the orb's visible body (body.ts) needs to hear to look and move like the orb */
+export type OrbEvent = { kind: "show"; on: boolean } | { kind: "bump"; strength: number } | { kind: "mood"; mood: Mood; was: Mood } | { kind: "state" };
+
 /** Spin speed of the orb in each mood */
 const SPIN: Record<Mood, number> = { idle: 0.6, ready: 1, work: 2.8, focus: 1.7, ask: 1.1, happy: 1.6, error: 0.5, offline: 0 };
 
@@ -46,6 +49,15 @@ class Orb {
   private shown = false;
   private mood: Mood = "idle";
   private moved: (() => void)[] = [];
+  private heard: ((e: OrbEvent) => void)[] = [];
+
+  /** Notified when the orb is shown or hidden, bumps, changes mood, or starts or stops busy / waiting / thinking */
+  onEvent(cb: (e: OrbEvent) => void) {
+    this.heard.push(cb);
+  }
+  private tell(e: OrbEvent) {
+    for (const cb of this.heard) cb(e);
+  }
 
   constructor() {
     this.setMood("idle");
@@ -61,6 +73,7 @@ class Orb {
     this.mood = m;
     this.el.dataset.mood = m;
     this.ramp();
+    this.tell({ kind: "mood", mood: m, was });
     if (m === "error" && was !== "error") {
       play(this.bumper, [{ transform: "translateX(0)" }, { transform: "translateX(-7px)" }, { transform: "translateX(6px)" }, { transform: "translateX(-3px)" }, { transform: "translateX(0)" }], {
         duration: 380,
@@ -73,6 +86,7 @@ class Orb {
   show(on = true) {
     if (on === this.shown) return;
     this.shown = on;
+    this.tell({ kind: "show", on });
     if (on) play(this.pres, [{ transform: "scale(0)", opacity: 0 }, { transform: "scale(1)", opacity: 1 }], { spring: SPRING.pop });
     else play(this.pres, [{ transform: "scale(1)", opacity: 1 }, { transform: "scale(0)", opacity: 0 }], { duration: 300, easing: EASE.in });
   }
@@ -115,6 +129,7 @@ class Orb {
 
   /** A bounce when it swallows something or takes a hit */
   bump(strength = 1) {
+    this.tell({ kind: "bump", strength });
     play(this.bumper, [{ transform: `scale(${1 + 0.3 * strength})` }, { transform: "scale(1)" }], { spring: SPRING.bounce, fill: "none" });
     play(this.halo, [{ opacity: 1, transform: `scale(${1 + 0.45 * strength})` }, { opacity: 0.55, transform: "scale(1)" }], { duration: 620, fill: "none" });
   }
@@ -151,11 +166,13 @@ class Orb {
 
   setBusy(on: boolean) {
     this.el.classList.toggle("busy", on);
+    this.tell({ kind: "state" });
   }
 
   /** Circling arcs for a tool that only waits or scans (kept apart from the terminal's busy flag) */
   setWaiting(on: boolean) {
     this.el.classList.toggle("waiting", on);
+    this.tell({ kind: "state" });
   }
 
   /** The arcs circle and the colour wheel spins up while the next step is being decided. `decided` adds
@@ -164,6 +181,7 @@ class Orb {
     if (on === this.thinking) return;
     this.thinking = on;
     this.el.classList.toggle("thinking", on);
+    this.tell({ kind: "state" });
     if (!on && decided) this.bump(0.45);
     this.ramp();
   }
