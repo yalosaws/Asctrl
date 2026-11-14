@@ -12,6 +12,8 @@ const PASTE_OVER: usize = 200;
 const PASTE_GRACE: Duration = Duration::from_millis(350);
 /// How long a field gets to show what was just typed before its content is called wrong
 const READBACK_GRACE: Duration = Duration::from_millis(250);
+/// The longest a field that is still changing is waited for
+const READBACK_MAX: Duration = Duration::from_millis(1500);
 
 /// The clipboard being put back after a paste: the thread doing it, and a way to tell it not to wait any longer
 struct Restore {
@@ -85,7 +87,7 @@ pub(super) fn enter_text(t: &str, method: &str) -> Result<&'static str, String> 
             Err(_) => {}
         }
     }
-    input::type_text(t)?;
+    input::type_text(t, method == "keys")?;
     Ok("")
 }
 
@@ -116,10 +118,12 @@ pub(super) fn focus_target(loc: &Located, call: &str, part: &str) -> Result<(), 
 /// field's content when it was seen to hold the text). A program takes keys in a moment after they are
 /// sent, so a field that does not show the text yet is read again for a short while before it is called wrong.
 fn readback(typed: &str) -> (Option<String>, String, Option<String>) {
-    let flat = |s: &str| s.replace('\r', "");
+    let flat = |s: &str| uia::newlines(s);
     let want = flat(typed);
     let want = want.trim_end();
     let started = std::time::Instant::now();
+    let mut last = String::new();
+    let mut changed = started;
     loop {
         let Some(fo) = uia::focused() else { return (None, String::new(), None) };
         let label = fo.label.clone();
@@ -136,7 +140,14 @@ fn readback(typed: &str) -> (Option<String>, String, Option<String>) {
             let note = format!("; it now reads \"{}\"", uia::clip(&v, 100));
             return (Some(label), note, Some(v));
         }
-        if started.elapsed() < READBACK_GRACE {
+        if v != last {
+            last = v.clone();
+            changed = std::time::Instant::now();
+        }
+        // Keys still arriving: the field keeps changing (a browser's address bar can take a second for
+        // thirty keystrokes, completing as it goes), so wait for it to settle before calling it wrong
+        let arriving = changed.elapsed() < Duration::from_millis(200) && started.elapsed() < READBACK_MAX;
+        if started.elapsed() < READBACK_GRACE || arriving {
             std::thread::sleep(Duration::from_millis(30));
             continue;
         }

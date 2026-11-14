@@ -110,7 +110,7 @@ fn publish(app: &AppHandle) {
 /// The overlay is always on top; this just makes sure it is visible
 fn bring_to_front(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
+        overlay::show(&w);
         let _ = w.set_always_on_top(true);
     }
 }

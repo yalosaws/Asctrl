@@ -133,6 +133,32 @@ fn watch_foreground() {
     }
 }
 
+/// The overlay must never be the window in front: keys meant for programs would land on it, and an Alt there
+/// puts it in system-menu mode, which stalls its event loop and freezes every animation until the user clicks
+/// it. WS_EX_NOACTIVATE keeps clicks from activating it, but Tauri's show() still does; when it holds the
+/// foreground, hand it to `prev`, or else to the first real window behind it.
+fn give_away_foreground(prev: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+    let ours = HWND_RAW.load(std::sync::atomic::Ordering::Relaxed);
+    if ours == 0 || unsafe { GetForegroundWindow() }.0 as isize != ours {
+        return;
+    }
+    let to = if prev != 0 && prev != ours { prev } else { crate::winmgr::list().first().map(|w| w.handle).unwrap_or(0) };
+    if to != 0 {
+        unsafe {
+            let _ = SetForegroundWindow(HWND(to as *mut _));
+        }
+    }
+}
+
+/// Show the overlay (or make sure it is shown) without leaving it in front
+pub fn show(win: &WebviewWindow) {
+    let prev = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() }.0 as isize;
+    let _ = win.show();
+    give_away_foreground(prev);
+}
+
 fn harden(win: &WebviewWindow) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::*;
@@ -154,7 +180,7 @@ pub fn setup(app: &AppHandle) {
     harden(&win);
     let _ = win.set_ignore_cursor_events(true);
     let _ = win.set_always_on_top(true);
-    let _ = win.show();
+    show(&win);
     raise();
     watch_foreground();
     *app.state::<Overlay>().info.lock().unwrap() = info;
@@ -182,6 +208,8 @@ pub fn setup(app: &AppHandle) {
             // Fallback: another topmost window may cover it without a foreground change, so re-raise every 0.3 s
             if tick.is_multiple_of(10) {
                 raise();
+                // Should anything still hand the overlay the foreground, pass it on before a keystroke lands on it
+                give_away_foreground(0);
             }
         }
     });

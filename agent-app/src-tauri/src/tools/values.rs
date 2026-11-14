@@ -21,10 +21,11 @@ fn anim(call: &str, part: &str, loc: &Located) -> Fx {
 
 /// Fill a field the way a person would when it won't take a value directly: focus it, select everything,
 /// type. Reads it back when the control says what it holds.
-fn type_into(loc: &Located, value: &str, call: &str, part: &str) -> Result<String, String> {
-    let same = |a: &str, b: &str| a.replace('\r', "").trim() == b.replace('\r', "").trim();
-    // What it holds now: nothing to do when that is the value already, and the proof afterwards that typing changed it
-    let prior = loc.live.as_ref().filter(|l| !l.is_password()).and_then(|l| l.value());
+/// `prior` is what the control held before anything was done to it: nothing to do when that is the value
+/// already, and the proof afterwards that typing changed it. It is read by the caller before a direct set is
+/// tried, since a set that lands late would otherwise look like a value that was there all along.
+fn type_into(loc: &Located, value: &str, call: &str, part: &str, prior: Option<String>) -> Result<String, String> {
+    let same = |a: &str, b: &str| uia::newlines(a).trim() == uia::newlines(b).trim();
     if let Some(p) = &prior
         && !value.trim().is_empty()
         && same(p, value)
@@ -69,14 +70,15 @@ fn set_one(ask: &Ask, value: &str, call: &str, part: &str, watch: &mut dyn FnMut
     let loc = locate::resolve(ask)?;
     watch(&loc);
     let fx = anim(call, part, &loc);
+    let prior = loc.live.as_ref().filter(|l| !l.is_password()).and_then(|l| l.value());
     let r = match &loc.live {
         Some(l) => match l.set(value) {
             Ok(s) => Ok(s),
             Err(Some(e)) => Err(e),
             // Takes no value directly (or ignored it, as many web pages do): type it in
-            Err(None) => type_into(&loc, value, call, &format!("{part}t")),
+            Err(None) => type_into(&loc, value, call, &format!("{part}t"), prior),
         },
-        None => type_into(&loc, value, call, &format!("{part}t")),
+        None => type_into(&loc, value, call, &format!("{part}t"), prior),
     };
     fx.step(0, r.is_ok());
     fx.end(r.is_ok());

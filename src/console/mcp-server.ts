@@ -337,7 +337,7 @@ server.registerTool(
     description:
       "Type text. With target (or x,y): that field gets the focus first. Without: the text goes to whatever has the focus (window brings a window forward first). " +
       "replace: true selects the field's whole content first, so the text replaces it; enter: true presses Enter afterwards. " +
-      "Any language works and the input method doesn't matter; characters on the keyboard are pressed as real keys, so games and web pages see them. " +
+      "Any language works and the input method doesn't matter; characters on the keyboard are pressed as real keys, so games and web pages see them (with a Chinese, Japanese or Korean keyboard, letters go in as characters so the input method can't turn them into candidates; method keys presses real keys anyway, for games). " +
       "Text over 200 characters is pasted (the clipboard is put back). The reply names the field that took the text and reads it back, so text that went to the wrong place or was changed shows at once. " +
       "To fill a form field with a known value, set_value is surer.",
     inputSchema: {

@@ -189,6 +189,12 @@ fn state_words(flags: u32) -> Vec<&'static str> {
     table.iter().filter(|(f, _)| flags & f != 0).map(|(_, w)| *w).collect()
 }
 
+/// Line breaks as "\n". Rich-edit controls (Notepad, WordPad, many text boxes) end lines with a lone "\r",
+/// which most displays drop, gluing the lines together.
+pub fn newlines(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 pub fn clip(s: &str, n: usize) -> String {
     let s = s.replace(['\r', '\n', '\t'], " ");
     let s = s.trim();
@@ -939,13 +945,13 @@ impl Live {
         if let Some(p) = pattern::<IUIAutomationTextPattern>(&self.el, UIA_TextPatternId)
             && let Ok(t) = unsafe { p.DocumentRange().and_then(|r| r.GetText(max)) }
         {
-            let t = t.to_string();
+            let t = newlines(&t.to_string());
             if !t.trim().is_empty() {
                 return t;
             }
         }
         let name = unsafe { self.el.CurrentName() }.map(|b| b.to_string()).unwrap_or_default();
-        match self.value() {
+        match self.value().map(|v| newlines(&v)) {
             Some(v) if !v.is_empty() && v != name => {
                 if name.is_empty() {
                     v
@@ -1045,9 +1051,19 @@ impl Live {
             if self.is_password() {
                 return Ok(format!("Filled {label}"));
             }
-            let got = unsafe { p.CurrentValue() }.map(|b| b.to_string()).unwrap_or_default();
-            let same = |a: &str, b: &str| a.replace("\r\n", "\n").trim_end() == b.replace("\r\n", "\n").trim_end();
-            return if same(&got, value) { Ok(format!("{label} now reads \"{}\"", clip(&got, 80))) } else { Err(None) };
+            // A web page applies the value a moment after the call returns: read again for a short while
+            let same = |a: &str, b: &str| newlines(a).trim_end() == newlines(b).trim_end();
+            let started = std::time::Instant::now();
+            loop {
+                let got = unsafe { p.CurrentValue() }.map(|b| b.to_string()).unwrap_or_default();
+                if same(&got, value) {
+                    return Ok(format!("{label} now reads \"{}\"", clip(&got, 80)));
+                }
+                if started.elapsed() >= Duration::from_millis(150) {
+                    return Err(None);
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
         }
         Err(None)
     }

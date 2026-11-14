@@ -26,7 +26,15 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
         Ok(Ok((target, h))) => {
             *ctx.opened.lock().unwrap() = h;
             let done = match h.and_then(winmgr::info) {
-                Some(w) => format!("Opened {target}: \"{}\" ({}, handle {}) is in front", uia::clip(&w.title, 60), w.process, w.handle),
+                Some(w) if winmgr::is_front(w.handle) => {
+                    format!("Opened {target}: \"{}\" ({}, handle {}) is in front", uia::clip(&w.title, 60), w.process, w.handle)
+                }
+                Some(w) => format!(
+                    "Opened {target}: \"{}\" ({}, handle {}) came up, but Windows left another window in front; focus_window it before typing",
+                    uia::clip(&w.title, 60),
+                    w.process,
+                    w.handle
+                ),
                 None => format!("Opened {target}. No window came up within {:.0} s: a console program has none, and a slow one may still be loading (wait_for its window)", wait.as_secs_f64()),
             };
             report::conclude(ctx, args, Did { done, change: None, hwnd: h, fresh: h.is_some(), delivered: false }, true).await

@@ -275,8 +275,10 @@ pub fn drag(x1: i32, y1: i32, x2: i32, y2: i32, button: &str, ms: u64) -> Result
 /// between chunks keeps slow ones (Electron, remote sessions) from dropping any.
 const TYPE_CHUNK: usize = 24;
 
-/// The keyboard layout of the window in front, and whether its input method is in native mode (Chinese,
-/// Japanese, Korean), where real keystrokes for letters would become candidates instead of text
+/// The keyboard layout of the window in front, and whether its input method may turn real keystrokes for
+/// letters into candidates instead of text: it says it is in native mode (Chinese, Japanese, Korean), or the
+/// layout is a CJK one, whose input methods (Sogou, Microsoft Pinyin and other TSF ones) mostly don't answer
+/// the query, so their mode can't be told
 fn target_keyboard() -> (HKL, bool) {
     // WM_IME_CONTROL queries
     const IMC_GETCONVERSIONMODE: usize = 1;
@@ -295,7 +297,10 @@ fn target_keyboard() -> (HKL, bool) {
             (ok.0 != 0).then_some(r)
         };
         let native = !ime.is_invalid() && query(IMC_GETOPENSTATUS).unwrap_or(0) != 0 && query(IMC_GETCONVERSIONMODE).unwrap_or(0) & CMODE_NATIVE != 0;
-        (GetKeyboardLayout(tid), native)
+        let hkl = GetKeyboardLayout(tid);
+        // Primary language of the layout: Chinese, Japanese, Korean
+        let cjk = matches!(hkl.0 as usize & 0x3ff, 0x04 | 0x11 | 0x12);
+        (hkl, native || cjk)
     }
 }
 
@@ -333,10 +338,12 @@ fn real_keys(ch: char, hkl: HKL, caps: bool) -> Option<Vec<INPUT>> {
 
 /// Type any text (including CJK) without depending on the input method. Characters that have a key on the
 /// keyboard are pressed as real keys, so games and pages that read key codes see them; the rest (and all but
-/// digits while an input method is in Chinese / Japanese / Korean mode) is sent as unicode.
-pub fn type_text(text: &str) -> Result<(), String> {
+/// digits where a Chinese / Japanese / Korean input method could catch them) is sent as unicode.
+/// `real_keys_only`: press real keys whatever the input method (games, which read keys and use none).
+pub fn type_text(text: &str, real_keys_only: bool) -> Result<(), String> {
     check_target(None)?;
-    let (hkl, native) = target_keyboard();
+    let (hkl, ime) = target_keyboard();
+    let native = ime && !real_keys_only;
     let caps = unsafe { GetKeyState(VK_CAPITAL.0 as i32) } & 1 != 0;
     let mut inputs: Vec<INPUT> = vec![];
     let mut chars = 0;

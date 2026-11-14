@@ -272,12 +272,25 @@ pub fn satellites(main: isize) -> Vec<isize> {
 
 /// We run in the background, and Windows keeps a background process from bringing windows to the front.
 /// A simulated Alt press counts as the user's input, which lifts that lock for us.
+/// A bare Alt tap is also a keystroke for the window in front, though: it opens that program's menu (Claude's
+/// top-left menu), and in a window with no menu bar, such as our own overlay, it starts system-menu mode,
+/// which stalls the overlay's event loop until the next click. An unassigned key between Alt down and Alt up
+/// makes it an Alt combination instead of an Alt tap, which nothing acts on.
 fn unlock_foreground() {
-    let alt = |flags| INPUT {
+    const MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
+    let key = |vk, flags| INPUT {
         r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_MENU, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
     };
-    unsafe { SendInput(&[alt(KEYBD_EVENT_FLAGS(0)), alt(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32) };
+    let down = KEYBD_EVENT_FLAGS(0);
+    let keys = [key(VK_MENU, down), key(MASK, down), key(MASK, KEYEVENTF_KEYUP), key(VK_MENU, KEYEVENTF_KEYUP)];
+    unsafe { SendInput(&keys, size_of::<INPUT>() as i32) };
+}
+
+/// Whether this top-level window is really the one in front
+pub fn is_front(h: isize) -> bool {
+    let fg = unsafe { GetForegroundWindow() };
+    !fg.is_invalid() && root_of(fg.0 as isize) == h
 }
 
 /// Bring a window to the front (restoring it when minimized). No-op when it already is.
