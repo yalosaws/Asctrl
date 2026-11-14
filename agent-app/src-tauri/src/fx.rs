@@ -62,6 +62,11 @@ impl Fx {
         emit(json!({ "phase": "step", "id": self.id, "tool": self.tool, "index": i, "ok": ok }));
     }
 
+    /// A step that also brings what the overlay needs to draw it, found out after the start went out
+    pub fn step_with(&self, i: usize, ok: bool, geo: Value) {
+        emit(json!({ "phase": "step", "id": self.id, "tool": self.tool, "index": i, "ok": ok, "geo": geo }));
+    }
+
     pub fn end(self, ok: bool) {
         self.end_with(ok, json!({}));
     }

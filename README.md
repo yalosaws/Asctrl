@@ -220,7 +220,7 @@ Known limits:
 - No numbered marks drawn on screenshots (Set-of-Marks), so UI a program draws itself is reached by text read off the pixels or by coordinates only.
 - When the keyboard focus leaves a text box, Windows fades its border for about 250 ms and the action waits for that (about 380 ms instead of 170 ms).
 - Single clicks repeated on the same spot are kept about 550 ms apart, so Windows does not take them for a double click. Pressing a control directly has no such wait.
-- The overlay is left out of screen captures, so where its virtual cursor lands is checked by eye only.
+- The overlay is left out of screen captures, so where the orb points, frames and draws is checked by eye only.
 - Windows only.
 
 Suggested order from here: have a real agent do real tasks in a browser, Settings and Office and fix what fails; an independent code review; then the limits above.

@@ -2,7 +2,7 @@
 // Add ?state=ready|admin|reboot|connected|offline|connecting to the URL to stop at one state;
 // in the console, demoFx("click", {...}) triggers a single effect.
 
-import { fxEnd, fxStart, type FxEvent } from "./fx";
+import { fxEnd, fxStart, fxStep, type FxEvent } from "./fx";
 import { sleep } from "./motion";
 
 interface Hooks {
@@ -16,6 +16,8 @@ async function sim(tool: string, args: Record<string, unknown>, geo: Record<stri
   const id = `d${++seq}`;
   const start: FxEvent = { phase: "start", id, tool, args, geo };
   fxStart(start);
+  // The driver sends what scrolls there as a step, once it has found out
+  if (tool === "scroll") fxStep({ phase: "step", id, tool, index: 0, ok: true, geo });
   await sleep(ms);
   fxEnd({ phase: "end", id, tool, ok, text, geo: geoEnd });
 }

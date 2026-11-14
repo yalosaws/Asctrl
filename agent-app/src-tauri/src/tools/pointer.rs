@@ -12,6 +12,37 @@ fn zone(hwnd: isize) -> Value {
     json!(winmgr::rect_of(hwnd).map(fx::rect_json))
 }
 
+/// Where the last scrolled area stood after its scroll: (its rect, horizontal, percent). The next scroll of the
+/// same area starts its thumb there, since reading the position before scrolling would hold the scroll up.
+static LAST_SCROLL: std::sync::Mutex<Option<((i32, i32, i32, i32), bool, f64)>> = std::sync::Mutex::new(None);
+
+/// The scroll bar on the overlay, worked out on its own thread while the scroll goes ahead: which area scrolls
+/// at `point` (UI Automation, which can take a while in a browser), sent as a step; then, once the scroll is
+/// done (`true` on the returned sender) and the screen has settled, where it went, sent with the end.
+fn scroll_bar_follows(anim: Fx, point: (i32, i32), horizontal: bool, hwnd: Option<isize>) -> std::sync::mpsc::Sender<bool> {
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+    std::thread::spawn(move || {
+        let area = crate::uia::scroll_area_at(point.0, point.1, horizontal);
+        let edge = area.as_ref().map(|a| a.rect).or_else(|| hwnd.and_then(winmgr::rect_of));
+        let from = area.as_ref().and_then(|a| {
+            let last = *LAST_SCROLL.lock().unwrap();
+            last.filter(|(r, h, _)| *r == a.rect && *h == horizontal).map(|(_, _, p)| p)
+        });
+        anim.step_with(0, true, json!({ "area": edge.map(fx::rect_json), "view": area.as_ref().and_then(|a| a.view), "pos": from }));
+        let ok = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap_or(false);
+        if !ok {
+            return anim.end(false);
+        }
+        let now = area.as_ref().and_then(|a| crate::uia::scroll_area_at(point.0, point.1, horizontal).filter(|n| n.rect == a.rect));
+        let pos = now.as_ref().and_then(|n| n.pos);
+        if let (Some(n), Some(p)) = (&now, pos) {
+            *LAST_SCROLL.lock().unwrap() = Some((n.rect, horizontal, p));
+        }
+        anim.end_with(true, json!({ "pos": pos }));
+    });
+    tx
+}
+
 /// Bring the window a control is in to the front when another program has the keyboard: a click does that
 /// too, and the keys the AI presses next must go where it just clicked. A menu or popup of the program in
 /// front is left alone (activating anything would close it).
@@ -164,19 +195,16 @@ pub(super) async fn scroll(ctx: &Ctx, args: &Value) -> Output {
         let horizontal = matches!(dir.as_str(), "left" | "right");
         let signed = if matches!(dir.as_str(), "down" | "right") { amount } else { -amount };
         let before = pace.before(Some(point));
-        // The scroll bar is drawn on what actually scrolls (or along the window's edge), showing where it is
-        let area = crate::uia::scroll_area_at(point.0, point.1, horizontal);
-        let edge = area.as_ref().map(|a| a.rect).or_else(|| hwnd.and_then(winmgr::rect_of));
-        let geo = json!({ "at": fx::pt_json(point), "area": edge.map(fx::rect_json), "pos": area.as_ref().and_then(|a| a.pos), "view": area.as_ref().and_then(|a| a.view) });
-        let anim = Fx::start(&call, "a", "scroll", json!({ "amount": signed, "horizontal": horizontal }), geo);
+        // The animation finds out on its own thread what scrolls there; the scroll never waits for it
+        let anim = Fx::start(&call, "a", "scroll", json!({ "amount": signed, "horizontal": horizontal }), json!({ "at": fx::pt_json(point) }));
+        let done = scroll_bar_follows(anim, point, horizontal, hwnd);
         let r = input::scroll(point.0, point.1, signed, horizontal);
         if let Err(e) = r {
-            anim.end(false);
+            let _ = done.send(false);
             return Err(e.into());
         }
         let change = pace.after(before);
-        let now = area.is_some().then(|| crate::uia::scroll_area_at(point.0, point.1, horizontal)).flatten();
-        anim.end_with(true, json!({ "pos": now.and_then(|a| a.pos) }));
+        let _ = done.send(true);
         let still = change.as_ref().is_some_and(|c| !c.changed);
         let hint = if still { " (if nothing moved, the view is already at its end, or the pointer is not over what scrolls)" } else { "" };
         Ok(Did { done: format!("Scrolled {dir} {amount} at {desc}{note}{hint}"), change, hwnd, fresh: false, delivered: false })

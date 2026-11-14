@@ -82,6 +82,18 @@ function swallow() {
 
 /** Each call's result, for jobs that wait on it */
 const ends = new Map<string, { p: Promise<FxEvent>; r: (e: FxEvent) => void }>();
+/** What a scroll's step brings: the area that scrolls, found by the driver while the scroll already goes ahead */
+const scrollInfo = new Map<string, { p: Promise<FxEvent>; r: (e: FxEvent) => void }>();
+function scrollInfoOf(id: string) {
+  let d = scrollInfo.get(id);
+  if (!d) {
+    let r!: (e: FxEvent) => void;
+    const p = new Promise<FxEvent>((res) => (r = res));
+    scrollInfo.set(id, (d = { p, r }));
+  }
+  return d;
+}
+
 function endOf(id: string): Promise<FxEvent> {
   let d = ends.get(id);
   if (!d) {
@@ -227,7 +239,13 @@ function zoneGone(e: FxEvent) {
 /** The pointer presses (count times) once its action has happened, or shakes red if it failed */
 async function pressAt(p: Pointer, outcome: Promise<boolean | null>, count: number) {
   // Normally the action has happened already; a slow one gets a few seconds before the press is drawn anyway
-  const r = await Promise.race([outcome, sleep(5000).then(() => true)]);
+  // ... unless a newer action is already waiting: then the press is drawn now (the action happened, or the next
+  // one would not have started)
+  let got: boolean | null | undefined;
+  void outcome.then((v) => (got = v));
+  await holdUntil(outcome, 5000);
+  await Promise.resolve();
+  const r = got === undefined ? true : got;
   if (r === null) return;
   lastPoint = { x: p.x, y: p.y };
   lastAt = performance.now();
@@ -356,26 +374,31 @@ function scrollStart(e: FxEvent) {
   const p = pt(e.geo?.at);
   if (!p) return;
   const end = endOf(e.id);
+  const info = scrollInfoOf(e.id);
   const amount = num(e.args?.amount, 3);
   const horiz = e.args?.horizontal === true;
   const sign = amount >= 0 ? 1 : -1;
-  const area = rect(e.geo?.area);
-  const pos0 = typeof e.geo?.pos === "number" ? (e.geo.pos as number) / 100 : null;
-  const view = typeof e.geo?.view === "number" ? (e.geo.view as number) / 100 : null;
   const T = 10;
-  // The track: along the right (or bottom) edge of the scrolling area, inset a little; without one, at the spot
-  const track: R = area
-    ? horiz
-      ? { x: area.x + 6, y: area.y + area.h - T - 3, w: Math.max(80, area.w - 12), h: T }
-      : { x: area.x + area.w - T - 3, y: area.y + 6, w: T, h: Math.max(80, area.h - 12) }
-    : (() => {
-        const c = inside(p, 95);
-        return horiz ? { x: c.x - 85, y: c.y - T / 2, w: 170, h: T } : { x: c.x - T / 2, y: c.y - 85, w: T, h: 170 };
-      })();
-  const L = horiz ? track.w : track.h;
-  const len = Math.max(26, Math.min(L * 0.6, view !== null ? L * view : L * 0.3));
-  const room = L - len - 4;
   void job(async () => {
+    // The driver finds out what scrolls there on the side (the scroll itself never waits for it): the
+    // animation waits a moment for that, and failing it draws the bar at the spot
+    const got = await Promise.race([info.p, end.then(() => null), sleep(700).then(() => null)]);
+    scrollInfo.delete(e.id);
+    const area = rect(got?.geo?.area);
+    const pos0 = typeof got?.geo?.pos === "number" ? (got.geo.pos as number) / 100 : null;
+    const view = typeof got?.geo?.view === "number" ? (got.geo.view as number) / 100 : null;
+    // The track: along the right (or bottom) edge of the scrolling area, inset a little; without one, at the spot
+    const track: R = area
+      ? horiz
+        ? { x: area.x + 6, y: area.y + area.h - T - 3, w: Math.max(80, area.w - 12), h: T }
+        : { x: area.x + area.w - T - 3, y: area.y + 6, w: T, h: Math.max(80, area.h - 12) }
+      : (() => {
+          const c = inside(p, 95);
+          return horiz ? { x: c.x - 85, y: c.y - T / 2, w: 170, h: T } : { x: c.x - T / 2, y: c.y - 85, w: T, h: 170 };
+        })();
+    const L = horiz ? track.w : track.h;
+    const len = Math.max(26, Math.min(L * 0.6, view !== null ? L * view : L * 0.3));
+    const room = L - len - 4;
     const box = horiz ? { w: L, h: T } : { w: T, h: L };
     await fly({ x: track.x + track.w / 2, y: track.y + track.h / 2 });
     const inner = body.content(box.w, box.h, '<div class="bd-thumb"></div>');
@@ -384,20 +407,24 @@ function scrollStart(e: FxEvent) {
       const at = 2 + room * Math.min(1, Math.max(0, f));
       Object.assign(thumb.style, horiz ? { left: `${at}px`, top: "2px", width: `${len}px`, height: `${T - 4}px` } : { top: `${at}px`, left: "2px", height: `${len}px`, width: `${T - 4}px` });
     };
-    // Where the page is now; without it, the thumb starts at the end it moves away from
-    const from = pos0 ?? (sign > 0 ? 0.1 : 0.9);
-    set(from);
+    const guess = (f: number, dir: number) => Math.min(1, Math.max(0, f + dir * sign * Math.min(0.35, Math.abs(amount) * 0.06)));
     body.mode("capsule");
-    await body.to({ cx: track.x + track.w / 2, cy: track.y + track.h / 2, ...box, r: T / 2 }, horiz ? { w: 110, h: 240, r: 240 } : { w: 240, h: 110, r: 240 });
+    const shaped = body.to({ cx: track.x + track.w / 2, cy: track.y + track.h / 2, ...box, r: T / 2 }, horiz ? { w: 110, h: 240, r: 240 } : { w: 240, h: 110, r: 240 });
+    // Where the page was: known when this area was scrolled last; otherwise worked back from where it went
+    let from = pos0;
+    if (from !== null) set(from);
+    await shaped;
     const r = await Promise.race([end, sleep(2500).then(() => null)]);
     const now = typeof r?.geo?.pos === "number" ? (r.geo.pos as number) / 100 : null;
+    if (from === null) from = now !== null ? guess(now, -1) : sign > 0 ? 0.1 : 0.9;
     // Where it went: the program says, or a guess in the right direction
-    const to = now ?? Math.min(1, Math.max(0, from + sign * Math.min(0.35, Math.abs(amount) * 0.06)));
+    const to = now ?? guess(from, 1);
+    set(from);
     if (Math.abs(to - from) < 0.002) {
       // Already at the end: the bar bumps against it
       body.kick(horiz ? "cx" : "cy", sign * 160);
     } else {
-      await tween(Math.min(520, 240 + Math.abs(to - from) * 900) / tempo(), (t) => set(from + (to - from) * (1 - (1 - t) ** 3)));
+      await tween(Math.min(520, 240 + Math.abs(to - from) * 900) / tempo(), (t) => set(from! + (to - from!) * (1 - (1 - t) ** 3)));
     }
     await beat(more() ? 120 : 360);
   });
@@ -897,6 +924,7 @@ export function fxStart(e: FxEvent) {
 export function fxStep(e: FxEvent) {
   if (e.tool === "focus_window") return winStep(e);
   if (e.tool === "zone") return zoneGone(e);
+  if (e.tool === "scroll") return void scrollInfoOf(e.id).r(e);
   dispatchStep(e);
 }
 

@@ -23,9 +23,18 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
     let r = tokio::task::spawn_blocking(move || winmgr::open(&target, &a, &cwd, wait).map(|h| (target, h))).await;
     drop(turn);
     match r {
-        Ok(Ok((target, h))) => {
+        Ok(Ok((target, opened))) => {
+            let h = opened.as_ref().map(|o| o.hwnd);
+            let in_place = opened.as_ref().is_some_and(|o| o.in_place);
             *ctx.opened.lock().unwrap() = h;
             let done = match h.and_then(winmgr::info) {
+                // Only the title of the window in front changed: say just that, the AI can tell from the title
+                Some(w) if in_place => format!(
+                    "Opened {target}: no new window; the one in front, {} (handle {}), now has the title \"{}\" (a new tab, if that is the page asked for)",
+                    w.process,
+                    w.handle,
+                    uia::clip(&w.title, 60)
+                ),
                 Some(w) if winmgr::is_front(w.handle) => {
                     format!("Opened {target}: \"{}\" ({}, handle {}) is in front", uia::clip(&w.title, 60), w.process, w.handle)
                 }

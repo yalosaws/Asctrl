@@ -375,13 +375,25 @@ pub fn set_bounds(h: HWND, x: Option<i32>, y: Option<i32>, w: Option<i32>, hgt: 
     }
 }
 
+/// What came up for something opened
+pub struct Opened {
+    pub hwnd: isize,
+    /// It is the window that was in front already, which only changed its title (a URL opened as a new tab of
+    /// the browser in front): that is all that was seen, not proof the page is the one asked for
+    pub in_place: bool,
+}
+
 /// Open the way Explorer does: program names, full paths, files, URLs, ms-settings: links, etc.
 /// Returns the window that came up for it, brought to the front if Windows left it behind (None for a console
 /// program, or anything that shows no window within `wait`).
-pub fn open(target: &str, args: &str, cwd: &str, wait: std::time::Duration) -> Result<Option<isize>, String> {
+pub fn open(target: &str, args: &str, cwd: &str, wait: std::time::Duration) -> Result<Option<Opened>, String> {
     let before: std::collections::HashSet<isize> = list().iter().map(|w| w.handle).collect();
     let fg0 = foreground();
-    // A URL opened in the browser that is already in front shows up only as a new tab: its title changes
+    // A URL opened in the browser that is already in front shows up only as a new tab: its title changes.
+    // Only a URL is looked for that way; for anything else a title changing in front is the page's own doing
+    // (a clock, an unread count) and says nothing about what was opened.
+    let lower = target.to_ascii_lowercase();
+    let url = lower.contains("://") || lower.starts_with("www.");
     let title0 = title_of(fg0);
     // Otherwise the new program's window would open behind the current one: take the right to set the
     // foreground, and pass it on to the program being launched
@@ -412,7 +424,7 @@ pub fn open(target: &str, args: &str, cwd: &str, wait: std::time::Duration) -> R
             return Some(w.handle);
         }
         let fg = foreground();
-        if fg != 0 && fg == fg0 && title_of(fg) != title0 {
+        if url && fg != 0 && fg == fg0 && title_of(fg) != title0 {
             return Some(fg);
         }
         (fg != 0 && fg != fg0 && before.contains(&fg)).then_some(fg)
@@ -445,7 +457,7 @@ pub fn open(target: &str, args: &str, cwd: &str, wait: std::time::Duration) -> R
     {
         let _ = bring_to_front(hwnd(h));
     }
-    Ok(h)
+    Ok(h.map(|h| Opened { hwnd: h, in_place: h == fg0 && title_of(h) != title0 }))
 }
 
 /// The window in front right now. Our own overlay never counts: should Windows hand it the foreground (it

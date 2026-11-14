@@ -60,9 +60,11 @@ document.body.append(goo);
 const COLORS = ["#5b8cff", "#b36bff", "#ff7ab6", "#ffb86b", "#5be0c8"];
 
 // ---- Tempo ----
-// The body keeps up with the work. One action now and then plays at the full, unhurried pace; when actions come
-// fast or queue up behind each other, everything (springs, pointers, pauses) plays faster, up to about three
-// times, and eases back once things calm down. Timeouts that wait for the real outcome stay in real time.
+// The actions set the pace, never the animation. One action now and then plays at the full, unhurried pace;
+// actions coming fast play faster, up to three times. The moment a newer action is waiting, the one on screen
+// speeds up (six times with one waiting, far more with several), and at that speed any step shorter than a
+// frame simply lands where it ends: every action is still drawn, in order, but the body never trails behind
+// what really happens. Timeouts that wait for the real outcome stay in real time.
 
 const started: number[] = [];
 let tempoNow = 1;
@@ -72,17 +74,22 @@ let tempoAt = performance.now();
 export function tempo() {
   const now = performance.now();
   while (started.length && now - started[0] > 4000) started.shift();
-  const backlog = Math.max(0, queued - 1);
-  const want = Math.min(3, 1 + backlog * 0.7 + Math.max(0, started.length - 2) * 0.3);
+  const want = queued > 2 ? Math.min(100, 6 + (queued - 2) * 20) : queued > 1 ? 6 : Math.min(3, 1 + Math.max(0, started.length - 2) * 0.3);
   const dt = (now - tempoAt) / 1000;
   tempoAt = now;
   // Up at once (falling behind is what looks bad), down gently
-  tempoNow = want >= tempoNow ? want : want + (tempoNow - want) * Math.exp(-dt / 1.5);
+  tempoNow = want >= tempoNow ? want : want + (tempoNow - want) * Math.exp(-dt / 0.8);
   return tempoNow;
 }
 
 /** A pause that is part of the animation: shorter when the body has to hurry */
-export const beat = (ms: number) => sleep(ms / tempo());
+export const beat = (ms: number) => {
+  const d = ms / tempo();
+  return d < 4 ? Promise.resolve() : sleep(d);
+};
+
+/** So fast that a spring would be done within a frame or two: it lands at once instead */
+const snapping = () => tempo() >= 20;
 
 // ---- Springs ----
 
@@ -248,7 +255,14 @@ export class Pointer {
   }
 
   private morph(to: [number, number][], ms: number) {
-    return new Promise<void>((res) => (this.m = { from: this.pts.map((q) => [...q] as [number, number]), to, t0: performance.now(), ms: ms / tempo(), res }));
+    const d = ms / tempo();
+    if (d < 12) {
+      this.m = null;
+      this.pts = to.map((q) => [...q] as [number, number]);
+      this.draw();
+      return Promise.resolve();
+    }
+    return new Promise<void>((res) => (this.m = { from: this.pts.map((q) => [...q] as [number, number]), to, t0: performance.now(), ms: d, res }));
   }
   /** Pour into the arrow shape */
   arrow(ms = 360) {
@@ -296,6 +310,11 @@ export class Pointer {
 /** A per-frame animation driven by elapsed time */
 function tween(ms: number, step: (e: number, t: number) => void, ease = easeIO): Promise<void> {
   ms /= tempo();
+  // Shorter than a frame: it lands at once
+  if (ms < 12) {
+    step(ease(1), 1);
+    return Promise.resolve();
+  }
   return new Promise((resolve) => {
     const t0 = performance.now();
     onFrame((_, now) => {
@@ -342,6 +361,10 @@ export const body = {
 
   /** Spring toward a shape. `ks` sets the stiffness per key (or `all`); lower damping `z` overshoots more. */
   to(t: Partial<Shape>, ks: Partial<Record<Key | "all", number>> = {}, z = 0.74): Promise<void> {
+    if (snapping()) {
+      this.place(t);
+      return Promise.resolve();
+    }
     for (const k of Object.keys(t) as Key[]) {
       P[k].t = t[k]!;
       P[k].k = ks[k] ?? ks.all ?? 170;
@@ -531,6 +554,7 @@ let giveWay: (() => void) | null = null;
 /** Something has to keep the body out after its job (a mouse button still held down) */
 let kept = false;
 
+/** Queue work for the body: every job runs, in order; a backlog makes them run faster (see tempo) */
 export function job(fn: () => Promise<void>): Promise<void> {
   queued++;
   started.push(performance.now());
