@@ -10,6 +10,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { TechClient } from "./tech-client.ts";
+import { Runner } from "./run.ts";
 import { DEFAULT_RELAY_URL, type ToolName, type ToolResult } from "../shared/protocol.ts";
 
 /**
@@ -50,7 +51,7 @@ const INSTRUCTIONS = `Asctrl lets you see and operate a Windows computer. Work l
 3. Act by target. Every action takes target — a reference ("e12") or simply the text the thing shows ("Save") — or x and y on the latest screenshot. References stay valid until the control goes away; you do not need to look again before each action.
 4. Read the reply instead of looking again. Each action says what it did, whether the screen reacted, and what changed among the window's controls (new ones come with references ready to use); a screenshot comes back only when text can't tell.
 
-Prefer set_value for forms (it fills, ticks, picks and verifies in one call), wait_for instead of guessing delays, and batch for a sequence you already know. If a reply says nothing changed, the action probably missed: look before repeating it. Never guess coordinates: use a target, or x and y you can see on the latest screenshot.`;
+For anything you can plan ahead, use run: write the steps by the text they act on and end with expect; it returns at once, so plan the next part while it runs, and check with progress. Prefer set_value for forms (it fills, ticks, picks and verifies in one call), wait_for instead of guessing delays, and batch for a sequence you already know. If a reply says nothing changed, the action probably missed: look before repeating it. Never guess coordinates: use a target, or x and y you can see on the latest screenshot.`;
 
 /** The app's orb, so connector lists show it instead of a letter. Sent inline: clients can't reach local files. */
 function orbIcons() {
@@ -494,6 +495,53 @@ server.registerTool(
     },
   },
   (a) => forward("batch", a),
+);
+
+const runner = new Runner(client);
+
+server.registerTool(
+  "run",
+  {
+    description:
+      "Carry out a plan: steps named by what they act on, written without looking first. Returns at once (queued), so write the next plan while this one runs; " +
+      "call progress to see how plans went. A plan that fails cancels the plans queued behind it, and the next run call returns that failure instead of queueing. " +
+      "Steps: {open: program/URL} · {click: text} · {press: text} (UI Automation, no mouse) · {fill: {label: value, …}} · {type: text, into?: label, enter?} · " +
+      "{keys: \"ctrl+s\"} · {expect: text shown on success, timeoutSec?} · {await: window title} · {scroll: up|down, target?} · {tool: any batchable tool, …its args}. " +
+      "Each step may add window. Text is matched on this computer first; when it matches several controls or none, a decision model picks among a few candidates, " +
+      "and only a confident choice is acted on (never something irreversible the plan didn't name). End plans with expect so success is checked without looking.",
+    inputSchema: {
+      steps: z.array(z.record(z.string(), z.unknown())).min(1).max(60),
+      goal: z.string().optional().describe("One line on what the plan is for; given to the decision model when it has to choose"),
+      when: z.string().optional().describe("Start only once this text is on screen (alternatives with |), e.g. what the previous plan should have brought up"),
+      whenSec: z.number().min(0).max(60).optional().describe("How long to wait for when; default 5"),
+      on: z.record(z.string(), z.string()).optional().describe('Known interruptions: {"text a popup shows": "what to press"}, e.g. {"Leave site?": "Leave"}'),
+      window: windowArg.optional(),
+      wait: z.boolean().optional().describe("Return only when the plan has run, with its report; default false"),
+    },
+  },
+  async ({ wait, ...plan }) => {
+    try {
+      const r = await runner.run(plan, !!wait);
+      return say(r.text, !r.ok);
+    } catch (e) {
+      return errorReply(e);
+    }
+  },
+);
+
+server.registerTool(
+  "progress",
+  {
+    description: "How queued plans went: a report for each that finished since last asked (✓/✗ per step, and where things stand after a failure), and where the running one is.",
+    inputSchema: {
+      waitSec: z.number().min(0).max(120).optional().describe("Wait up to this long for everything queued to finish; default 0 (answer now)"),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ waitSec }) => {
+    const r = await runner.progress(waitSec ?? 0);
+    return say(r.text, !r.ok);
+  },
 );
 
 // ---------- Programs, windows, clipboard ----------

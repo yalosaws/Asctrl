@@ -25,6 +25,8 @@ export type ToolName =
   | "set_value"
   | "element_action"
   | "batch"
+  /** A plan (run) starts or ends: tells the overlay, does nothing else */
+  | "plan_mark"
   // Programs, windows, clipboard
   | "open_app"
   | "focus_window"

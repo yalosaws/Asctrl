@@ -516,68 +516,6 @@ body.demo .fake-taskbar {
     0 0 40px rgba(130, 110, 255, 0.22);
 }
 
-/* What the body carries */
-.bd-strip {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 100%;
-  padding: 0 14px;
-  font: 500 15px var(--mono);
-  color: #eef0fa;
-  white-space: pre;
-}
-.bd-strip .txt {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  display: flex;
-  justify-content: flex-end;
-}
-.bd-strip .txt::after {
-  content: "";
-  flex: none;
-  width: 2px;
-  height: 17px;
-  margin-left: 2px;
-  align-self: center;
-  border-radius: 1px;
-  background: linear-gradient(var(--g1), var(--g3));
-  animation: bd-blink 1s steps(1) infinite;
-}
-.bd-strip .txt span {
-  white-space: pre;
-}
-.bd-strip .caps {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-.bd-strip kbd {
-  min-width: 28px;
-  padding: 3px 7px 4px;
-  border-radius: 6px;
-  text-align: center;
-  background: linear-gradient(#2c2e44, #1b1c2b);
-  box-shadow:
-    inset 0 -2px 0 rgba(0, 0, 0, 0.5),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.14);
-  font: 600 12px var(--font);
-  color: #eef0fa;
-  transition: transform 0.08s;
-}
-.bd-strip kbd.dn {
-  transform: translateY(2px) scale(0.92);
-}
-.bd-strip .plus {
-  color: #747892;
-  font: 12px var(--font);
-}
-@keyframes bd-blink {
-  50% {
-    opacity: 0;
-  }
-}
 .bd-thumb {
   position: absolute;
   border-radius: 4px;
@@ -1435,21 +1373,6 @@ body:not([data-state="connected"]) #btn-end {
 }
 .term-line.more {
   color: var(--ink-3);
-}
-.caret {
-  display: inline-block;
-  width: 7px;
-  height: 1.1em;
-  margin-left: 1px;
-  vertical-align: text-bottom;
-  border-radius: 1px;
-  background: linear-gradient(180deg, var(--g2), var(--g3));
-  animation: blink 0.9s steps(1) infinite;
-}
-@keyframes blink {
-  50% {
-    opacity: 0;
-  }
 }
 .spin {
   display: inline-block;

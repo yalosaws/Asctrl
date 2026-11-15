@@ -159,23 +159,7 @@ function line(cls = "") {
   return l;
 }
 
-async function typeInto(target: HTMLElement, text: string) {
-  const chars = [...text];
-  // About 6 ms per character; even long commands finish within 0.45 s
-  const total = Math.min(450, Math.max(80, chars.length * 6));
-  const per = total / Math.max(1, chars.length);
-  const caret = el("span", "caret", target);
-  // Wait at least one frame per step; if that is too slow, type several characters at once
-  const chunk = Math.max(1, Math.ceil(16 / per));
-  for (let i = 0; i < chars.length; i += chunk) {
-    caret.before(chars.slice(i, i + chunk).join(""));
-    if (termBody) termBody.scrollTop = termBody.scrollHeight;
-    await sleep(per * chunk);
-  }
-  caret.remove();
-}
-
-/** Start a command: type it out, then show a waiting indicator */
+/** Start a command: show it, then a waiting indicator */
 export function termStart(id: string, command: string) {
   holds++;
   queue = queue.then(async () => {
@@ -185,7 +169,7 @@ export function termStart(id: string, command: string) {
     for (let i = 0; i < lines.length; i++) {
       const l = line("cmd");
       el("span", "prompt", l, i === 0 ? "PS ~> " : ">> ");
-      await typeInto(el("span", "", l), lines[i]);
+      el("span", "", l, lines[i]);
     }
     pending.set(id, el("span", "spin", line("wait")));
   });

@@ -82,6 +82,7 @@ To drive a **remote** computer, run the driver there, read the 6-digit code next
 | | `mouse` | Low-level steps: `move` (hover), `down` / `up` (fine drags), `look` (relative motion for game cameras) |
 | | `element_action` | One UI Automation action (press, toggle, select, expand, collapse, focus, scroll, scroll_into_view) that touches neither mouse, focus nor window order: works on windows in the background |
 | | `batch` | Several steps in one call, stopping at the first failure, with one report at the end. `fast` for many inputs into a screen that stays put |
+| Plans | `run` / `progress` | A plan written by the text it acts on, queued so the AI writes the next one while it runs (see [Plans](#plans)); `progress` reports how they went |
 | Programs | `open_app` | Open a program, file, folder, URL or `ms-settings:` page; waits for its window and lists its controls |
 | | `focus_window` | Switch to / minimize / maximize / restore / close / move and resize a window |
 | Clipboard | `read_clipboard` / `write_clipboard` | Text, the list of copied files, or a note that it holds an image |
@@ -119,6 +120,25 @@ Changes in "Order form":
 ```
 
 `after` chooses what comes back: `auto` (default: control changes when they can tell, else a screenshot), `none` (fastest), `ui`, `screenshot`, `both`.
+
+### Plans
+
+Most of a task's time is the AI thinking between steps. `run` takes a whole plan at once and returns straight away, so the AI plans the next part while this one runs:
+
+```jsonc
+run({ goal: "send 你好 to someone@example.com",
+      steps: [ { "open": "https://mail.google.com" }, { "expect": "Compose", "timeoutSec": 15 },
+               { "click": "Compose" }, { "expect": "Message Body" },
+               { "fill": { "To": "someone@example.com", "Message Body": "你好" } },
+               { "click": "Send" }, { "expect": "Message sent" } ],
+      on: { "Leave site?": "Leave" } })
+```
+
+Steps: `open`, `click`, `press` (no mouse), `fill` (`{label: value}`), `type` (`into`, `enter`), `keys`, `expect` (text shown on success; `gone`), `await` (a window), `scroll`, or `{ tool, …args }` for any batchable tool. `when` holds a plan until its text is on screen; `on` says what to press when a known popup is in the way.
+
+Each step is first tried as written; the driver matches text on the computer, which costs nothing. Only when the text matches several controls or none is a decision model ([Drex](https://console.nace.ai), `NACE_API_KEY` in `.env`) asked to choose, among up to 40 short candidate lines (typically 150–550 tokens, about 0.5 s). Its answer is acted on only when it is sure (confidence ≥ 0.7, well ahead of the runner-up), and never when it is something irreversible (delete, send, replace…) that the plan didn't name. Answers are remembered (`~/.asctrl/drex-cache.json`), so the same wording later goes straight to the control. Anything else stops the plan with the candidates and a short look at the window.
+
+A plan that fails cancels the plans queued behind it, since they were written assuming it would work; the next `run` returns that failure instead of queueing.
 
 ### Speed
 
@@ -191,6 +211,12 @@ Where the time goes, action by action (the same few actions with and without the
 
 ```bash
 npm run prof
+```
+
+Plans (`run`): local matching, the decision model and its memory, queued plans, a failure stopping the queue (bench window and Calculator; `--gmail` also composes and discards a mail in the browser's Gmail, never sending):
+
+```bash
+node test/run.ts
 ```
 
 Single steps by hand:

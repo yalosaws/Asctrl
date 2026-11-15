@@ -1,7 +1,7 @@
 // One animation per tool call. `start` fires when the tool begins, `end` when its result arrives.
 // The orb ties consecutive actions together: it is one continuously moving object that flies from
 // the last spot straight to the next, never teleporting, and while it works it becomes the thing doing
-// the work (body.ts): pointers it splits into, a strip it types in, a frame round a window, the panel.
+// the work (body.ts): pointers it splits into, a frame round a window, the panel.
 
 import { invoke } from "@tauri-apps/api/core";
 import { center, home, isTauri, monitorAt, monitors, pt, rect, type Pt, type R } from "./geo";
@@ -23,6 +23,8 @@ export interface FxEvent {
   text?: string;
   /** step: which action of the call just ran */
   index?: number;
+  /** end: a probe that missed (the caller goes on another way), so no red */
+  quiet?: boolean;
 }
 
 const str = (v: unknown) => (typeof v === "string" ? v : v === undefined || v === null ? "" : String(v));
@@ -107,10 +109,6 @@ function endOf(id: string): Promise<FxEvent> {
   }
   return d.p;
 }
-
-/** Where a pointer last clicked and when: typing that follows opens right below it */
-let lastPoint: Pt | null = null;
-let lastAt = 0;
 
 /** Keep a point inside its monitor's work area, `m` pixels in */
 function inside(p: Pt, m = 30): Pt {
@@ -267,8 +265,6 @@ async function pressAt(p: Pointer, outcome: Promise<boolean | null>, count: numb
   await Promise.resolve();
   const r = got === undefined ? true : got;
   if (r === null) return;
-  lastPoint = { ...at };
-  lastAt = performance.now();
   if (!r) {
     flashError();
     ripple(at, { size: 30, ms: 520, tone: "red" });
@@ -430,9 +426,7 @@ function dispatchStart(e: FxEvent) {
   });
   sent.set(e.id, { outcome });
   const aimed = targets.flatMap((p, i) => (p ? [{ p, i }] : []));
-  // A typing call was waiting for this click to focus its field: it queues up right behind it
-  const typing = e.id.endsWith(".f") ? focusing.get(e.id.slice(0, -2)) : undefined;
-  if (!aimed.length) return typing?.();
+  if (!aimed.length) return;
   const framed = frameFor(
     e,
     aimed.map((a) => a.p),
@@ -451,7 +445,6 @@ function dispatchStart(e: FxEvent) {
     }
   });
   aimed.forEach((a) => sortie(a.p, outcome[a.i].p, count, t0, placed));
-  typing?.();
 }
 
 /** The agent has just carried out step `index` */
@@ -511,8 +504,6 @@ function moveStart(e: FxEvent) {
   if (!p) return;
   void job(async () => {
     await pointTo(p);
-    lastPoint = p;
-    lastAt = performance.now();
   });
 }
 
@@ -635,90 +626,21 @@ function dragStart(e: FxEvent) {
   });
 }
 
-// ---- Typing: the ball opens into a strip right under the field, and the text types out in it ----
-
-/** Typing calls waiting for the click that focuses their field (it is sent as "<call id>.f", after the
- *  typing call's own start), so the pointer clicks the field before the strip opens */
-const focusing = new Map<string, () => void>();
-
-function typeStart(e: FxEvent) {
-  const end = endOf(e.id);
-  const aimed = e.args?.target !== undefined || e.args?.x !== undefined;
-  const focused = new Promise<void>((res) => {
-    focusing.set(e.id, res);
-    window.setTimeout(res, aimed ? 1500 : 0);
-    void end.then(() => res());
-  });
-  void focused.then(() => {
-    focusing.delete(e.id);
-    void typeJob(e, end);
-  });
-}
-
-function typeJob(e: FxEvent, end: Promise<FxEvent>) {
-  const keys = e.tool === "press_keys";
-  const text = [...str(keys ? e.args?.keys : e.args?.text)];
-  const H = 44;
-  const W = keys ? 240 : Math.min(440, Math.max(220, Math.min(text.length, 36) * 9.4 + 90));
-  // The animation never outlasts the typing: once the call is done the rest of the text appears at once
-  let done = false;
-  void end.then(() => (done = true));
-  return job(async () => {
-    // Right below the field just clicked, or where the orb is
-    const fresh = lastPoint && performance.now() - lastAt < 5000 ? lastPoint : null;
-    const base = fresh ?? body.pos;
-    const work = monitorAt(base).work;
-    const below = base.y + 40 + H < work.y + work.h - 10;
-    const c = inside({ x: base.x + (fresh ? W / 2 - 20 : 0), y: fresh ? base.y + (below ? 40 : -40) : base.y }, W / 2 + 10);
-    await fly({ x: c.x - W / 2 + 22, y: c.y });
-    const box = body.content(W, H, '<div class="bd-strip"><span class="txt"></span><span class="caps"></span></div>');
-    const txt = box.querySelector(".txt") as HTMLSpanElement;
-    const caps = box.querySelector(".caps") as HTMLSpanElement;
-    await body.open({ x: c.x - W / 2, y: c.y - H / 2, w: W, h: H }, "panel", 12);
-    const cap = (labels: string[]) => {
-      caps.replaceChildren();
-      labels.forEach((k, i) => {
-        if (i) el("span", "plus", caps, "+");
-        el("kbd", "", caps, k.length === 1 ? k.toUpperCase() : k[0].toUpperCase() + k.slice(1));
-      });
-      const ks = [...caps.querySelectorAll("kbd")];
-      ks.forEach((k) => k.classList.add("dn"));
-      window.setTimeout(() => ks.forEach((k) => k.classList.remove("dn")), 90);
-      body.kick("h", -55);
-    };
-    if (keys) {
-      const combos = text.join("").trim().split(/\s+/).filter(Boolean).slice(0, 6);
-      for (const [i, combo] of combos.entries()) {
-        cap(combo.split("+").filter(Boolean));
-        // Keys go fast: each combination shows long enough to read, the last one until the call is done
-        if (i < combos.length - 1) await beat(done ? 90 : 220);
-      }
-    } else {
-      // Long text: the strip shows its tail, typed at about the speed the keys really go in
-      const shown = text.length > 40 ? text.slice(-40) : text;
-      const step = Math.min(45, Math.max(10, 700 / Math.max(1, shown.length)));
-      const glyph = (ch: string) => (ch === "\n" ? "↵" : ch);
-      for (const [i, ch] of shown.entries()) {
-        if (done) {
-          // The typing is finished: the rest goes in at once
-          el("span", "", txt, shown.slice(i).map(glyph).join(""));
-          cap([shown[shown.length - 1] === "\n" ? "Enter" : shown[shown.length - 1] === " " ? "Space" : shown[shown.length - 1]]);
-          break;
-        }
-        el("span", "", txt, glyph(ch));
-        cap([ch === " " ? "Space" : ch === "\n" ? "Enter" : ch]);
-        await beat(step);
-      }
-    }
-    await holdUntil(end, 4000);
-    await beat(more() ? 60 : 200);
-  });
-}
-
 // ---- Waiting: the ball draws out into a bar that light runs through ----
+
+/** A wait that is over this soon draws nothing: a plan checks each result with one, and a bar drawn out and
+ *  pulled back for each would make the ball stretch and shrink all through it */
+const WAIT_SHOWS_AFTER = 400;
 
 function waitStart(e: FxEvent) {
   const end = endOf(e.id);
+  void (async () => {
+    const quick = await Promise.race([end.then(() => true), sleep(WAIT_SHOWS_AFTER).then(() => false)]);
+    if (!quick) waitBar(end);
+  })();
+}
+
+function waitBar(end: Promise<FxEvent>) {
   void job(async () => {
     const W = 200;
     const c = inside(body.pos, W / 2 + 10);
@@ -1057,6 +979,9 @@ const FILE = new Set(["read_file", "write_file", "edit_file", "list_dir", "find_
 const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
 
 export function fxStart(e: FxEvent) {
+  // A plan running: one piece of work, so the pauses between its steps are not the AI thinking. It draws
+  // nothing itself; its steps do.
+  if (e.tool === "plan") return void toolStarted("plan");
   started.set(e.id, { args: e.args, geo: e.geo });
   begun.add(e.id);
   if (begun.size > 400) for (const id of [...begun].slice(0, 200)) begun.delete(id);
@@ -1081,17 +1006,16 @@ export function fxStart(e: FxEvent) {
       return scrollStart(e);
     case "drag":
       return dragStart(e);
-    case "type_text":
-    case "press_keys":
-      return typeStart(e);
     case "wait_for":
       return waitStart(e);
     case "mouse_look":
     case "mouse":
     case "set_value":
     case "batch":
-      // Camera turns show nothing on screen; actions that point at something send their own animation
-      // (a click, a drag, typing…) once they know where it is
+    case "type_text":
+    case "press_keys":
+      // Camera turns, typing and key presses show nothing on screen; actions that point at something send
+      // their own animation (a click, a drag…) once they know where it is
       return;
     case "focus_window":
       return winStart(e);
@@ -1122,6 +1046,7 @@ export function fxStep(e: FxEvent) {
 }
 
 export function fxEnd(ev: FxEvent) {
+  if (ev.tool === "plan") return void toolEnded("plan");
   const st = started.get(ev.id);
   started.delete(ev.id);
   const e: FxEvent = { ...ev, args: ev.args ?? st?.args ?? {}, geo: { ...(st?.geo ?? {}), ...(ev.geo ?? {}) } };
@@ -1148,5 +1073,5 @@ export function fxEnd(ev: FxEvent) {
       if (TERM.has(e.tool)) termEnd(e.id, ok, e.text ?? "");
       else if (FILE.has(e.tool)) void fileEnd(e);
   }
-  release(ok, TERM.has(e.tool) ? 2600 : 1500);
+  release(ok || !!ev.quiet, TERM.has(e.tool) ? 2600 : 1500);
 }

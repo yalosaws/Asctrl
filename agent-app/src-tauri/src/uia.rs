@@ -1068,6 +1068,21 @@ impl Live {
         Err(None)
     }
 
+    /// A combo box you can type into: it holds a writable value itself, or has a text box inside
+    fn combo_takes_text(&self) -> bool {
+        if self.role() != "ComboBox" {
+            return false;
+        }
+        if let Some(p) = pattern::<IUIAutomationValuePattern>(&self.el, UIA_ValuePatternId)
+            && unsafe { p.CurrentIsReadOnly() }.is_ok_and(|b| !b.as_bool())
+        {
+            return true;
+        }
+        let Ok(auto) = automation() else { return false };
+        let Ok(cond) = (unsafe { auto.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_EditControlTypeId.0)) }) else { return false };
+        unsafe { self.el.FindFirst(TreeScope_Children, &cond) }.is_ok()
+    }
+
     /// Pick the item named `name` in a container: opened if it has to be, the item selected or pressed, closed
     /// again. None when the container has no such way in.
     fn pick(&self, name: &str) -> Option<Result<String, String>> {
@@ -1110,7 +1125,11 @@ impl Live {
             if was_closed && let Some(p) = &expander {
                 let _ = unsafe { p.Collapse() };
             }
-            // No items at all: not a container to pick from this way (an editable combo takes text instead)
+            // An editable combo (a recipients box, a file name box) takes text it has no item for: let it be
+            // set or typed instead. Otherwise no such item is a real miss.
+            if self.combo_takes_text() {
+                return None;
+            }
             return (expander.is_some() || self.role() != "ComboBox").then(|| Err(format!("{label} has no item \"{name}\"")));
         };
         let r = if let Some(p) = pattern::<IUIAutomationSelectionItemPattern>(&item, UIA_SelectionItemPatternId) {

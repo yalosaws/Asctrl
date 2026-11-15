@@ -104,19 +104,39 @@ fn dispatch(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: &Value) {
         "restart_computer" => {
             tauri::async_runtime::spawn(admin::restart_computer(app, tx, id, args));
         }
+        // A plan (run) starts or ends: to the overlay it is one piece of work, so the pauses between its steps
+        // (a decision being made) are not taken for the AI thinking
+        "plan_mark" => {
+            let plan = args.get("plan").and_then(Value::as_str).unwrap_or("plan").to_string();
+            let phase = if args.get("end").and_then(Value::as_bool).unwrap_or(false) { "end" } else { "start" };
+            let _ = app.emit("fx", json!({ "phase": phase, "id": format!("plan-{plan}"), "tool": "plan", "ok": true, "args": {}, "geo": {} }));
+            reply_text(&tx, &id, true, "");
+        }
         _ => {
             tauri::async_runtime::spawn(async move {
                 let st = app.state::<AgentState>();
                 let ov = app.state::<overlay::Overlay>();
                 // The orb can't catch the pointer for the whole call, however long it runs, and 1.2 s after
                 let driving = moves_mouse(&tool).then(|| ov.driving(Duration::from_millis(1200)));
+                // A plan's own look round (to find candidates) is not work to show
+                if args.get("silent").and_then(Value::as_bool).unwrap_or(false) {
+                    let out = fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args)).await;
+                    drop(driving);
+                    reply(&tx, &id, out);
+                    return;
+                }
                 let before = tools::fx_before(&st.ctx, &tool, &args);
                 let _ = app.emit("fx", json!({ "phase": "start", "id": id, "tool": tool, "args": fx_args(&args), "geo": before }));
                 let out = fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args)).await;
                 drop(driving);
                 let after = tools::fx_after(&st.ctx, &tool, &before, &out);
                 let shown: String = out.body().chars().take(6000).collect();
-                let _ = app.emit("fx", json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "text": shown, "geo": after }));
+                // A probe (run trying a step as written before deciding another way) that misses is not a failure
+                // worth flashing: the step goes on another way
+                let quiet = !out.ok
+                    && args.get("probe").and_then(Value::as_bool).unwrap_or(false)
+                    && ["equally well", "Nothing in ", "has no item", " is on screen in "].iter().any(|m| shown.contains(m));
+                let _ = app.emit("fx", json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "quiet": quiet, "text": shown, "geo": after }));
                 reply(&tx, &id, out);
             });
         }
