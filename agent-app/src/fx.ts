@@ -274,10 +274,19 @@ async function pressAt(p: Pointer, outcome: Promise<boolean | null>, count: numb
     ripple(at, { size: 30, ms: 520, tone: "red" });
     return p.fail();
   }
-  for (let i = 0; i < count; i++) {
-    ripple(at, { size: 28, ms: 480, to: 1.7 + i * 0.3 });
-    await p.press();
-  }
+  // The press plays on while the pointer already sets off for its next click (the press only scales it, the
+  // glide only moves it): waiting for it here would add a press to every click of a busy column
+  pressing++;
+  void (async () => {
+    try {
+      for (let i = 0; i < count; i++) {
+        ripple(at, { size: 28, ms: 480, to: 1.7 + i * 0.3 });
+        await p.press();
+      }
+    } finally {
+      pressing--;
+    }
+  })();
 }
 
 /** How many pointers share the work: the app being worked on is cut into this many columns, left to right, and
@@ -289,6 +298,8 @@ const crew: (Pointer | null)[] = Array(STRIPS).fill(null);
 const crewQueue: Promise<unknown>[] = Array.from({ length: STRIPS }, () => Promise.resolve());
 /** Pointers still on their way or pressing (waiting for their action to happen): the work is not done while any is */
 let pressing = 0;
+/** How many clicks each column has queued that its pointer has not set off for yet */
+const waiting: number[] = Array(STRIPS).fill(0);
 
 /** Whose column p is in: columns of the framed app, or of the screen when nothing is framed */
 function stripOf(p: Pt): number {
@@ -297,10 +308,15 @@ function stripOf(p: Pt): number {
 }
 
 /** How late (ms) a pointer may start on a click before it hurries: past this it goes quicker the later it is */
-const LATE_OK = 120;
-/** How late it has to be to go at its quickest (4 times its usual pace) */
-const LATE_MAX = 720;
-const rushFor = (late: number) => 1 + 3 * Math.min(1, Math.max(0, late - LATE_OK) / (LATE_MAX - LATE_OK));
+const LATE_OK = 40;
+/** How late it has to be to go at its quickest from lateness alone (4 times its usual pace) */
+const LATE_MAX = 400;
+/** The quickest a pointer ever goes: its minimums (PTR_MIN) divided by this still give a visible glide */
+const RUSH_TOP = 6;
+/** How much quicker a pointer goes for a click that started `late` ms ago with `behind` more queued after it.
+ *  Clicks waiting count at once, before any of them is late: that is the backlog that grows otherwise. */
+const rushFor = (late: number, behind = 0) =>
+  Math.min(RUSH_TOP, Math.max(1 + 3 * Math.min(1, Math.max(0, late - LATE_OK) / (LATE_MAX - LATE_OK)), 1 + 1.25 * behind));
 
 /** Column i's pointer goes to p in the arrow shape: from wherever it last worked, or, the first time, out of the
  *  still ball (once the ball is in place, `ready`) as a drop that takes the arrow shape there */
@@ -314,7 +330,7 @@ async function bring(i: number, p: Pt, rush: number, ready?: Promise<unknown>, n
       near?.(ptr);
       return ptr;
     }
-    await ptr.moveTo(p, Math.min(480, Math.max(200, d * 0.6)), Math.min(30, d * 0.1), near && (() => near(ptr)));
+    await ptr.moveTo(p, Math.min(360, Math.max(150, d * 0.45)), Math.min(30, d * 0.1), near && (() => near(ptr)));
     return ptr;
   }
   await ready;
@@ -341,9 +357,14 @@ function crewAt(p: Pt, work: (ptr: Pointer) => Promise<unknown> = async () => {}
   let fail!: (e: unknown) => void;
   const arrived = new Promise<Pointer>((res, rej) => ((arrive = res), (fail = rej)));
   pressing++;
+  waiting[i]++;
+  // One more click for this column: a pointer already gliding there hurries from now on, not only next time
+  const out = crew[i];
+  if (out) out.rush = Math.max(out.rush, rushFor(0, waiting[i]));
   const done = crewQueue[i]
     .then(async () => {
-      const rush = rushFor(performance.now() - t0);
+      waiting[i]--;
+      const rush = rushFor(performance.now() - t0, waiting[i]);
       let working: Promise<unknown> | null = null;
       const ptr = await bring(i, p, rush, ready, rush > 1 ? (q) => void (working = work(q)) : undefined);
       arrive(ptr);

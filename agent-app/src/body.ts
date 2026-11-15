@@ -205,6 +205,18 @@ const easeIO = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2
  *  everything else up until it lands at once, but a pointer is always seen going to where it clicks */
 export const PTR_MIN = { move: 180, morph: 120, press: 110 };
 
+/** Squash and stretch: a pointer going faster than STRETCH_FROM (px/ms) is drawn longer along its way and
+ *  narrower across it, by STRETCH_PER for each px/ms over, up to STRETCH_MAX; it springs back as it lands.
+ *  A glide of a few frames reads as a quick dart instead of a jump, and the arrow itself stays sharp. */
+const STRETCH_FROM = 1.5;
+const STRETCH_PER = 0.07;
+const STRETCH_MAX = 0.75;
+/** The spring the stretch follows: stiff enough to keep up with a dart, a little bounce when it lands */
+const STRETCH_K = 900;
+const STRETCH_D = 34;
+/** The stretch is about the middle of the arrow's body, not its tip */
+const STRETCH_AT = 9;
+
 /** A pointer split off the orb: its tip is at (x, y) */
 export class Pointer {
   x: number;
@@ -213,8 +225,13 @@ export class Pointer {
   private g = document.createElementNS(NS, "g");
   private paths: SVGPathElement[];
   private pts = CIRCLE.map((q) => [...q] as [number, number]);
-  private m: { from: [number, number][]; to: [number, number][]; t0: number; ms: number; res: () => void } | null = null;
+  private m: { from: [number, number][]; to: [number, number][]; t: number; at: number; ms: number; res: () => void } | null = null;
   private live = true;
+  /** Squash and stretch (see STRETCH_*): how much, how fast that is changing, the way it points, last frame */
+  private st = 0;
+  private stV = 0;
+  private dir = 0;
+  private last = { x: 0, y: 0, t: 0 };
 
   /** `k` picks its colour: the pointers take the four in turn */
   constructor(x: number, y: number, k = 0) {
@@ -236,7 +253,10 @@ export class Pointer {
 
   private draw() {
     if (this.m) {
-      const t = Math.min(1, (performance.now() - this.m.t0) / this.m.ms);
+      const now = performance.now();
+      // Added up frame by frame at the pointer's current pace, so a shape change hurries along with it
+      const t = (this.m.t = Math.min(1, this.m.t + ((now - this.m.at) * this.rush) / this.m.ms));
+      this.m.at = now;
       const k = easeBack(t);
       const { from, to } = this.m;
       this.pts = from.map((a, i) => [a[0] + (to[i][0] - a[0]) * k, a[1] + (to[i][1] - a[1]) * k]);
@@ -248,17 +268,49 @@ export class Pointer {
     }
     const d = toD(this.pts);
     for (const p of this.paths) p.setAttribute("d", d);
-    this.g.setAttribute("transform", `translate(${this.x.toFixed(2)} ${this.y.toFixed(2)}) scale(${this.s.toFixed(3)})`);
+    this.g.setAttribute("transform", `translate(${this.x.toFixed(2)} ${this.y.toFixed(2)})${this.stretch()} scale(${this.s.toFixed(3)})`);
   }
 
-  /** How far behind its clicks this pointer is: 1 on time, up to 4 when late. Everything it draws is that many
-   *  times quicker, minimums included, so a busy pointer catches up instead of trailing further behind. */
+  /** The squash and stretch for this frame, as a transform about the middle of the arrow ("" when there is none) */
+  private stretch(): string {
+    const now = performance.now();
+    const l = this.last;
+    const dt = l.t ? Math.min(50, now - l.t) : 0;
+    const dx = this.x - l.x;
+    const dy = this.y - l.y;
+    this.last = { x: this.x, y: this.y, t: now };
+    if (dt <= 0) return "";
+    const v = Math.hypot(dx, dy) / dt;
+    if (v > 0.3) this.dir = (Math.atan2(dy, dx) * 180) / Math.PI;
+    const want = Math.min(STRETCH_MAX, Math.max(0, (v - STRETCH_FROM) * STRETCH_PER));
+    // A damped spring towards it, a few small steps per frame so a slow frame cannot make it blow up
+    const n = Math.ceil(dt / 4);
+    const h = dt / 1000 / n;
+    for (let i = 0; i < n; i++) {
+      this.stV += (STRETCH_K * (want - this.st) - STRETCH_D * this.stV) * h;
+      this.st += this.stV * h;
+    }
+    if (Math.abs(this.st) < 0.004 && Math.abs(this.stV) < 0.05) {
+      this.st = this.stV = 0;
+      return "";
+    }
+    // Longer along the way it goes, narrower across, keeping about the same area; a bounce past zero squashes
+    const along = Math.max(0.6, 1 + this.st);
+    const across = 1 / Math.sqrt(along);
+    const c = (STRETCH_AT * this.s).toFixed(2);
+    const a = this.dir.toFixed(1);
+    return ` translate(${c} ${c}) rotate(${a}) scale(${along.toFixed(3)} ${across.toFixed(3)}) rotate(${-a}) translate(-${c} -${c})`;
+  }
+
+  /** How far behind its clicks this pointer is: 1 on time, more when late or when clicks are waiting for it.
+   *  Everything it draws is that many times quicker, minimums included, and a change takes effect mid-glide,
+   *  so a busy pointer catches up instead of trailing further behind. */
   rush = 1;
 
   private morph(to: [number, number][], ms: number) {
     // A pointer is always seen changing shape, however much the body hurries
-    const d = Math.max(PTR_MIN.morph / this.rush, ms / tempo() / this.rush);
-    return new Promise<void>((res) => (this.m = { from: this.pts.map((q) => [...q] as [number, number]), to, t0: performance.now(), ms: d, res }));
+    const d = Math.max(PTR_MIN.morph, ms / tempo());
+    return new Promise<void>((res) => (this.m = { from: this.pts.map((q) => [...q] as [number, number]), to, t: 0, at: performance.now(), ms: d, res }));
   }
   /** Pour into the arrow shape */
   arrow(ms = 360) {
@@ -285,21 +337,21 @@ export class Pointer {
         }
       },
       easeIO,
-      PTR_MIN.move / this.rush,
-      this.rush,
+      PTR_MIN.move,
+      () => this.rush,
     );
   }
 
   /** Press down and up (the tip stays put) */
   async press() {
-    await tween(200, (_, t) => (this.s = 1 - 0.22 * Math.sin(Math.PI * t)), (t) => t, PTR_MIN.press / this.rush, this.rush);
+    await tween(200, (_, t) => (this.s = 1 - 0.22 * Math.sin(Math.PI * t)), (t) => t, PTR_MIN.press, () => this.rush);
   }
 
   /** Held down: a little smaller until let go */
   async hold(on: boolean) {
     const from = this.s;
     const to = on ? 0.84 : 1;
-    await tween(140, (e) => (this.s = from + (to - from) * e), easeIO, PTR_MIN.press / this.rush, this.rush);
+    await tween(140, (e) => (this.s = from + (to - from) * e), easeIO, PTR_MIN.press, () => this.rush);
   }
 
   /** On failure: a quick shake, red */
@@ -307,9 +359,8 @@ export class Pointer {
     this.paths[1].style.fill = "var(--red)";
     const x = this.x;
     await tween(360, (_, t) => (this.x = x + Math.sin(t * Math.PI * 4) * 5 * (1 - t)), (t) => t);
-    // It stays out for the next target, so the red is only for the shake
-    await beat(400);
-    this.paths[1].style.fill = "";
+    // It stays out for the next target, so the red is only for the shake; it can set off again meanwhile
+    void beat(400).then(() => (this.paths[1].style.fill = ""));
   }
 
   remove() {
@@ -319,17 +370,24 @@ export class Pointer {
 }
 
 /** A per-frame animation driven by elapsed time; `floor` is the shortest it may get when the body hurries */
-function tween(ms: number, step: (e: number, t: number) => void, ease = easeIO, floor = 0, rush = 1): Promise<void> {
-  ms = Math.max(floor, ms / tempo() / rush);
+function tween(ms: number, step: (e: number, t: number) => void, ease = easeIO, floor = 0, rush: number | (() => number) = 1): Promise<void> {
+  const base = ms / tempo();
+  const len = () => {
+    const r = typeof rush === "function" ? rush() : rush;
+    return Math.max(floor / r, base / r);
+  };
   // Shorter than a frame: it lands at once
-  if (ms < 12) {
+  if (len() < 12) {
     step(ease(1), 1);
     return Promise.resolve();
   }
+  // Progress is added up frame by frame, so a pointer told to hurry while on its way speeds up from there on
   return new Promise((resolve) => {
-    const t0 = performance.now();
+    let last = performance.now();
+    let t = 0;
     onFrame((_, now) => {
-      const t = Math.min(1, (now - t0) / ms);
+      t = Math.min(1, t + (now - last) / len());
+      last = now;
       step(ease(t), t);
       if (t >= 1) {
         resolve();
