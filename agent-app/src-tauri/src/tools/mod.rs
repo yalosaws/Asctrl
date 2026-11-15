@@ -370,6 +370,11 @@ type BoxedRun<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Output> +
 
 /// Run a tool
 pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
+    // fast on a single call (a plan's step, run with fast): an input doesn't wait for the screen to settle,
+    // only for the program to take it. A batch has its own fast.
+    if tool != "batch" && bool_arg(args, "fast") == Some(true) {
+        return FAST.scope(true, run_tool(ctx, tool, args)).await;
+    }
     run_tool(ctx, tool, args).await
 }
 

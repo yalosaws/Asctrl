@@ -39,7 +39,38 @@ try {
   await check("bench form by labels, all local", { window: B, steps: [{ fill: { Name: "Alice", Agree: true } }, { click: "Submit" }, { expect: "Submitted: Alice" }] }, (t) => t.includes("✓ done") && !t.includes("decision model"));
   await check("no exact match → decision model", { window: B, goal: "send the form with the name Bob", steps: [{ fill: { "person's name": "Bob" } }, { click: "send the form" }, { expect: "Submitted: Bob" }] }, (t) => t.includes("✓ done") && t.includes("decision model"));
   await check("same again → remembered, no model call", { window: B, goal: "send the form with the name Bob", steps: [{ fill: { "person's name": "Bob2" } }, { click: "send the form" }, { expect: "Submitted: Bob2" }] }, (t) => t.includes("✓ done") && t.includes("remembered") && !t.includes("call(s)"));
+  await check(
+    "repeat with data, fast",
+    { window: B, fast: true, repeat: [["Ann"], ["Ben"], ["Cy"]], steps: [{ fill: { Name: "$1" } }, { click: "Submit" }, { expect: "Submitted: $1" }] },
+    (t) => t.includes("✓ done") && t.includes("rows 2–3 the same way"),
+  );
   await check("absent target → not guessed", { window: B, goal: "print the page", steps: [{ click: "Print preview" }] }, (t) => t.includes("✗") && !t.includes("✓ click"));
+  // Wait first, judge after: the dialog opens 0.8 s after the click, and the plan names it in other words
+  await check(
+    "late dialog: waited for, then decided",
+    { goal: "open the bench dialog and close it again", steps: [{ click: "Open dialog", window: B }, { click: "close the dialog" }, { await: "Bench Dialog", gone: true }] },
+    (t) => t.includes("✓ done") && /close the dialog" → Button "Close me"/.test(t),
+  );
+  // check: the decision model judges the window, for what a text search can't settle
+  await check(
+    "check: a claim that holds",
+    { window: B, steps: [{ fill: { Name: "Kim" } }, { click: "Submit" }, { check: "The form has been submitted with the name Kim." }] },
+    (t) => t.includes("✓ done") && t.includes('✓ check "'),
+  );
+  await check("check: a claim that doesn't", { window: B, steps: [{ fill: { Agree: false } }, { check: "The Agree box is ticked.", timeoutSec: 1 }] }, (t) => t.includes('✗ check "'));
+  // Settled by an expect, then a dialog that opens late: the model may say "not ready yet", and it is waited for
+  await check(
+    "dialog still opening after a passed expect",
+    { goal: "open the bench dialog and close it again", steps: [{ click: "Open dialog", window: B }, { expect: "Asctrl Bench" }, { click: "dismiss the popup" }, { await: "Bench Dialog", gone: true }] },
+    (t) => t.includes("✓ done"),
+  );
+  // A plan that fails keeps nothing the decision model chose in it
+  await check("failed plan: choice not kept", { window: B, steps: [{ fill: { "the name box": "Zed" } }, { expect: "never shown", timeoutSec: 1 }] }, (t) => t.includes("not remembered"));
+  await check(
+    "…so the same wording is decided again",
+    { window: B, steps: [{ fill: { "the name box": "Zed2" } }, { expect: "never shown either", timeoutSec: 0.5 }] },
+    (t) => t.includes("(decision model") && !t.includes("(remembered)"),
+  );
   await runner.progress(0);
 
   // Queued: three plans sent at once, as an AI would while thinking; the second waits for what the first brings up
@@ -51,14 +82,17 @@ try {
   const q2 = await runner.run({ window: C, when: "84", steps: [{ click: "除以" }, { click: "四" }, { click: "等于" }, { expect: "21" }] }, false);
   const queuedMs = performance.now() - t0;
   const rep = await runner.progress(60);
-  const okQ = rep.text.includes("r5 ✓") && rep.text.includes("r6 ✓");
+  const okQ = (rep.text.match(/^r\d+ ✓ done/gm) ?? []).length === 2;
   if (!okQ) failures++;
   console.log(`\n${okQ ? "✓" : "✗"} two plans queued in ${Math.round(queuedMs)} ms, all done ${Math.round(performance.now() - t0)} ms after the first was sent\n    ${q1.text}\n    ${q2.text}\n${rep.text.split("\n").map((l) => "    " + l).join("\n")}`);
 
+  // What was learnt in the bench window is not used in another program
+  await check("memory stays with its program", { window: C, steps: [{ click: "send the form" }] }, (t) => !t.includes("(remembered)") && t.includes("✗"));
   // A failure cancels what was queued behind it, and the next run is told instead of queued
   await runner.run({ window: C, steps: [{ click: "zzz no such button" }] }, false);
   await runner.run({ window: C, steps: [{ click: "一" }] }, false);
-  await new Promise((r) => setTimeout(r, 4000));
+  // Until the failure has happened (not reported yet): a target that isn't there is looked for twice, which takes a few seconds
+  for (let t = 0; t < 100 && !(runner as unknown as { unreported?: unknown }).unreported; t++) await new Promise((r) => setTimeout(r, 200));
   const told = await runner.run({ window: C, steps: [{ click: "二" }] }, false);
   const okF = !told.ok && told.text.startsWith("Not queued") && told.text.includes("cancelled");
   if (!okF) failures++;

@@ -29,6 +29,32 @@ export interface Plan {
   on?: Record<string, string>;
   /** Window every step works in unless it names its own */
   window?: string | number;
+  /** Run the steps once per row: [["7","3"], …] fills $1 $2 …, [{a: "7"}, …] fills ${a} */
+  repeat?: Row[];
+  /** Inputs don't wait for the screen to settle, only for the program to take them (a screen that stays put) */
+  fast?: boolean;
+}
+
+type Cell = string | number | boolean;
+type Row = Cell[] | Record<string, Cell>;
+
+/** A step with $1 / ${name} filled in from a row; a value that is the whole placeholder keeps its type (true) */
+function fill(v: unknown, row: Row): unknown {
+  const get = (k: string): Cell | undefined => (Array.isArray(row) ? (/^\d+$/.test(k) ? row[Number(k) - 1] : undefined) : row[k]);
+  if (typeof v === "string") {
+    const whole = v.match(/^\$(?:\{(\w+)\}|(\d+))$/);
+    if (whole) {
+      const got = get(whole[1] ?? whole[2]);
+      if (got !== undefined) return got;
+    }
+    return v.replace(/\$(?:\{(\w+)\}|(\d+))/g, (m, name, n) => {
+      const got = get(name ?? n);
+      return got === undefined ? m : String(got);
+    });
+  }
+  if (Array.isArray(v)) return v.map((x) => fill(x, row));
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [fill(k, row) as string, fill(x, row)]));
+  return v;
 }
 
 type Status = "queued" | "running" | "done" | "failed" | "cancelled";
@@ -43,7 +69,24 @@ interface Job {
   drex: { calls: number; tokens: number; ms: number };
   reported: boolean;
   done: Promise<void>;
+  /** Choices the decision model made in this plan: remembered for good only once the whole plan has worked */
+  pending: Map<string, string>;
+  /** The screen is known to have settled since the last action (an expect or a wait came after it) */
+  settled: boolean;
+  /** The program each window of the plan belongs to, the scope of what is remembered */
+  scopes: Map<string, string>;
+  /** The plan's last steps and what each did to the screen, for the decision model */
+  history: string[];
 }
+
+/** What an action's reply says it did to the screen: changed it, changed nothing, or (fast, no reading) unknown */
+function effectOf(r: ToolResult): "changed" | "unchanged" | "" {
+  const t = r.text ?? "";
+  if (/Screen changed around|is now in front/.test(t)) return "changed";
+  if (/Nothing visibly changed|No visible change/.test(t)) return "unchanged";
+  return "";
+}
+const effectText = (e: string) => (e === "changed" ? " → the screen changed" : e === "unchanged" ? " → nothing changed on screen" : "");
 
 const CLICKISH = /^(Button|SplitButton|Link|MenuItem|TabItem|ListItem|TreeItem|DataItem|CheckBox|RadioButton|Hyperlink)$/;
 const FIELDISH = /^(Edit|ComboBox|Document|Spinner|CheckBox|RadioButton|Slider)$/;
@@ -145,6 +188,20 @@ class Drex {
     await this.save();
   }
 
+  /** The probability that a yes/no claim holds */
+  async yes(state: string, claim: string): Promise<{ p: number; tokens: number; ms: number }> {
+    const t = performance.now();
+    const r = await fetch("https://console.nace.ai/v1/systemone", {
+      method: "POST",
+      signal: AbortSignal.timeout(8000),
+      headers: { Authorization: `Bearer ${this.key}`, "Content-Type": "application/json", "X-Nace-Client": "asctrl-run/1" },
+      body: JSON.stringify({ model: this.model, state, questions: { holds: { type: "noul", instructions: claim } } }),
+    });
+    const body = (await r.json()) as { answers?: { holds: { noul: number } }; usage?: { input_tokens: number } };
+    if (!r.ok || !body.answers) throw new Error(`Drex ${r.status}: ${JSON.stringify(body).slice(0, 200)}`);
+    return { p: body.answers.holds.noul, tokens: body.usage?.input_tokens ?? 0, ms: performance.now() - t };
+  }
+
   async choose(state: string, question: string, options: Record<string, string>): Promise<{ a: DrexAnswer; tokens: number; ms: number }> {
     const t = performance.now();
     const ctl = AbortSignal.timeout(8000);
@@ -188,7 +245,7 @@ export class Runner {
         text: `Not queued: an earlier plan failed, and this one was likely written assuming it would work. Re-plan from here.\n\n${this.report(j)}${cancelled.length ? `\n(also cancelled: ${cancelled.map((c) => c.id).join(", ")})` : ""}`,
       };
     }
-    const job: Job = { id: `r${++this.n}`, plan, status: "queued", lines: [], ms: 0, drex: { calls: 0, tokens: 0, ms: 0 }, reported: false, done: Promise.resolve() };
+    const job: Job = { id: `r${++this.n}`, plan, status: "queued", lines: [], ms: 0, drex: { calls: 0, tokens: 0, ms: 0 }, reported: false, done: Promise.resolve(), pending: new Map(), settled: false, scopes: new Map(), history: [] };
     this.jobs.push(job);
     job.done = this.chain = this.chain.then(() => this.exec(job));
     if (wait) {
@@ -246,12 +303,33 @@ export class Runner {
       if (p.when) {
         const r = await this.call("wait_for", { text: p.when, timeoutSec: p.whenSec ?? 5, ...(p.window !== undefined ? { within: p.window } : {}), after: "none" });
         if (!r.ok) return await this.fail(job, `✗ not started: "${p.when}" did not show up`, p.window);
+        job.settled = true;
       }
-      for (const step of p.steps) {
-        const ok = await this.step(job, step);
-        if (!ok) return await this.fail(job, undefined, (step.window as string | number | undefined) ?? p.window);
+      // Once, or once per row of data: the steps written once, $1 / ${name} filled in from each row
+      const rows: (Row | undefined)[] = p.repeat?.length ? p.repeat : [undefined];
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        // The first row's steps are reported one by one; later rows in a line each only when one goes wrong
+        const mark = job.lines.length;
+        for (const raw of p.steps) {
+          const step = row === undefined ? raw : (fill(raw, row) as Step);
+          const ok = await this.step(job, step);
+          if (!ok) {
+            if (i > 0) job.lines.splice(mark, 0, `✗ row ${i + 1} of ${rows.length} ${JSON.stringify(row).slice(0, 80)}:`);
+            return await this.fail(job, undefined, (step.window as string | number | undefined) ?? p.window);
+          }
+        }
+        if (i > 0) {
+          // What went right needs no line per step: only what the decision model had to settle
+          const said = job.lines.splice(mark).filter((l) => l.includes("(decision model"));
+          job.lines.push(...said);
+        }
+        if (i === 0 && rows.length > 1) job.lines.push(`✓ row 1 of ${rows.length} ${JSON.stringify(row).slice(0, 80)}`);
       }
+      if (rows.length > 1) job.lines.push(`✓ rows 2–${rows.length} the same way`);
       job.status = "done";
+      // The plan worked, its checks included: what the decision model chose in it can be relied on next time
+      for (const [k, v] of job.pending) await this.drex.remember(k, v);
     } catch (e) {
       job.lines.push(`✗ ${(e as Error).message}`);
       job.status = "failed";
@@ -265,6 +343,9 @@ export class Runner {
 
   private async fail(job: Job, line: string | undefined, window?: string | number) {
     if (line) job.lines.push(line);
+    // Two entries per choice (the candidates it chose among, and the wording)
+    const n = job.pending.size / 2;
+    if (n) job.lines.push(`(${n === 1 ? "the decision model's choice in this plan was" : `the decision model's ${n} choices in this plan were`} not remembered, since the plan failed)`);
     job.status = "failed";
     this.unreported = job;
     // A short look at where things stand, so the AI can re-plan without a separate look
@@ -276,11 +357,39 @@ export class Runner {
     return this.client.call(tool, args, 120_000);
   }
 
-  /** One step: run it as written, and when its target can't be told, try the known interruptions, then the decision model */
+  /** The program a window belongs to (its program and title, numbers left out), so what is learnt in one
+   *  program is never used in another */
+  private async scope(job: Job, window: string | number | undefined): Promise<string> {
+    const k = String(window ?? "");
+    const known = job.scopes.get(k);
+    if (known) return known;
+    const lw = (await this.call("list_windows", { silent: true }).catch(() => undefined))?.text ?? "";
+    const wins = [...lw.matchAll(/^\[(\d+)\] (\S+) "(.*)"/gm)].map((m) => ({ h: Number(m[1]), program: m[2], title: m[3] }));
+    const w =
+      typeof window === "number"
+        ? wins.find((x) => x.h === window)
+        : typeof window === "string"
+          ? wins.find((x) => `${x.program} ${x.title}`.toLowerCase().includes(window.toLowerCase()))
+          : wins[0];
+    const scope = w ? `${w.program.toLowerCase()}|${w.title.replace(/\d+/g, "#").replace(/\s+/g, " ").trim()}` : "?";
+    job.scopes.set(k, scope);
+    return scope;
+  }
+
+  /** One step; afterwards, whether the screen is known to have settled */
   private async step(job: Job, s: Step): Promise<boolean> {
+    const ok = await this.stepOnce(job, s);
+    const fast = (s.fast as boolean | undefined) ?? job.plan.fast;
+    job.settled = s.expect !== undefined || s.await !== undefined || s.check !== undefined || s.tool === "wait_for" || (s.fill !== undefined && !fast);
+    return ok;
+  }
+
+  /** One step: run it as written, and when its target can't be told, try the known interruptions, then the decision model */
+  private async stepOnce(job: Job, s: Step): Promise<boolean> {
     const window = (s.window as string | number | undefined) ?? job.plan.window;
     const w = window !== undefined ? { window } : {};
-    const [tool, args, what, kind] = translate(s, w);
+    if (typeof s.check === "string") return this.checkStep(job, s.check, window, (s.timeoutSec as number | undefined) ?? 5);
+    const [tool, args, what, kind] = translate(s, w, (s.fast as boolean | undefined) ?? job.plan.fast);
     if (!tool) {
       job.lines.push(`✗ not a step: ${JSON.stringify(s).slice(0, 120)}`);
       return false;
@@ -292,13 +401,16 @@ export class Runner {
       }
       return true;
     }
-    // A wording the decision model already resolved: go straight to the control it chose
-    const alias = typeof args.target === "string" ? await this.drex.recall(`alias|${kind}|${norm(args.target)}`) : undefined;
+    // A wording the decision model already resolved in this program: go straight to the control it chose
+    const scope = typeof args.target === "string" ? await this.scope(job, window) : "";
+    const recall = async (k: string) => job.pending.get(k) ?? (await this.drex.recall(k));
+    const alias = typeof args.target === "string" ? await recall(`alias|${scope}|${kind}|${norm(args.target)}`) : undefined;
     const aliasName = alias?.match(/^\w+ "(.*)"$/)?.[1];
     if (aliasName) {
       const r0 = await this.call(tool, { ...args, target: aliasName, timeoutSec: 0.3, probe: true });
       if (r0.ok) {
         job.lines.push(`✓ ${what} → ${alias} (remembered)`);
+        this.noteDone(job, `${what} → ${alias}`, r0);
         return true;
       }
     }
@@ -306,6 +418,7 @@ export class Runner {
     let r = await this.call(tool, args.target !== undefined ? { ...args, probe: true } : args);
     if (r.ok) {
       job.lines.push(`✓ ${what}`);
+      this.noteDone(job, what, r);
       return true;
     }
     const err = (r.error ?? r.text ?? "").trim();
@@ -323,6 +436,7 @@ export class Runner {
             r = await this.call(tool, args);
             if (r.ok) {
               job.lines.push(`✓ ${what}`);
+              this.noteDone(job, what, r);
               return true;
             }
           }
@@ -334,90 +448,213 @@ export class Runner {
       return false;
     }
 
-    // The target couldn't be told: who should decide?
-    // The equal matches the driver named first (the words may fit them only by chance: "To" in "Toggle"), then
-    // the closest controls of the right kind in the window
-    const o = await this.call("observe", { silent: true, ...w, max: 1000 });
-    const named = parseControls(err).filter((c) => /equally well|in \d+ places/.test(err));
-    const seen = new Set(named.map((c) => c.ref));
-    const cands = [...named, ...shortlist(parseControls(o.text ?? ""), target!, kind).filter((c) => !seen.has(c.ref))].slice(0, 40);
     const why = /equally well|in \d+ places/.test(err) ? "several match" : "no exact match";
+    // Wait first, judge after: nothing showing that name right after an action (or a fast input, which doesn't
+    // wait for the screen) may only mean it hasn't come up yet. Asked now, the decision model would pick among
+    // what is there and take "not there yet" for "called something else".
+    if (why === "no exact match" && !job.settled && s.timeoutSec === undefined) {
+      const r1 = await this.call(tool, { ...args, timeoutSec: 0.8, probe: true });
+      if (r1.ok) {
+        job.lines.push(`✓ ${what} (showed up after a moment)`);
+        this.noteDone(job, what, r1);
+        return true;
+      }
+    }
     // The first try didn't wait: what the plan named may still be on its way (a dialog opening). Before giving
     // up, give it the usual moment to show up.
     const late = async () => {
       if (s.timeoutSec !== undefined || why !== "no exact match") return false;
       const r3 = await this.call(tool, { ...args, timeoutSec: 1.5 });
-      if (r3.ok) job.lines.push(`✓ ${what} (showed up late)`);
+      if (r3.ok) {
+        job.lines.push(`✓ ${what} (showed up late)`);
+        this.noteDone(job, what, r3);
+      }
       return r3.ok;
     };
-    if (!cands.length) {
-      if (await late()) return true;
-      job.lines.push(`✗ ${what}: ${firstLines(err, 4)}`);
-      return false;
-    }
-    const key = `${kind}|${norm(target!)}|${cands.map(ident).sort().join("¦")}`;
-    let ref: string | undefined;
-    let how = "";
-    const remembered = await this.drex.recall(key);
-    if (remembered) {
-      ref = cands.find((c) => ident(c) === remembered)?.ref;
-      if (ref) how = "remembered";
-    }
-    if (!ref) {
-      if (!this.drex.ready) {
-        job.lines.push(`✗ ${what}: ${why}, and no decision model is set up (NACE_API_KEY):\n${cands.slice(0, 8).map((c) => `   [${c.ref}] ${c.label}`).join("\n")}`);
+    // Who decides: up to twice, since the decision model may say the screen isn't ready yet or a popup is in the
+    // way, and once that is dealt with it looks again
+    for (let round = 0; round < 2; round++) {
+      // The equal matches the driver named first (the words may fit them only by chance: "To" in "Toggle"), then
+      // the closest controls of the right kind in the window, as it is now
+      const o = await this.call("observe", { silent: true, ...w, max: 1000 });
+      const named = round === 0 ? parseControls(err).filter(() => why === "several match") : [];
+      const seen = new Set(named.map((c) => c.ref));
+      const cands = [...named, ...shortlist(parseControls(o.text ?? ""), target!, kind).filter((c) => !seen.has(c.ref))].slice(0, 40);
+      if (!cands.length) {
+        if (await late()) return true;
+        job.lines.push(`✗ ${what}: ${firstLines(err, 4)}`);
         return false;
       }
-      const options: Record<string, string> = Object.fromEntries(cands.map((c) => [c.ref, c.label]));
-      options.none = "None of these";
-      const state = `Window: ${String(window ?? "the one in front")}. ${job.plan.goal ? `Overall goal: ${job.plan.goal}.` : ""}`;
-      const question = `Which control is the one meant by: ${what}?`;
+      const key = `${scope}|${kind}|${norm(target!)}|${cands.map(ident).sort().join("¦")}`;
+      let ref: string | undefined;
+      let how = "";
+      let byModel = false;
+      const remembered = await recall(key);
+      if (remembered) {
+        ref = cands.find((c) => ident(c) === remembered)?.ref;
+        if (ref) how = "remembered";
+      }
+      const list = cands.slice(0, 8).map((c) => `   [${c.ref}] ${c.label}`).join("\n");
+      if (!ref) {
+        if (!this.drex.ready) {
+          job.lines.push(`✗ ${what}: ${why}, and no decision model is set up (NACE_API_KEY):\n${list}`);
+          return false;
+        }
+        // Besides the controls: what else can be true of this screen (the harness of the model's makers offers the
+        // same: wait, Escape, help)
+        const options: Record<string, string> = Object.fromEntries(cands.map((c) => [c.ref, c.label]));
+        options.wait = "The control meant is not on screen yet: the window is still loading or opening something";
+        options.escape = "A popup, menu or dialog is in the way of the control meant: close it with Escape";
+        options.none = "None of these: the control meant is not here";
+        const done = job.history.slice(-6);
+        const state = [
+          `Window: ${String(window ?? "the one in front")}.`,
+          job.plan.goal ? `Overall goal: ${job.plan.goal}.` : "",
+          done.length ? `Steps already taken in this plan, oldest first:\n${done.map((h, k) => `${k + 1}. ${h}`).join("\n")}` : "No steps taken yet in this plan.",
+          `Step now: ${what}.`,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        let d;
+        try {
+          d = await this.drex.choose(state, `Which control is the one meant by the step now?`, options);
+        } catch (e) {
+          job.lines.push(`✗ ${what}: ${why}; the decision model failed (${(e as Error).message})`);
+          return false;
+        }
+        job.drex.calls++;
+        job.drex.tokens += d.tokens;
+        job.drex.ms += d.ms;
+        const probs = Object.values(d.a.probabilities ?? {}).sort((a, b) => b - a);
+        const margin = probs.length > 1 ? probs[0] - probs[1] : 1;
+        const sure = d.a.confidence >= 0.7 && margin >= 0.3;
+        // Not ready yet, or something in the way: deal with it and look again (once)
+        if (round === 0 && sure && d.a.choice === "wait") {
+          job.lines.push(`… ${what}: the decision model says the window isn't ready yet (${d.a.confidence.toFixed(2)}); waiting`);
+          await this.call("wait_for", { stable: true, timeoutSec: 4, ...(window !== undefined ? { within: window } : {}), after: "none", silent: true });
+          const again = await this.call(tool, { ...args, timeoutSec: 0.3, probe: true });
+          if (again.ok) {
+            job.lines.push(`✓ ${what}`);
+            this.noteDone(job, what, again);
+            return true;
+          }
+          continue;
+        }
+        if (round === 0 && sure && d.a.choice === "escape") {
+          job.lines.push(`↷ ${what}: the decision model says something is in the way (${d.a.confidence.toFixed(2)}); pressed Escape`);
+          await this.call("press_keys", { keys: "escape", ...w, after: "none" });
+          const again = await this.call(tool, { ...args, timeoutSec: 0.3, probe: true });
+          if (again.ok) {
+            job.lines.push(`✓ ${what}`);
+            this.noteDone(job, what, again);
+            return true;
+          }
+          continue;
+        }
+        const pick = cands.find((c) => c.ref === d.a.choice);
+        if ((!pick || !sure) && round === 0) {
+          // Unsure the first time: the screen may still be on its way somewhere. Let it settle, look again, ask again.
+          await this.call("wait_for", { stable: true, timeoutSec: 1.5, ...(window !== undefined ? { within: window } : {}), after: "none", silent: true });
+          const again = await this.call(tool, { ...args, timeoutSec: 0.2, probe: true });
+          if (again.ok) {
+            job.lines.push(`✓ ${what} (showed up after a moment)`);
+            this.noteDone(job, what, again);
+            return true;
+          }
+          continue;
+        }
+        if (!pick || !sure) {
+          if (await late()) return true;
+          const said = pick ? `best ${pick.label}` : d.a.choice === "wait" ? "the window isn't ready" : d.a.choice === "escape" ? "something is in the way" : "none fits";
+          job.lines.push(`✗ ${what}: ${why}; the decision model wasn't sure (${said}, ${d.a.confidence.toFixed(2)}). Candidates:\n${list}`);
+          return false;
+        }
+        // Something that can't be undone is done only when the plan named it, not on the model's guess
+        if (DESTRUCTIVE.test(pick.name) && !norm(pick.name).includes(norm(target!)) && !DESTRUCTIVE.test(target!)) {
+          job.lines.push(`✗ ${what}: the decision model picked ${pick.label}, which can't be undone and isn't what the plan named. Candidates:\n${list}`);
+          return false;
+        }
+        ref = pick.ref;
+        byModel = true;
+        how = `decision model ${d.a.confidence.toFixed(2)}, ${d.tokens} tokens, ${Math.round(d.ms)} ms`;
+      }
+      const r2 = await this.call(tool, { ...args, target: ref, nth: undefined, role: undefined });
+      const label = cands.find((c) => c.ref === ref)?.label ?? ref;
+      if (!r2.ok) {
+        job.lines.push(`✗ ${what} → ${label} (${how}): ${firstLines(r2.error ?? "", 4)}`);
+        return false;
+      }
+      // A click the model chose that visibly did nothing was most likely the wrong control: say so rather than go on
+      // (a field is checked by reading it back, so this is for clicks)
+      if (byModel && kind === "click" && effectOf(r2) === "unchanged") {
+        job.lines.push(`✗ ${what} → ${label} (${how}): clicked, but nothing changed on screen, so it was likely the wrong control. Candidates:\n${list}`);
+        return false;
+      }
+      if (byModel) {
+        // Held for this plan only: kept for good once the whole plan has worked (an action that ran is not yet
+        // proof the choice was right; the plan's checks are)
+        job.pending.set(key, ident(cands.find((c) => c.ref === ref)!));
+        job.pending.set(`alias|${scope}|${kind}|${norm(target!)}`, ident(cands.find((c) => c.ref === ref)!));
+      }
+      job.lines.push(`✓ ${what} → ${label} (${how})`);
+      this.noteDone(job, `${what} → ${label}`, r2);
+      return true;
+    }
+    job.lines.push(`✗ ${what}: still not there after waiting and looking again`);
+    return false;
+  }
+
+  /** check: the decision model says whether a claim holds for the window as it is now, asked again until it does
+   *  or time runs out. For what a text search can't settle ("the email was sent", "the dialog shows an error"). */
+  private async checkStep(job: Job, claim: string, window: string | number | undefined, timeoutSec: number): Promise<boolean> {
+    const what = `check "${claim}"`;
+    if (!this.drex.ready) {
+      job.lines.push(`✗ ${what}: no decision model is set up (NACE_API_KEY)`);
+      return false;
+    }
+    const until = performance.now() + timeoutSec * 1000;
+    let p = 0;
+    for (let n = 0; ; n++) {
+      const o = await this.call("observe", { silent: true, ...(window !== undefined ? { window } : {}), max: 150 });
+      const text = o.text ?? "";
+      // The windows and the controls of the one looked at; the coordinates mean nothing to the model
+      const state = text.replace(/ @\(\d+,\d+\)/g, "").replace(/Pass a reference such as[^\n]*/, "");
       let d;
       try {
-        d = await this.drex.choose(state, question, options);
+        d = await this.drex.yes(state, `${claim} Answer from the window as it is now.`);
       } catch (e) {
-        job.lines.push(`✗ ${what}: ${why}; the decision model failed (${(e as Error).message})`);
+        job.lines.push(`✗ ${what}: the decision model failed (${(e as Error).message})`);
         return false;
       }
       job.drex.calls++;
       job.drex.tokens += d.tokens;
       job.drex.ms += d.ms;
-      const pick = cands.find((c) => c.ref === d.a.choice);
-      const probs = Object.values(d.a.probabilities ?? {}).sort((a, b) => b - a);
-      const margin = probs.length > 1 ? probs[0] - probs[1] : 1;
-      const list = cands.slice(0, 8).map((c) => `   [${c.ref}] ${c.label}`).join("\n");
-      if (!pick || d.a.confidence < 0.7 || margin < 0.3) {
-        if (await late()) return true;
-        job.lines.push(`✗ ${what}: ${why}; the decision model wasn't sure (${pick ? `best ${pick.label}` : "none fits"}, ${d.a.confidence.toFixed(2)}). Candidates:\n${list}`);
-        return false;
+      p = d.p;
+      if (p >= 0.85) {
+        job.lines.push(`✓ ${what} (${p.toFixed(2)}${n ? `, after ${n + 1} looks` : ""}; decision model, ${d.tokens} tokens)`);
+        job.settled = true;
+        return true;
       }
-      // Something that can't be undone is done only when the plan named it, not on the model's guess
-      if (DESTRUCTIVE.test(pick.name) && !norm(pick.name).includes(norm(target!)) && !DESTRUCTIVE.test(target!)) {
-        job.lines.push(`✗ ${what}: the decision model picked ${pick.label}, which can't be undone and isn't what the plan named. Candidates:\n${list}`);
-        return false;
-      }
-      ref = pick.ref;
-      how = `decision model ${d.a.confidence.toFixed(2)}, ${d.tokens} tokens, ${Math.round(d.ms)} ms`;
-      await this.drex.remember(key, ident(pick));
-      await this.drex.remember(`alias|${kind}|${norm(target!)}`, ident(pick));
+      if (performance.now() + 500 > until) break;
+      await new Promise((r) => setTimeout(r, 500));
     }
-    const r2 = await this.call(tool, { ...args, target: ref, nth: undefined, role: undefined });
-    const label = cands.find((c) => c.ref === ref)?.label ?? ref;
-    if (r2.ok) {
-      job.lines.push(`✓ ${what} → ${label} (${how})`);
-      return true;
-    }
-    job.lines.push(`✗ ${what} → ${label} (${how}): ${firstLines(r2.error ?? "", 4)}`);
+    job.lines.push(`✗ ${what}: not so after ${timeoutSec} s (the decision model gives it ${p.toFixed(2)})`);
     return false;
+  }
+
+  /** A step that went through, and what it did to the screen, for the decision model's view of the plan */
+  private noteDone(job: Job, what: string, r: ToolResult) {
+    job.history.push(`${what}${effectText(effectOf(r))}`);
+    if (job.history.length > 12) job.history.splice(0, job.history.length - 12);
   }
 }
 
 const firstLines = (s: string, n: number) => s.split("\n").slice(0, n).join("\n").slice(0, 900);
 
 /** A plan step → the driver tool, its arguments, a short description, and what kind of control it targets */
-function translate(s: Step, w: Record<string, unknown>): [ToolName | undefined, Record<string, unknown>, string, "click" | "field"] {
+function translate(s: Step, w: Record<string, unknown>, fast?: boolean): [ToolName | undefined, Record<string, unknown>, string, "click" | "field"] {
   const pass = (keys: string[]) => Object.fromEntries(keys.filter((k) => s[k] !== undefined).map((k) => [k, s[k]]));
-  const quick = { after: "none" };
+  const quick = { after: "none", ...(fast ? { fast: true } : {}) };
   // The first try doesn't wait: every action already waits for the screen to settle, so what is named is
   // normally there. A miss goes to the decision model at once, and only if that finds nothing is it given
   // a moment to show up (see late)

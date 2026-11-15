@@ -506,7 +506,7 @@ server.registerTool(
       "Carry out a plan: steps named by what they act on, written without looking first. Returns at once (queued), so write the next plan while this one runs; " +
       "call progress to see how plans went. A plan that fails cancels the plans queued behind it, and the next run call returns that failure instead of queueing. " +
       "Steps: {open: program/URL} · {click: text} · {press: text} (UI Automation, no mouse) · {fill: {label: value, …}} · {type: text, into?: label, enter?} · " +
-      "{keys: \"ctrl+s\"} · {expect: text shown on success, timeoutSec?} · {await: window title} · {scroll: up|down, target?} · {tool: any batchable tool, …its args}. " +
+      "{keys: \"ctrl+s\"} · {expect: text shown on success, timeoutSec?} · {check: a claim about the window (\"the email was sent\"), judged by the decision model, timeoutSec?} · {await: window title} · {scroll: up|down, target?} · {tool: any batchable tool, …its args}. " +
       "Each step may add window. Text is matched on this computer first; when it matches several controls or none, a decision model picks among a few candidates, " +
       "and only a confident choice is acted on (never something irreversible the plan didn't name). End plans with expect so success is checked without looking.",
     inputSchema: {
@@ -516,6 +516,12 @@ server.registerTool(
       whenSec: z.number().min(0).max(60).optional().describe("How long to wait for when; default 5"),
       on: z.record(z.string(), z.string()).optional().describe('Known interruptions: {"text a popup shows": "what to press"}, e.g. {"Leave site?": "Leave"}'),
       window: windowArg.optional(),
+      repeat: z
+        .array(z.union([z.array(z.union([z.string(), z.number(), z.boolean()])), z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))]))
+        .max(1000)
+        .optional()
+        .describe('Run the steps once per row, writing them only once: [["7","3","21"], …] fills $1 $2 $3 in any step text, [{a:"7"}, …] fills ${a}'),
+      fast: z.boolean().optional().describe("Inputs don't wait for the screen to settle (about 25 ms each), for many inputs into a screen that stays put (a calculator, a grid); expect still checks results"),
       wait: z.boolean().optional().describe("Return only when the plan has run, with its report; default false"),
     },
   },
