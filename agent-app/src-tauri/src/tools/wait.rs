@@ -9,6 +9,24 @@ fn alternatives(s: &str) -> Vec<String> {
     s.split('|').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect()
 }
 
+/// Can `q` be read off the pixels inside `rect`? None when the pixels can't be read at all (no OCR), so the
+/// caller falls back to trusting the control.
+fn on_pixels(rect: uia::Rect, q: &str) -> Option<bool> {
+    let v = capture::virtual_screen();
+    // A little margin: the control's box can sit tight on the glyphs, which the engine then misses
+    let (l, t, r, b) = ((rect.0 - 4).max(v.left), (rect.1 - 4).max(v.top), (rect.2 + 4).min(v.left + v.width), (rect.3 + 4).min(v.top + v.height));
+    if r - l < 4 || b - t < 4 {
+        return Some(false);
+    }
+    let lines = ocr::read(capture::Area { left: l, top: t, width: r - l, height: b - t }).ok()?;
+    if !ocr::find(&lines, q).is_empty() {
+        return Some(true);
+    }
+    // Text that wraps comes back as several lines: look across the breaks too
+    let norm = |s: &str| s.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect::<String>();
+    Some(norm(&lines.iter().map(|l| l.text()).collect::<String>()).contains(&norm(q)))
+}
+
 /// Is any of `texts` showing in `hwnd`? Among its controls first; failing that, on its pixels.
 /// Some((what was found, among the controls?)) when it is.
 fn showing(hwnd: isize, texts: &[String], f: &Frame, use_ocr: bool, problem: &mut String) -> Option<(String, bool)> {
@@ -18,7 +36,11 @@ fn showing(hwnd: isize, texts: &[String], f: &Frame, use_ocr: bool, problem: &mu
         Ok(scene) => {
             thin = scene.thin();
             for q in texts {
-                if let Some(n) = locate::matches(&scene, q, "").first() {
+                // Web pages keep text they hide with CSS (transparent, covered, a loader that has finished) in the
+                // tree as an ordinary on-screen control. Plain text shows what it says, so it only counts when the
+                // pixels there say it too; buttons and links may show just an icon, so they are taken on trust.
+                let hit = locate::matches(&scene, q, "").into_iter().find(|n| n.role != "Text" || on_pixels(n.rect, q) != Some(false));
+                if let Some(n) = hit {
                     return Some((n.line(&at), true));
                 }
             }
