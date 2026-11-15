@@ -80,28 +80,52 @@ impl Fx {
 /// The area a click framed is gone (it was a popup the click closed, like a browser's translate bubble): the
 /// overlay lets the frame go now rather than after its usual linger. `zone` is the one sent at the start.
 pub fn zone_gone(call: &str, zone: Value) {
+    zone_left(call, zone, false);
+}
+
+/// The frame no longer surrounds its area: the window it was drawn round was closed or hidden (`moved` false:
+/// it has already faded itself out, so the frame goes at once), or it moved or changed size (`moved` true: the
+/// frame fades, since the window is still there to look at)
+fn zone_left(call: &str, zone: Value, moved: bool) {
     if call.is_empty() || zone.is_null() {
         return;
     }
-    emit(json!({ "phase": "step", "id": format!("{call}.gone"), "tool": "zone", "index": 0, "ok": true, "geo": { "zone": zone } }));
+    emit(json!({ "phase": "step", "id": format!("{call}.gone"), "tool": "zone", "index": 0, "ok": true, "geo": { "zone": zone, "moved": moved } }));
 }
 
-/// Watch the window a click was framed in for a moment after the click, and the moment it closes (a popup's
-/// close button, a dialog's OK) let the frame go with it. Polls on its own thread, so the action's reply never waits.
-pub fn zone_gone_when_closed(call: &str, hwnd: isize, zone: Value) {
+/// How long the overlay can keep a work-area frame up after the last action in it (fx.ts unframeLater), and a
+/// little more: as long as the frame can be on screen, it must not outlive or lag behind its window
+const ZONE_LINGER: std::time::Duration = std::time::Duration::from_millis(8500);
+
+/// Only the frame drawn last is watched: a newer one replaces it on the overlay
+static ZONE_WATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Watch the window an action was framed in for as long as the frame can stay up, and let the frame go the
+/// moment the window closes, hides or minimizes (a popup's close button, a dialog's OK) or moves or changes size
+/// (maximize, restore, a drag): a frame left round where a window used to be is worse than none. Polls on its own
+/// thread, so the action's reply never waits.
+pub fn zone_follows_window(call: &str, hwnd: isize, zone: Value) {
     if call.is_empty() || zone.is_null() {
         return;
     }
     let call = call.to_string();
+    let me = ZONE_WATCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let start_rect = crate::winmgr::rect_of(hwnd);
     std::thread::spawn(move || {
         let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_millis(1500) {
-            // Hidden counts: a popup hides its window (after fading itself out) a moment before destroying it
-            if crate::winmgr::rect_of(hwnd).is_none() {
-                zone_gone(&call, zone);
+        while start.elapsed() < ZONE_LINGER {
+            if ZONE_WATCH.load(std::sync::atomic::Ordering::SeqCst) != me {
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(15));
+            match crate::winmgr::rect_of(hwnd) {
+                // Hidden counts: a popup hides its window (after fading itself out) a moment before destroying it
+                None => return zone_left(&call, zone, false),
+                Some(r) if Some(r) != start_rect => return zone_left(&call, zone, true),
+                _ => {}
+            }
+            // Popups close right after the click: watch closely at first, then at a gentler pace
+            let pace = if start.elapsed() < std::time::Duration::from_millis(1500) { 15 } else { 60 };
+            std::thread::sleep(std::time::Duration::from_millis(pace));
         }
     });
 }
@@ -109,8 +133,12 @@ pub fn zone_gone_when_closed(call: &str, hwnd: isize, zone: Value) {
 /// A click-style animation at a screen point: the window it lands in is framed, a cursor flies there and
 /// presses. Returns right away.
 pub fn click(call: &str, part: &str, at: (i32, i32), count: u32, ok: bool) {
-    let zone = crate::winmgr::top_window_at(at.0, at.1).and_then(crate::winmgr::rect_of).map(rect_json);
+    let win = crate::winmgr::top_window_at(at.0, at.1);
+    let zone = json!(win.and_then(crate::winmgr::rect_of).map(rect_json));
     let fx = Fx::start(call, part, "click", json!({ "count": count }), json!({ "at": pt_json(at), "zone": zone, "zoneIsWindow": true }));
     fx.step(0, ok);
     fx.end(ok);
+    if let Some(w) = win {
+        zone_follows_window(call, w, zone);
+    }
 }

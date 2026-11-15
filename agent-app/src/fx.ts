@@ -231,9 +231,23 @@ function unframeLater(ms = 8000, fadeMs = 420) {
 function zoneGone(e: FxEvent) {
   const r = rect(e.geo?.zone);
   if (!zone || !r || !(sameRect(zone.r, r) || sameRect(zone.r, zoneOf([r])))) return;
-  // The popup has already faded itself out by the time its window hides (Edge's take ~170 ms), so the frame
-  // has nothing left to fade with: let it go at once
-  unframeLater(0, 60);
+  // A popup has already faded itself out by the time its window hides (Edge's take ~170 ms), so the frame
+  // has nothing left to fade with: let it go at once. A window that moved or changed size is still there:
+  // the frame fades off where it stood instead of being left round where the window used to be.
+  unframeLater(0, e.geo?.moved === true ? 220 : 60);
+}
+
+/** The body is about to frame or work somewhere else (a window of its own, a scroll outside the frame):
+ *  the work-area frame goes now rather than linger where nothing is happening any more */
+function dropZone(unless?: Pt) {
+  if (!zone) return;
+  if (unless) {
+    const r = zone.r;
+    if (unless.x >= r.x && unless.x <= r.x + r.w && unless.y >= r.y && unless.y <= r.y + r.h) return;
+  }
+  window.clearTimeout(zone.timer);
+  void zone.ol.out("fade", 220);
+  zone = null;
 }
 
 /** The pointer presses (count times) once its action has happened, or shakes red if it failed */
@@ -280,16 +294,20 @@ function dispatchStart(e: FxEvent) {
   );
   const count = Math.max(1, Math.min(3, num(e.args?.count, 1)));
   void job(async () => {
-    const xs = aimed.map((a) => a.p.x);
-    const gather = inside({ x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.min(...aimed.map((a) => a.p.y)) - 64 });
-    await fly(gather);
-    const ps = await body.split(aimed.map((a) => a.p));
-    await Promise.all(ps.map((p, k) => pressAt(p, outcome[aimed[k].i].p, count)));
-    await beat(more() ? 80 : 260);
-    // More work waiting: the pointers run together where the last one is, so the next shape starts right there
-    const last = ps[ps.length - 1];
-    await body.merge(ps, more() ? { x: last.x + DROP_AT.x, y: last.y + DROP_AT.y } : gather);
-    unframeLater();
+    try {
+      const xs = aimed.map((a) => a.p.x);
+      const gather = inside({ x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.min(...aimed.map((a) => a.p.y)) - 64 });
+      await fly(gather);
+      const ps = await body.split(aimed.map((a) => a.p));
+      await Promise.all(ps.map((p, k) => pressAt(p, outcome[aimed[k].i].p, count)));
+      await beat(more() ? 80 : 260);
+      // More work waiting: the pointers run together where the last one is, so the next shape starts right there
+      const last = ps[ps.length - 1];
+      await body.merge(ps, more() ? { x: last.x + DROP_AT.x, y: last.y + DROP_AT.y } : gather);
+    } finally {
+      // Whatever happened to the animation, the frame must not stay up for good
+      unframeLater();
+    }
   });
   typing?.();
 }
@@ -373,6 +391,7 @@ function upStart(e: FxEvent) {
 function scrollStart(e: FxEvent) {
   const p = pt(e.geo?.at);
   if (!p) return;
+  dropZone(p);
   const end = endOf(e.id);
   const info = scrollInfoOf(e.id);
   const amount = num(e.args?.amount, 3);
@@ -440,22 +459,25 @@ function dragStart(e: FxEvent) {
   const end = endOf(e.id);
   const ms = Math.min(800, Math.max(320, Math.hypot(b.x - a.x, b.y - a.y) * 0.9));
   void job(async () => {
-    const ptr = await pointTo(a);
-    ripple(a, { size: 26, ms: 420, from: 1.6, to: 0.6 });
-    await ptr.hold(true);
-    const line = strand(a, b, ms);
-    await ptr.moveTo(b, ms, Math.min(30, Math.hypot(b.x - a.x, b.y - a.y) * 0.08));
-    await ptr.hold(false);
-    ripple(b, { size: 30, ms: 480 });
-    void fadeOut(line, 520);
-    const r = await Promise.race([end, sleep(3000).then(() => null)]);
-    if (r && !r.ok) {
-      flashError();
-      await ptr.fail();
+    try {
+      const ptr = await pointTo(a);
+      ripple(a, { size: 26, ms: 420, from: 1.6, to: 0.6 });
+      await ptr.hold(true);
+      const line = strand(a, b, ms);
+      await ptr.moveTo(b, ms, Math.min(30, Math.hypot(b.x - a.x, b.y - a.y) * 0.08));
+      await ptr.hold(false);
+      ripple(b, { size: 30, ms: 480 });
+      void fadeOut(line, 520);
+      const r = await Promise.race([end, sleep(3000).then(() => null)]);
+      if (r && !r.ok) {
+        flashError();
+        await ptr.fail();
+      }
+      await beat(160);
+      await body.unpointer(ptr);
+    } finally {
+      unframeLater();
     }
-    await beat(160);
-    await body.unpointer(ptr);
-    unframeLater();
   });
 }
 
@@ -572,6 +594,9 @@ function cornerOf(r: R) {
 }
 
 function winStart(e: FxEvent) {
+  // The body is about to become the frame round the window itself, which then moves with it: two frames,
+  // one of them left behind when the window moves, is the leftover this prevents
+  dropZone();
   const r0 = rect(e.geo?.rect);
   if (!r0) return void landed(e.id, 0);
   let settle!: () => void;
@@ -647,6 +672,7 @@ async function winApply(id: string, action: string, r1: R | null) {
 
 /** Open an app: the ball waits; once the window is up it flies onto it and opens into a frame round it */
 function openAppStart(e: FxEvent) {
+  dropZone();
   const end = endOf(e.id);
   void job(async () => {
     body.kick("w", 200);

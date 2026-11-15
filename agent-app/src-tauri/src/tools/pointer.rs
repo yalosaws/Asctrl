@@ -141,7 +141,7 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
         }
         anim.step(0, true);
         anim.end(true);
-        fx::zone_gone_when_closed(&call, loc.hwnd, framed);
+        fx::zone_follows_window(&call, loc.hwnd, framed);
         let change = if delivered { pace.after_direct(before) } else { pace.after(before) };
         Ok(Did { done: done.unwrap_or_default() + &loc.note, change, hwnd: loc.scene, fresh: false, delivered })
     })
@@ -231,9 +231,12 @@ pub(super) async fn drag(ctx: &Ctx, args: &Value) -> Output {
         let b = locate::resolve(&to)?;
         locate::uncover(&a)?;
         let before = pace.before(Some(a.point));
-        let anim = Fx::start(&call, "a", "drag", json!({}), json!({ "from": fx::pt_json(a.point), "to": fx::pt_json(b.point), "zone": zone(a.hwnd), "zoneIsWindow": true }));
+        let framed = zone(a.hwnd);
+        let anim = Fx::start(&call, "a", "drag", json!({}), json!({ "from": fx::pt_json(a.point), "to": fx::pt_json(b.point), "zone": framed, "zoneIsWindow": true }));
         let r = input::drag(a.point.0, a.point.1, b.point.0, b.point.1, &button, ms);
         anim.end(r.is_ok());
+        // A drag often moves or resizes the very window it was framed in (a title bar, a splitter)
+        fx::zone_follows_window(&call, a.hwnd, framed);
         r?;
         let change = pace.after(before);
         Ok(Did { done: format!("Dragged {} to {}{}{}", a.desc, b.desc, a.note, b.note), change, hwnd: a.scene, fresh: false, delivered: false })

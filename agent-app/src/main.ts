@@ -122,7 +122,7 @@ function closeMenuSoon() {
   window.clearTimeout(menuTimer);
   menuTimer = window.setTimeout(() => showPanel(menu, false, true), 500);
 }
-orbHit.addEventListener("mouseenter", openMenu);
+// Only a click opens the menu: hovering over the orb shows nothing, so the pointer passing by never pops it up
 orbHit.addEventListener("click", () => (menu.hidden ? openMenu() : showPanel(menu, false, true)));
 orbHit.addEventListener("mouseleave", closeMenuSoon);
 menu.addEventListener("mouseenter", () => window.clearTimeout(menuTimer));

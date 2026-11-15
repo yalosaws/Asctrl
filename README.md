@@ -231,8 +231,8 @@ Software like this is, structurally, remote-control software; the difference is 
 
 - A remote connection needs the code, which the person reads out themselves; administrator access and restarts must be confirmed at the computer
 - The local link accepts only a process that can read the user's own `local.json`, and never a web page
-- A running session is visible at all times (gradient border around the screen, the orb showing each action) and can be ended from the orb
-- Quitting the driver disconnects
+- A running session is visible at all times (gradient border around the screen, the orb showing each action) and can be ended from the orb (click it for the menu)
+- Quitting the driver disconnects. Left Alt + right Alt held together quits it at once, even if the overlay is stuck
 - The relay can require a `RELAY_TOKEN`
 
 **Still to do before wide use:**

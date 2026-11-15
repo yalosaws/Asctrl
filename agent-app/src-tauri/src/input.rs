@@ -337,16 +337,23 @@ fn real_keys(ch: char, hkl: HKL, caps: bool) -> Option<Vec<INPUT>> {
 }
 
 /// Type any text (including CJK) without depending on the input method. Characters that have a key on the
-/// keyboard are pressed as real keys, so games and pages that read key codes see them; the rest (and all but
-/// digits where a Chinese / Japanese / Korean input method could catch them) is sent as unicode.
+/// keyboard are pressed as real keys, so games and pages that read key codes see them; the rest is sent as
+/// unicode. Where a Chinese / Japanese / Korean input method could catch keys, everything is sent as unicode,
+/// digits too: such an input method handles real keys on a path of its own, which the unicode characters
+/// overtake, so "第6行" came out as "第行6" and characters went missing.
 /// `real_keys_only`: press real keys whatever the input method (games, which read keys and use none).
-pub fn type_text(text: &str, real_keys_only: bool) -> Result<(), String> {
+/// `caught_up`: with such an input method, called before each Enter with the line just typed, to wait until
+/// the program has taken it in: Enter is not held up by the input method and would otherwise overtake the
+/// last characters of the line, or drop them.
+pub fn type_text(text: &str, real_keys_only: bool, caught_up: &mut dyn FnMut(&str)) -> Result<(), String> {
     check_target(None)?;
     let (hkl, ime) = target_keyboard();
     let native = ime && !real_keys_only;
     let caps = unsafe { GetKeyState(VK_CAPITAL.0 as i32) } & 1 != 0;
     let mut inputs: Vec<INPUT> = vec![];
     let mut chars = 0;
+    // What has been typed of the current line
+    let mut line = String::new();
     let flush = |inputs: &mut Vec<INPUT>| -> Result<(), String> {
         if !inputs.is_empty() {
             send(inputs)?;
@@ -363,13 +370,18 @@ pub fn type_text(text: &str, real_keys_only: bool) -> Result<(), String> {
         if ch == '\n' {
             // Enter goes on its own: it may open a dialog or submit a form, which needs a moment
             flush(&mut inputs)?;
+            if native && !line.is_empty() {
+                caught_up(&line);
+            }
             send(&[key(VK_RETURN, 0, KEYBD_EVENT_FLAGS(0)), key(VK_RETURN, 0, KEYEVENTF_KEYUP)])?;
             std::thread::sleep(Duration::from_millis(15));
             chars = 0;
+            line.clear();
             continue;
         }
-        // In native mode letters would become pinyin / kana and punctuation full-width, but digits pass straight through
-        match real_keys(ch, hkl, caps).filter(|_| !native || ch.is_ascii_digit()) {
+        line.push(ch);
+        // In native mode letters would become pinyin / kana, punctuation full-width, and digits race the rest
+        match real_keys(ch, hkl, caps).filter(|_| !native) {
             Some(keys) => inputs.extend(keys),
             None => {
                 let mut buf = [0u16; 2];

@@ -87,8 +87,45 @@ pub(super) fn enter_text(t: &str, method: &str) -> Result<&'static str, String> 
             Err(_) => {}
         }
     }
-    input::type_text(t, method == "keys")?;
+    let mut sync = LineSync::default();
+    input::type_text(t, method == "keys", &mut |line| sync.wait(line))?;
     Ok("")
+}
+
+/// The longest one line is waited for before its Enter
+const LINE_WAIT_MAX: Duration = Duration::from_millis(1500);
+/// Before Enter in a field that can't tell what it holds: a pause long enough for most programs
+const LINE_PAUSE: Duration = Duration::from_millis(40);
+
+/// Waits, before each Enter, until the program has taken in the line just typed: under a Chinese, Japanese or
+/// Korean input method Enter would otherwise overtake its last characters (Notepad turned "34⏎35" into "⏎3435"
+/// and dropped digits). It reads the characters before the caret; a field that doesn't say, or that changes
+/// what is typed into it (autocomplete), gets a short pause instead, from then on for the rest of the text.
+#[derive(Default)]
+struct LineSync {
+    blind: bool,
+}
+
+impl LineSync {
+    fn wait(&mut self, line: &str) {
+        if self.blind {
+            return std::thread::sleep(LINE_PAUSE);
+        }
+        // The end of the line is enough to tell it has all arrived, and in order
+        let tail: Vec<char> = line.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
+        let want: String = tail.iter().collect();
+        let start = std::time::Instant::now();
+        loop {
+            match uia::text_before_caret(tail.len() as i32) {
+                Some(t) if t.ends_with(&want) => return,
+                None => break,
+                Some(_) if start.elapsed() >= LINE_WAIT_MAX => break,
+                Some(_) => std::thread::sleep(Duration::from_millis(4)),
+            }
+        }
+        self.blind = true;
+        std::thread::sleep(LINE_PAUSE);
+    }
 }
 
 /// Put the keyboard focus on a located target: a control of an ordinary program takes it directly; anything

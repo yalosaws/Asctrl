@@ -1249,6 +1249,26 @@ pub struct Focus {
     pub password: bool,
 }
 
+/// The `n` characters just before the caret in the control with the keyboard focus, when it is a text control
+/// that tells (a document, a text box); None when it can't be told
+pub fn text_before_caret(n: i32) -> Option<String> {
+    let auto = automation().ok()?;
+    let el = unsafe { auto.GetFocusedElement() }.ok()?;
+    if unsafe { el.CurrentProcessId() }.ok()? as u32 == std::process::id() || unsafe { el.CurrentIsPassword() }.is_ok_and(|b| b.as_bool()) {
+        return None;
+    }
+    let tp = pattern::<IUIAutomationTextPattern>(&el, UIA_TextPatternId)?;
+    let sel = unsafe { tp.GetSelection() }.ok()?;
+    if unsafe { sel.Length() }.ok()? < 1 {
+        return None;
+    }
+    let r = unsafe { sel.GetElement(0) }.ok()?;
+    // The caret is an empty range: stretch its start back over the last n characters
+    unsafe { r.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Character, -n) }.ok()?;
+    let t = unsafe { r.GetText(n * 2 + 8) }.ok()?;
+    Some(newlines(&t.to_string()))
+}
+
 pub fn focused() -> Option<Focus> {
     let auto = automation().ok()?;
     let el = unsafe { auto.GetFocusedElement() }.ok()?;
