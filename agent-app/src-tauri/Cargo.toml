@@ -29,6 +29,7 @@ windows = { version = "0.62", features = [
   "Foundation",
   "Foundation_Collections",
   "Graphics_Imaging",
+  "Globalization",
   "Media_Ocr",
   "Storage_Streams",
   "Win32_Foundation",

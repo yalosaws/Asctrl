@@ -46,6 +46,11 @@ fn engine() -> Result<OcrEngine, String> {
     OcrEngine::TryCreateFromUserProfileLanguages().map_err(|e| format!("Windows OCR is not available for this user's languages: {}", e.message()))
 }
 
+/// The language the pixels are read in (e.g. "zh-Hans-CN"); None when they can't be read at all
+pub fn language() -> Option<String> {
+    Some(engine().ok()?.RecognizerLanguage().ok()?.LanguageTag().ok()?.to_string())
+}
+
 /// Read every line of text in `area`
 pub fn read(area: Area) -> Result<Vec<Line>, String> {
     let engine = engine()?;
