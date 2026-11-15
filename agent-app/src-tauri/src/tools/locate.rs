@@ -160,6 +160,31 @@ fn visible_part(live: &uia::Live, win: isize) -> Option<winmgr::Rect> {
     }
 }
 
+/// Where a step's target is right now, for drawing a pointer on its way there before the step runs. Looked up
+/// without waiting, scrolling or reading pixels, and without touching what replies compare against; None
+/// when it can't be told that cheaply (the step then finds it as always). `cache` holds one reading of a
+/// window for the whole batch, so a run of clicks by text reads the window once, not once per step.
+pub fn peek(ask: &Ask, cache: &std::sync::Mutex<Option<uia::Scene>>) -> Option<(i32, i32)> {
+    match &ask.target {
+        Target::Ref(rf) => {
+            let live = uia::live(*rf).ok()?;
+            Some(uia::aim(live.role(), live.rect()?))
+        }
+        Target::Point(x, y) => Some((*x, *y)),
+        Target::Text(q) => {
+            let hwnd = ask.window.unwrap_or_else(winmgr::foreground);
+            let mut held = cache.lock().ok()?;
+            if held.as_ref().map(|s| s.hwnd) != Some(hwnd) {
+                *held = Some(uia::snapshot(hwnd, false).ok()?);
+            }
+            match pick(held.as_ref()?, q, &ask.role, ask.nth, ask.want_edit) {
+                Pick::One(n) => Some(n.center()),
+                _ => None,
+            }
+        }
+    }
+}
+
 fn from_live(live: uia::Live, anywhere: bool) -> Result<Located, Miss> {
     let win = live.window();
     if anywhere {

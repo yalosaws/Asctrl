@@ -6,7 +6,7 @@ import { center, hit, home, initGeo, isTauri, primary, setHome, snap, syncHits, 
 import { orb } from "./orb";
 import { bloom, ripple, sheen } from "./light";
 import { collapse, expand, isShown, relayout as relayoutEdge } from "./edge";
-import { fxEnd, fxStart, fxStep, type FxEvent } from "./fx";
+import { fxEnd, fxPlan, fxStart, fxStep, recallPointers, type FxEvent } from "./fx";
 import { EASE, play, sleep, SPRING } from "./motion";
 import { runDemo } from "./demo";
 import { setSession } from "./think";
@@ -231,6 +231,7 @@ function render(s: Status) {
       showPanel(codeCard, false);
       break;
     case "offline":
+      void recallPointers();
       orb.setMood("offline");
       showPanel(codeCard, false);
       if (entered) orb.goTo(home(), "slow");
@@ -318,7 +319,8 @@ async function boot() {
     await listen<Status>("status", (e) => render(e.payload));
     await listen<FxEvent>("fx", (e) => {
       const p = e.payload;
-      if (p.phase === "start") fxStart(p);
+      if (p.phase === "plan") fxPlan(p);
+      else if (p.phase === "start") fxStart(p);
       else if (p.phase === "step") fxStep(p);
       else fxEnd(p);
     });

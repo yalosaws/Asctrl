@@ -38,15 +38,6 @@ const ptrLayer = document.createElementNS(NS, "svg");
 ptrLayer.id = "ptrs";
 ptrLayer.innerHTML =
   "<defs>" +
-  [
-    ["#9db8ff", "#5b8cff", "#b36bff"],
-    ["#dcb0ff", "#b36bff", "#ff7ab6"],
-    ["#ffc0d9", "#ff7ab6", "#ffb86b"],
-    ["#ffe0b8", "#ffb86b", "#5be0c8"],
-    ["#b5f3e6", "#5be0c8", "#5b8cff"],
-  ]
-    .map(([a, b, c], k) => `<linearGradient id="pg${k}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${a}"/><stop offset=".5" stop-color="${b}"/><stop offset="1" stop-color="${c}"/></linearGradient>`)
-    .join("") +
   '<filter id="goo-f"><feGaussianBlur in="SourceGraphic" stdDeviation="6"/><feColorMatrix values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 20 -8"/></filter>' +
   '<path id="ptr-probe"/></defs>';
 document.body.append(ptrLayer);
@@ -56,8 +47,6 @@ const goo = document.createElement("div");
 goo.id = "goo";
 goo.hidden = true;
 document.body.append(goo);
-
-const COLORS = ["#5b8cff", "#b36bff", "#ff7ab6", "#ffb86b", "#5be0c8"];
 
 // ---- Tempo ----
 // The actions set the pace, never the animation. One action now and then plays at the full, unhurried pace;
@@ -204,12 +193,17 @@ function sample(d: string): [number, number][] {
 }
 
 /** Where a drop's centre sits relative to the pointer's tip: over the arrow's body, so it pours in without a jump */
-export const DROP_AT = { x: 7, y: 11 };
-const CIRCLE = sample("M 7 1 A 10 10 0 1 1 7 21 A 10 10 0 1 1 7 1 Z");
-const ARROW = sample("M 0 0 L 0 24 L 5.8 18.6 L 9.7 27.4 L 13.8 25.6 L 10 17 L 17.6 17 Z");
+export const DROP_AT = { x: 9.5, y: 9.5 };
+const CIRCLE = sample("M 9.5 -0.5 A 10 10 0 1 1 9.5 19.5 A 10 10 0 1 1 9.5 -0.5 Z");
+/** A navigation arrow: tip at the top left, two wings out to the right and down, a notch between them */
+const ARROW = sample("M 0 0 L 21 7.5 L 11.5 11.5 L 7.5 21 Z");
 const toD = (pts: [number, number][]) => "M" + pts.map((p) => `${p[0].toFixed(2)} ${p[1].toFixed(2)}`).join("L") + "Z";
 const easeBack = (t: number) => 1 + 2.2 * Math.pow(t - 1, 3) + 1.2 * Math.pow(t - 1, 2);
 const easeIO = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+
+/** The shortest a pointer's moves, shape changes and presses get (ms) when the body hurries: a backlog speeds
+ *  everything else up until it lands at once, but a pointer is always seen going to where it clicks */
+export const PTR_MIN = { move: 180, morph: 120, press: 110 };
 
 /** A pointer split off the orb: its tip is at (x, y) */
 export class Pointer {
@@ -222,14 +216,14 @@ export class Pointer {
   private m: { from: [number, number][]; to: [number, number][]; t0: number; ms: number; res: () => void } | null = null;
   private live = true;
 
-  constructor(x: number, y: number, k: number) {
+  /** `k` picks its colour: the pointers take the four in turn */
+  constructor(x: number, y: number, k = 0) {
     this.x = x;
     this.y = y;
     const under = document.createElementNS(NS, "path");
     under.setAttribute("class", "ptr-under");
     const body = document.createElementNS(NS, "path");
-    body.setAttribute("class", "ptr-body");
-    body.setAttribute("fill", `url(#pg${k % 5})`);
+    body.setAttribute("class", `ptr-body c${k % 4}`);
     this.paths = [under, body];
     this.g.append(under, body);
     ptrLayer.append(this.g);
@@ -257,14 +251,13 @@ export class Pointer {
     this.g.setAttribute("transform", `translate(${this.x.toFixed(2)} ${this.y.toFixed(2)}) scale(${this.s.toFixed(3)})`);
   }
 
+  /** How far behind its clicks this pointer is: 1 on time, up to 4 when late. Everything it draws is that many
+   *  times quicker, minimums included, so a busy pointer catches up instead of trailing further behind. */
+  rush = 1;
+
   private morph(to: [number, number][], ms: number) {
-    const d = ms / tempo();
-    if (d < 12) {
-      this.m = null;
-      this.pts = to.map((q) => [...q] as [number, number]);
-      this.draw();
-      return Promise.resolve();
-    }
+    // A pointer is always seen changing shape, however much the body hurries
+    const d = Math.max(PTR_MIN.morph / this.rush, ms / tempo() / this.rush);
     return new Promise<void>((res) => (this.m = { from: this.pts.map((q) => [...q] as [number, number]), to, t0: performance.now(), ms: d, res }));
   }
   /** Pour into the arrow shape */
@@ -276,32 +269,47 @@ export class Pointer {
     return this.morph(CIRCLE, ms);
   }
 
-  /** Fly the tip to p */
-  async moveTo(p: Pt, ms: number, lift = 0) {
+  /** Fly the tip to p; `near` is called once it is most of the way there */
+  async moveTo(p: Pt, ms: number, lift = 0, near?: () => void) {
     const a = { x: this.x, y: this.y };
-    await tween(ms, (e) => {
-      this.x = a.x + (p.x - a.x) * e;
-      this.y = a.y + (p.y - a.y) * e - Math.sin(Math.PI * e) * lift;
-    });
+    let told = !near;
+    // Even in a hurry it glides there: it never jumps
+    await tween(
+      ms,
+      (e) => {
+        this.x = a.x + (p.x - a.x) * e;
+        this.y = a.y + (p.y - a.y) * e - Math.sin(Math.PI * e) * lift;
+        if (!told && e >= 0.7) {
+          told = true;
+          near!();
+        }
+      },
+      easeIO,
+      PTR_MIN.move / this.rush,
+      this.rush,
+    );
   }
 
   /** Press down and up (the tip stays put) */
   async press() {
-    await tween(200, (_, t) => (this.s = 1 - 0.22 * Math.sin(Math.PI * t)), (t) => t);
+    await tween(200, (_, t) => (this.s = 1 - 0.22 * Math.sin(Math.PI * t)), (t) => t, PTR_MIN.press / this.rush, this.rush);
   }
 
   /** Held down: a little smaller until let go */
   async hold(on: boolean) {
     const from = this.s;
     const to = on ? 0.84 : 1;
-    await tween(140, (e) => (this.s = from + (to - from) * e));
+    await tween(140, (e) => (this.s = from + (to - from) * e), easeIO, PTR_MIN.press / this.rush, this.rush);
   }
 
   /** On failure: a quick shake, red */
   async fail() {
-    this.paths[1].setAttribute("fill", "#ff5a6e");
+    this.paths[1].style.fill = "var(--red)";
     const x = this.x;
     await tween(360, (_, t) => (this.x = x + Math.sin(t * Math.PI * 4) * 5 * (1 - t)), (t) => t);
+    // It stays out for the next target, so the red is only for the shake
+    await beat(400);
+    this.paths[1].style.fill = "";
   }
 
   remove() {
@@ -310,9 +318,9 @@ export class Pointer {
   }
 }
 
-/** A per-frame animation driven by elapsed time */
-function tween(ms: number, step: (e: number, t: number) => void, ease = easeIO): Promise<void> {
-  ms /= tempo();
+/** A per-frame animation driven by elapsed time; `floor` is the shortest it may get when the body hurries */
+function tween(ms: number, step: (e: number, t: number) => void, ease = easeIO, floor = 0, rush = 1): Promise<void> {
+  ms = Math.max(floor, ms / tempo() / rush);
   // Shorter than a frame: it lands at once
   if (ms < 12) {
     step(ease(1), 1);
@@ -449,7 +457,7 @@ export const body = {
     blob.animate([{ scale: 1 }, { scale: 0.55, offset: 0.35 }, { scale: 0 }], { duration: (640 + targets.length * 80) / tempo(), easing: "cubic-bezier(.5,0,.3,1)", fill: "forwards" });
     const list = await Promise.all(
       targets.map(async (t, i) => {
-        const d = gooDot("goo-drop", o, box, COLORS[i % 5]);
+        const d = gooDot("goo-drop", o, box, `var(--ptr-${(i % 4) + 1})`);
         const end = { x: t.x + DROP_AT.x, y: t.y + DROP_AT.y };
         // Each drop curves out its own way, so several never travel on top of each other
         const bend = (i - (targets.length - 1) / 2) * 40;
@@ -483,7 +491,7 @@ export const body = {
     await Promise.all(
       list.map(async (p, i) => {
         const s = { x: p.x + DROP_AT.x, y: p.y + DROP_AT.y };
-        const d = gooDot("goo-drop", s, box, COLORS[i % 5]);
+        const d = gooDot("goo-drop", s, box, `var(--ptr-${(i % 4) + 1})`);
         p.remove();
         await beat(i * 70);
         const ms = Math.min(560, Math.max(320, Math.hypot(at.x - s.x, at.y - s.y) * 0.6));
@@ -501,27 +509,6 @@ export const body = {
     goo.hidden = true;
     this.kick("w", 260);
     this.kick("h", -200);
-  },
-
-  /** The ball shrinks into a single drop and pours into one pointer, tip where the ball's middle was offset */
-  async pointer(): Promise<Pointer> {
-    await this.to({ w: 20, h: 20, r: 10 }, { all: 260 });
-    const p = new Pointer(P.cx.x - DROP_AT.x, P.cy.x - DROP_AT.y, 4);
-    root.style.visibility = "hidden";
-    void p.arrow();
-    return p;
-  },
-
-  /** One pointer back into the ball: it goes back up to `at` first (the ball waits over the work, not on the
-   *  cursor), or turns back where it stands */
-  async unpointer(p: Pointer, at?: Pt) {
-    if (at) await p.moveTo({ x: at.x - DROP_AT.x, y: at.y - DROP_AT.y }, Math.min(420, Math.max(200, Math.hypot(at.x - p.x, at.y - p.y) * 1.1)));
-    await p.drop();
-    this.place({ cx: p.x + DROP_AT.x, cy: p.y + DROP_AT.y, w: 20, h: 20, r: 10 });
-    p.remove();
-    root.style.visibility = "";
-    this.mode("ball");
-    await this.to(BALL, { all: 240 }, 0.6);
   },
 };
 

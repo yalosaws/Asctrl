@@ -23,12 +23,26 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
     let started = std::time::Instant::now();
     let mut lines = vec![];
     let mut failed: Option<usize> = None;
+    // One reading of the window for looking ahead (locate::peek)
+    let peeked = Arc::new(Mutex::new(None));
     for (i, step) in steps.iter().enumerate() {
         if failed.is_some() {
             lines.push(format!("{}. – skipped", i + 1));
             continue;
         }
         let tool = str_arg(step, "tool");
+        // While this step runs, find where the next click will land, so its pointer can be on its way before
+        // the click happens rather than setting off once it already has. On the side: nothing waits for it.
+        if let Some(next) = steps.get(i + 1).filter(|s| str_arg(s, "tool") == "click")
+            && let Ok(Some(ask)) = locate::Ask::of(ctx, next)
+        {
+            let (id, cache) = (format!("{call}.{}.a", i + 1), peeked.clone());
+            tokio::task::spawn_blocking(move || {
+                if let Some(p) = locate::peek(&ask, &cache) {
+                    fx::emit(serde_json::json!({ "phase": "plan", "id": id, "tool": "click", "geo": { "at": fx::pt_json(p) } }));
+                }
+            });
+        }
         let out = if !BATCHABLE.contains(&tool) {
             fail(format!("\"{tool}\" can't run in a batch; allowed: {}", BATCHABLE.join(", ")))
         } else {

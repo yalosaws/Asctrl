@@ -14,6 +14,15 @@
   --green: #5be0c8;
   --red: #ff5a6e;
   --amber: #ffb86b;
+  /* The pointers: solid colours, one per pointer, taken in turn. Four hues of the aurora (blue, violet, pink,
+     teal) at one lightness and chroma, oklch(0.62 0.2 h), so none stands out: dark enough to read on white
+     windows (3.4-4.1:1) and light enough on dark ones (4.5-5.3:1). The pink is turned toward violet, away from
+     the red of a failure; amber is left out, it means waiting. */
+  --ptr-1: #457cfd;
+  --ptr-2: #9264ef;
+  --ptr-3: #d6459b;
+  --ptr-4: #099b8f;
+  --pointer: var(--ptr-1);
   --ink: #f3f4fb;
   --ink-2: #aeb2c8;
   --ink-3: #747892;
@@ -654,9 +663,19 @@ body.demo .fake-taskbar {
   stroke-linejoin: round;
 }
 .ptr-body {
+  fill: var(--pointer);
   stroke: #fff;
   stroke-width: 2;
   stroke-linejoin: round;
+}
+.ptr-body.c1 {
+  fill: var(--ptr-2);
+}
+.ptr-body.c2 {
+  fill: var(--ptr-3);
+}
+.ptr-body.c3 {
+  fill: var(--ptr-4);
 }
 #goo {
   position: fixed;

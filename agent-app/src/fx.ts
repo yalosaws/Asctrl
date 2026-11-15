@@ -14,7 +14,7 @@ import { closeCard, deckRect, fillEntries, fillLines, openCard, progress, scan, 
 import { el, fadeOut, play, sleep, SPRING, tween } from "./motion";
 
 export interface FxEvent {
-  phase: "start" | "step" | "end";
+  phase: "plan" | "start" | "step" | "end";
   id: string;
   tool: string;
   args?: Record<string, unknown>;
@@ -57,10 +57,14 @@ function flashError() {
   }, ERROR_MS);
 }
 
-function goHomeWhenFree() {
+/** The work is done: the pointers still out come back into the ball, and only then does the orb go home */
+async function goHomeWhenFree() {
   // While a work area is framed, or the body still has work queued, the orb stays
   if (active > 0 || zone) return;
-  if (busy()) return void (homeTimer = window.setTimeout(goHomeWhenFree, 600));
+  if (busy() || pressing > 0) return void (homeTimer = window.setTimeout(goHomeWhenFree, 600));
+  await recallPointers();
+  // New work came in while they were coming back: the orb stays with it
+  if (active > 0 || zone || busy() || pressing > 0) return;
   orb.setMood("idle");
   orb.goTo(home(), "slow");
 }
@@ -252,7 +256,7 @@ function dropZone(unless?: Pt) {
 }
 
 /** The pointer presses (count times) once its action has happened, or shakes red if it failed */
-async function pressAt(p: Pointer, outcome: Promise<boolean | null>, count: number) {
+async function pressAt(p: Pointer, outcome: Promise<boolean | null>, count: number, at: Pt = { x: p.x, y: p.y }) {
   // Normally the action has happened already; a slow one gets a few seconds before the press is drawn anyway
   // ... unless a newer action is already waiting: then the press is drawn now (the action happened, or the next
   // one would not have started)
@@ -263,49 +267,135 @@ async function pressAt(p: Pointer, outcome: Promise<boolean | null>, count: numb
   await Promise.resolve();
   const r = got === undefined ? true : got;
   if (r === null) return;
-  lastPoint = { x: p.x, y: p.y };
+  lastPoint = { ...at };
   lastAt = performance.now();
   if (!r) {
     flashError();
-    ripple({ x: p.x, y: p.y }, { size: 30, ms: 520, tone: "red" });
+    ripple(at, { size: 30, ms: 520, tone: "red" });
     return p.fail();
   }
   for (let i = 0; i < count; i++) {
-    ripple({ x: p.x, y: p.y }, { size: 28, ms: 480, to: 1.7 + i * 0.3 });
+    ripple(at, { size: 28, ms: 480, to: 1.7 + i * 0.3 });
     await p.press();
   }
 }
 
-/** Pointers sent so far, for their colours */
-let sent_ = 0;
+/** How many pointers share the work: the app being worked on is cut into this many columns, left to right, and
+ *  each column has its own pointer, in its own colour (blue, violet, pink, teal from the left) */
+const STRIPS = 4;
+/** The pointer of each column, once it has been sent out; it stays out until the work is done */
+const crew: (Pointer | null)[] = Array(STRIPS).fill(null);
+/** What each column's pointer still has to do, in order: a click in its column waits for its earlier ones */
+const crewQueue: Promise<unknown>[] = Array.from({ length: STRIPS }, () => Promise.resolve());
+/** Pointers still on their way or pressing (waiting for their action to happen): the work is not done while any is */
+let pressing = 0;
 
-/**
- * One pointer goes out of the still ball to p as a drop, takes the arrow shape there, presses when its action
- * really happens, then goes back as a drop and is taken in. Resolves as soon as it has arrived: the lane moves
- * on and the next pointer sets off while this one is still pressing and coming back, so a run of clicks has
- * several pointers out at once. Only the drawing overlaps; the actions run one after another as always.
- */
-async function sortie(p: Pt, outcome: Promise<boolean | null>, count: number, delay = 0): Promise<void> {
-  await beat(delay);
+/** Whose column p is in: columns of the framed app, or of the screen when nothing is framed */
+function stripOf(p: Pt): number {
+  const r = zone?.r ?? monitorAt(p).work;
+  return Math.min(STRIPS - 1, Math.max(0, Math.floor(((p.x - r.x) / Math.max(1, r.w)) * STRIPS)));
+}
+
+/** How late (ms) a pointer may start on a click before it hurries: past this it goes quicker the later it is */
+const LATE_OK = 120;
+/** How late it has to be to go at its quickest (4 times its usual pace) */
+const LATE_MAX = 720;
+const rushFor = (late: number) => 1 + 3 * Math.min(1, Math.max(0, late - LATE_OK) / (LATE_MAX - LATE_OK));
+
+/** Column i's pointer goes to p in the arrow shape: from wherever it last worked, or, the first time, out of the
+ *  still ball (once the ball is in place, `ready`) as a drop that takes the arrow shape there */
+async function bring(i: number, p: Pt, rush: number, ready?: Promise<unknown>, near?: (ptr: Pointer) => void): Promise<Pointer> {
+  const ptr = crew[i];
+  if (ptr) {
+    ptr.rush = rush;
+    const d = Math.hypot(ptr.x - p.x, ptr.y - p.y);
+    // Already there (sent ahead by fxPlan): nothing to glide, it presses at once
+    if (d < 1) {
+      near?.(ptr);
+      return ptr;
+    }
+    await ptr.moveTo(p, Math.min(480, Math.max(200, d * 0.6)), Math.min(30, d * 0.1), near && (() => near(ptr)));
+    return ptr;
+  }
+  await ready;
   const o = body.pos;
-  const ptr = new Pointer(o.x - DROP_AT.x, o.y - DROP_AT.y, sent_++);
+  const fresh = new Pointer(o.x - DROP_AT.x, o.y - DROP_AT.y, i);
+  fresh.rush = rush;
+  crew[i] = fresh;
   body.kick("w", -160);
   body.kick("h", 120);
-  const far = Math.hypot(p.x - ptr.x, p.y - ptr.y);
-  await ptr.moveTo(p, Math.min(560, Math.max(260, far * 0.75)), Math.min(40, far * 0.12));
-  await ptr.arrow(260);
-  void (async () => {
-    await pressAt(ptr, outcome, count);
-    await beat(180);
+  const far = Math.hypot(p.x - fresh.x, p.y - fresh.y);
+  await fresh.moveTo(p, Math.min(560, Math.max(260, far * 0.75)), Math.min(40, far * 0.12));
+  await fresh.arrow(260);
+  return fresh;
+}
+
+/** The pointer whose column p is in goes there (after whatever it is still doing) and then does `work`.
+ *  `arrived` resolves with it once it is at p; `done` once the work is finished too. `t0` is when the action
+ *  really started: a pointer that only gets to it late goes quicker (rushFor), so it never trails far behind. */
+function crewAt(p: Pt, work: (ptr: Pointer) => Promise<unknown> = async () => {}, t0 = performance.now(), ready?: Promise<unknown>) {
+  // A pointer that is behind starts its work (the press) in the last stretch of its glide, not after it: the
+  // two overlap, which wins back most of a press's time on every click it is late for
+  const i = stripOf(p);
+  let arrive!: (ptr: Pointer) => void;
+  let fail!: (e: unknown) => void;
+  const arrived = new Promise<Pointer>((res, rej) => ((arrive = res), (fail = rej)));
+  pressing++;
+  const done = crewQueue[i]
+    .then(async () => {
+      const rush = rushFor(performance.now() - t0);
+      let working: Promise<unknown> | null = null;
+      const ptr = await bring(i, p, rush, ready, rush > 1 ? (q) => void (working = work(q)) : undefined);
+      arrive(ptr);
+      await (working ?? work(ptr));
+    })
+    .catch((e) => {
+      fail(e);
+      crew[i]?.remove();
+      crew[i] = null;
+    })
+    .finally(() => pressing--);
+  crewQueue[i] = done;
+  return { arrived, done };
+}
+
+/** One pointer goes back into the ball as a drop and is taken in */
+async function comeBack(ptr: Pointer) {
+  try {
     await ptr.drop(220);
     const home = body.pos;
     const back = { x: home.x - DROP_AT.x, y: home.y - DROP_AT.y };
     const dist = Math.hypot(back.x - ptr.x, back.y - ptr.y);
     await ptr.moveTo(back, Math.min(520, Math.max(240, dist * 0.7)), Math.min(30, dist * 0.08));
-    ptr.remove();
     body.kick("w", 200);
     body.kick("h", -150);
-  })().catch(() => ptr.remove());
+  } finally {
+    ptr.remove();
+  }
+}
+
+/** The work is done (or the link is gone): every pointer comes back into the ball, each once it has finished */
+export function recallPointers(): Promise<void> {
+  return Promise.all(
+    crew.map((ptr, i) => {
+      if (!ptr || ptr === held) return null;
+      crew[i] = null;
+      const back = crewQueue[i].then(() => beat(i * 70)).then(() => comeBack(ptr));
+      crewQueue[i] = back.catch(() => {});
+      return back;
+    }),
+  ).then(() => {});
+}
+
+/**
+ * The pointer of the column p is in goes there and presses when its action really happens; then it waits there
+ * for its column's next click, and is not called back until the work is done. Each pointer keeps to its own
+ * column of the app, so the work is shared out, not taken by whichever is nearest. It sets off the moment the
+ * action starts, not after the ball's own animations, and hurries when it is behind (rushFor). Only the drawing
+ * overlaps; the actions run one after another as always.
+ */
+function sortie(p: Pt, outcome: Promise<boolean | null>, count: number, t0: number, ready: Promise<unknown>) {
+  crewAt(p, (ptr) => pressAt(ptr, outcome, count, p), t0, ready);
 }
 
 /** Clicks and element actions: the ball waits still above the app and sends one pointer per target out of
@@ -327,17 +417,19 @@ function dispatchStart(e: FxEvent) {
     aimed.map((a) => a.p),
   );
   const count = Math.max(1, Math.min(3, num(e.args?.count, 1)));
-  void job(async () => {
+  const t0 = performance.now();
+  // The ball takes its place over the app on the lane, as everything it does; the pointers do not wait for
+  // the lane: each goes the moment its action starts (a new one only leaves the ball once the ball is there)
+  const placed = job(async () => {
     try {
       const xs = aimed.map((a) => a.p.x);
-      const gather = station({ x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.min(...aimed.map((a) => a.p.y)) }, framed);
-      await fly(gather);
-      await Promise.all(aimed.map((a, k) => sortie(a.p, outcome[a.i].p, count, k * 90)));
+      await fly(station({ x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.min(...aimed.map((a) => a.p.y)) }, framed));
     } finally {
       // Whatever happened to the animation, the frame must not stay up for good
       unframeLater();
     }
   });
+  aimed.forEach((a) => sortie(a.p, outcome[a.i].p, count, t0, placed));
   typing?.();
 }
 
@@ -382,27 +474,24 @@ function zoneSpot(r: R): Pt {
 }
 const above = (p: Pt) => station(p);
 
+/** A pointer at p: the one held down goes there; otherwise the ball waits over the app and the pointer of
+ *  p's column goes */
 async function pointTo(p: Pt): Promise<Pointer> {
   if (held) {
     await held.moveTo(p, 300);
     return held;
   }
   await fly(above(p));
-  const ptr = await body.pointer();
-  await ptr.moveTo(p, Math.min(520, Math.max(240, Math.hypot(ptr.x - p.x, ptr.y - p.y) * 1.2)));
-  return ptr;
+  return crewAt(p).arrived;
 }
 
 function moveStart(e: FxEvent) {
   const p = pt(e.geo?.at);
   if (!p) return;
   void job(async () => {
-    const ptr = await pointTo(p);
+    await pointTo(p);
     lastPoint = p;
     lastAt = performance.now();
-    if (ptr === held) return;
-    await beat(320);
-    await body.unpointer(ptr, above(p));
   });
 }
 
@@ -429,8 +518,6 @@ function upStart(e: FxEvent) {
     if (p) await ptr.moveTo(p, 200);
     await ptr.hold(false);
     ripple({ x: ptr.x, y: ptr.y }, { size: 30, ms: 480 });
-    await beat(160);
-    await body.unpointer(ptr, above({ x: ptr.x, y: ptr.y }));
   });
 }
 
@@ -521,8 +608,6 @@ function dragStart(e: FxEvent) {
         flashError();
         await ptr.fail();
       }
-      await beat(160);
-      await body.unpointer(ptr, above(b));
     } finally {
       unframeLater();
     }
@@ -952,6 +1037,8 @@ const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
 
 export function fxStart(e: FxEvent) {
   started.set(e.id, { args: e.args, geo: e.geo });
+  begun.add(e.id);
+  if (begun.size > 400) for (const id of [...begun].slice(0, 200)) begun.delete(id);
   toolStarted(e.tool);
   // Looking changes nothing and draws nothing
   if (LOOKS.has(e.tool)) return;
@@ -993,6 +1080,17 @@ export function fxStart(e: FxEvent) {
   if (TERM.has(e.tool)) return termStart(e.id, termCommand(e));
   if (FILE.has(e.tool)) return fileStart(e);
 }
+
+/** A batch has found where its next click will land, while the step before it still runs: that column's pointer
+ *  sets off now, so it is there (or nearly) when the click happens instead of only leaving then. Too late
+ *  (the click has already started) and it is left out. */
+export function fxPlan(e: FxEvent) {
+  const p = pt(e.geo?.at);
+  if (!p || begun.has(e.id)) return;
+  crewAt(p);
+}
+/** Calls that have started lately, so a look-ahead that comes too late is left out even after they ended */
+const begun = new Set<string>();
 
 /** One action of a click or element_action call has just really happened */
 export function fxStep(e: FxEvent) {
