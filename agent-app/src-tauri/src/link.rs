@@ -108,16 +108,12 @@ fn dispatch(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: &Value) {
             tauri::async_runtime::spawn(async move {
                 let st = app.state::<AgentState>();
                 let ov = app.state::<overlay::Overlay>();
-                let mouse = moves_mouse(&tool);
-                if mouse {
-                    ov.suppress(Duration::from_secs(5));
-                }
+                // The orb can't catch the pointer for the whole call, however long it runs, and 1.2 s after
+                let driving = moves_mouse(&tool).then(|| ov.driving(Duration::from_millis(1200)));
                 let before = tools::fx_before(&st.ctx, &tool, &args);
                 let _ = app.emit("fx", json!({ "phase": "start", "id": id, "tool": tool, "args": fx_args(&args), "geo": before }));
                 let out = fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args)).await;
-                if mouse {
-                    ov.suppress(Duration::from_millis(1200));
-                }
+                drop(driving);
                 let after = tools::fx_after(&st.ctx, &tool, &before, &out);
                 let shown: String = out.body().chars().take(6000).collect();
                 let _ = app.emit("fx", json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "text": shown, "geo": after }));

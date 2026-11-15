@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { center, home, isTauri, monitorAt, monitors, pt, rect, type Pt, type R } from "./geo";
 import { orb } from "./orb";
 import { toolEnded, toolStarted } from "./think";
-import { BALL, beat, body, busy, DROP_AT, holdUntil, job, keep, more, tempo, type Pointer } from "./body";
+import { BALL, beat, body, busy, DROP_AT, holdUntil, job, keep, more, Pointer, tempo } from "./body";
 import { bloom, dart, Outline, ripple, strand } from "./light";
 import { breathe, pulse } from "./edge";
 import { closeCard, deckRect, fillEntries, fillLines, openCard, progress, scan, setPanelHooks, skeleton, termEnd, termStart, type Card } from "./panel";
@@ -206,10 +206,11 @@ function frameZone(r: R, hug = false) {
 }
 
 /** The frame the agent gave (the work area or the window), or one round the given points */
-function frameFor(e: FxEvent, points: Pt[]) {
+function frameFor(e: FxEvent, points: Pt[]): R | null {
   const given = rect(e.geo?.zone);
   if (given && e.geo?.zoneIsWindow === true) frameZone(given, true);
   else frameZone(given ? zoneOf([given]) : zoneOf(points.map((p) => ({ x: p.x, y: p.y, w: 0, h: 0 }))));
+  return zone?.r ?? null;
 }
 
 /** Let the frame go a while after the last action in it (long enough to span the pause between steps), then send the orb home */
@@ -257,7 +258,8 @@ async function pressAt(p: Pointer, outcome: Promise<boolean | null>, count: numb
   // one would not have started)
   let got: boolean | null | undefined;
   void outcome.then((v) => (got = v));
-  await holdUntil(outcome, 5000);
+  // Out on its own (not on the lane), so waiting here holds nothing else up
+  await Promise.race([outcome, sleep(5000)]);
   await Promise.resolve();
   const r = got === undefined ? true : got;
   if (r === null) return;
@@ -274,8 +276,40 @@ async function pressAt(p: Pointer, outcome: Promise<boolean | null>, count: numb
   }
 }
 
-/** Clicks and element actions: the ball flies over the targets, splits into one pointer per target, each
- *  presses as its action happens, and they all run back together into the ball. */
+/** Pointers sent so far, for their colours */
+let sent_ = 0;
+
+/**
+ * One pointer goes out of the still ball to p as a drop, takes the arrow shape there, presses when its action
+ * really happens, then goes back as a drop and is taken in. Resolves as soon as it has arrived: the lane moves
+ * on and the next pointer sets off while this one is still pressing and coming back, so a run of clicks has
+ * several pointers out at once. Only the drawing overlaps; the actions run one after another as always.
+ */
+async function sortie(p: Pt, outcome: Promise<boolean | null>, count: number, delay = 0): Promise<void> {
+  await beat(delay);
+  const o = body.pos;
+  const ptr = new Pointer(o.x - DROP_AT.x, o.y - DROP_AT.y, sent_++);
+  body.kick("w", -160);
+  body.kick("h", 120);
+  const far = Math.hypot(p.x - ptr.x, p.y - ptr.y);
+  await ptr.moveTo(p, Math.min(560, Math.max(260, far * 0.75)), Math.min(40, far * 0.12));
+  await ptr.arrow(260);
+  void (async () => {
+    await pressAt(ptr, outcome, count);
+    await beat(180);
+    await ptr.drop(220);
+    const home = body.pos;
+    const back = { x: home.x - DROP_AT.x, y: home.y - DROP_AT.y };
+    const dist = Math.hypot(back.x - ptr.x, back.y - ptr.y);
+    await ptr.moveTo(back, Math.min(520, Math.max(240, dist * 0.7)), Math.min(30, dist * 0.08));
+    ptr.remove();
+    body.kick("w", 200);
+    body.kick("h", -150);
+  })().catch(() => ptr.remove());
+}
+
+/** Clicks and element actions: the ball waits still above the app and sends one pointer per target out of
+ *  itself; each presses as its action happens and comes back on its own, while the next ones are already out. */
 function dispatchStart(e: FxEvent) {
   const targets = Array.isArray(e.geo?.targets) ? (e.geo.targets as unknown[]).map(pt) : [pt(e.geo?.at)];
   const outcome = targets.map(() => {
@@ -288,7 +322,7 @@ function dispatchStart(e: FxEvent) {
   // A typing call was waiting for this click to focus its field: it queues up right behind it
   const typing = e.id.endsWith(".f") ? focusing.get(e.id.slice(0, -2)) : undefined;
   if (!aimed.length) return typing?.();
-  frameFor(
+  const framed = frameFor(
     e,
     aimed.map((a) => a.p),
   );
@@ -296,14 +330,9 @@ function dispatchStart(e: FxEvent) {
   void job(async () => {
     try {
       const xs = aimed.map((a) => a.p.x);
-      const gather = inside({ x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.min(...aimed.map((a) => a.p.y)) - 64 });
+      const gather = station({ x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.min(...aimed.map((a) => a.p.y)) }, framed);
       await fly(gather);
-      const ps = await body.split(aimed.map((a) => a.p));
-      await Promise.all(ps.map((p, k) => pressAt(p, outcome[aimed[k].i].p, count)));
-      await beat(more() ? 80 : 260);
-      // More work waiting: the pointers run together where the last one is, so the next shape starts right there
-      const last = ps[ps.length - 1];
-      await body.merge(ps, more() ? { x: last.x + DROP_AT.x, y: last.y + DROP_AT.y } : gather);
+      await Promise.all(aimed.map((a, k) => sortie(a.p, outcome[a.i].p, count, k * 90)));
     } finally {
       // Whatever happened to the animation, the frame must not stay up for good
       unframeLater();
@@ -334,12 +363,31 @@ function dispatchEnd(e: FxEvent) {
 /** A pointer that stays out between mouse_down and mouse_up */
 let held: Pointer | null = null;
 
+/** Where the ball waits while pointers work at p: still, just above the top edge of the app being worked on
+ *  (the framed area round p), so every action in that app is sent from the same spot and the ball never moves
+ *  between them. With nothing framed round p, just above p. */
+function station(p: Pt, r: R | null = zone?.r ?? null): Pt {
+  const holds = r && p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+  return holds ? zoneSpot(r) : inside({ x: p.x, y: p.y - 64 });
+}
+
+/** The spot over a framed area: centred just above its top edge; below it when there is no room above (a
+ *  maximized window), and just inside its top when there is room for neither */
+function zoneSpot(r: R): Pt {
+  const work = monitorAt(center(r)).work;
+  const x = Math.min(work.x + work.w - 30, Math.max(work.x + 30, r.x + r.w / 2));
+  if (r.y - 34 >= work.y + 24) return { x, y: r.y - 34 };
+  if (r.y + r.h + 34 <= work.y + work.h - 24) return { x, y: r.y + r.h + 34 };
+  return { x, y: r.y + 30 };
+}
+const above = (p: Pt) => station(p);
+
 async function pointTo(p: Pt): Promise<Pointer> {
   if (held) {
     await held.moveTo(p, 300);
     return held;
   }
-  await fly({ x: p.x + 40, y: p.y + 40 });
+  await fly(above(p));
   const ptr = await body.pointer();
   await ptr.moveTo(p, Math.min(520, Math.max(240, Math.hypot(ptr.x - p.x, ptr.y - p.y) * 1.2)));
   return ptr;
@@ -354,7 +402,7 @@ function moveStart(e: FxEvent) {
     lastAt = performance.now();
     if (ptr === held) return;
     await beat(320);
-    await body.unpointer(ptr);
+    await body.unpointer(ptr, above(p));
   });
 }
 
@@ -382,7 +430,7 @@ function upStart(e: FxEvent) {
     await ptr.hold(false);
     ripple({ x: ptr.x, y: ptr.y }, { size: 30, ms: 480 });
     await beat(160);
-    await body.unpointer(ptr);
+    await body.unpointer(ptr, above({ x: ptr.x, y: ptr.y }));
   });
 }
 
@@ -474,7 +522,7 @@ function dragStart(e: FxEvent) {
         await ptr.fail();
       }
       await beat(160);
-      await body.unpointer(ptr);
+      await body.unpointer(ptr, above(b));
     } finally {
       unframeLater();
     }

@@ -121,10 +121,13 @@ function apply() {
   }
   if (r !== drawn.r) root.style.borderRadius = `${r}px`;
   drawn = { w, h, r };
-  // The flight stretch is a transform: along the heading, longer and thinner, all on the compositor
+  // The flight stretch is a transform: along the heading, longer and thinner, all on the compositor. Turned
+  // back after the scale, so the colours inside keep their angle: without it they turn with the heading in
+  // flight and snap back the moment the body lands.
+  const a = heading.toFixed(3);
   root.style.transform =
     `translate3d(${(P.cx.x - w / 2).toFixed(2)}px, ${(P.cy.x - h / 2).toFixed(2)}px, 0)` +
-    (s > 0.004 ? ` rotate(${heading.toFixed(3)}rad) scale(${(1 + s).toFixed(3)}, ${(1 - s * 0.55).toFixed(3)})` : "");
+    (s > 0.004 ? ` rotate(${a}rad) scale(${(1 + s).toFixed(3)}, ${(1 - s * 0.55).toFixed(3)}) rotate(${-a}rad)` : "");
 }
 
 function wake() {
@@ -509,8 +512,10 @@ export const body = {
     return p;
   },
 
-  /** One pointer back into the ball where it stands */
-  async unpointer(p: Pointer) {
+  /** One pointer back into the ball: it goes back up to `at` first (the ball waits over the work, not on the
+   *  cursor), or turns back where it stands */
+  async unpointer(p: Pointer, at?: Pt) {
+    if (at) await p.moveTo({ x: at.x - DROP_AT.x, y: at.y - DROP_AT.y }, Math.min(420, Math.max(200, Math.hypot(at.x - p.x, at.y - p.y) * 1.1)));
     await p.drop();
     this.place({ cx: p.x + DROP_AT.x, cy: p.y + DROP_AT.y, w: 20, h: 20, r: 10 });
     p.remove();

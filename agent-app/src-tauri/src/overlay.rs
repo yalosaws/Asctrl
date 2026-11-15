@@ -50,9 +50,35 @@ pub struct Overlay {
     regions: Mutex<Vec<Rect>>,
     /// Interaction is paused while the AI drives the mouse, so it doesn't click the orb
     suppress_until: Mutex<Option<Instant>>,
+    /// Calls that move the mouse and are still running: interaction stays off for as long as any is, however
+    /// long it takes (a fixed window ran out halfway through a long batch, and a click landed on the orb)
+    driving: std::sync::atomic::AtomicUsize,
+}
+
+/// Interaction stays off while this lives, then for `tail` after
+pub struct Driving<'a> {
+    ov: &'a Overlay,
+    tail: Duration,
+}
+
+impl Drop for Driving<'_> {
+    fn drop(&mut self) {
+        self.ov.suppress(self.tail);
+        self.ov.driving.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl Overlay {
+    /// Turn interaction off until the returned guard is dropped (and `tail` after that)
+    pub fn driving(&self, tail: Duration) -> Driving<'_> {
+        self.driving.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Driving { ov: self, tail }
+    }
+
+    fn suppressed(&self) -> bool {
+        self.driving.load(std::sync::atomic::Ordering::SeqCst) > 0 || self.suppress_until.lock().unwrap().is_some_and(|t| t > Instant::now())
+    }
+
     pub fn suppress(&self, d: Duration) {
         let until = Instant::now() + d;
         let mut s = self.suppress_until.lock().unwrap();
@@ -216,7 +242,7 @@ pub fn setup(app: &AppHandle) {
             std::thread::sleep(Duration::from_millis(30));
             tick = tick.wrapping_add(1);
             let ov = app.state::<Overlay>();
-            let suppressed = ov.suppress_until.lock().unwrap().is_some_and(|t| t > Instant::now());
+            let suppressed = ov.suppressed();
             let inside = !suppressed
                 && crate::input::cursor_pos().is_ok_and(|(x, y)| {
                     ov.regions.lock().unwrap().iter().any(|r| x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h)
