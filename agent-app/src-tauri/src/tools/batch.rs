@@ -17,14 +17,14 @@ use super::*;
 use std::collections::{HashMap, HashSet};
 
 /// Tools a batch may run as steps: looking and acting, nothing that changes files or the system
-const BATCHABLE: [&str; 15] = [
-    "click", "type_text", "press_keys", "scroll", "drag", "mouse", "set_value", "element_action", "focus_window", "open_app", "wait_for",
+const BATCHABLE: [&str; 16] = [
+    "watch", "click", "type_text", "press_keys", "scroll", "drag", "mouse", "set_value", "element_action", "focus_window", "open_app", "wait_for",
     "clipboard", "read_text", "observe", "read_grid",
 ];
 /// Steps that put input in, the ones the pace applies to
 const INPUTS: [&str; 8] = ["click", "type_text", "press_keys", "scroll", "drag", "mouse", "set_value", "element_action"];
 /// Steps whose reply is the point of them: kept long
-const READS: [&str; 4] = ["read_text", "observe", "clipboard", "read_grid"];
+const READS: [&str; 5] = ["read_text", "observe", "clipboard", "read_grid", "watch"];
 const MAX_STEPS: usize = 2000;
 
 #[derive(Clone, Copy, PartialEq)]

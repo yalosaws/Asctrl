@@ -78,7 +78,7 @@ function fill(v: unknown, row: Row): unknown {
 /** Tools a `{tool: …}` step may name: the ones the driver's batch runs */
 export const STEP_TOOLS = [
   "click", "type_text", "press_keys", "scroll", "drag", "mouse", "set_value", "element_action", "focus_window", "open_app", "wait_for",
-  "clipboard", "read_text", "observe", "read_grid",
+  "clipboard", "read_text", "observe", "read_grid", "watch",
 ] as const;
 
 /** Every kind of step: the key that names it, and the other keys it takes (besides window) */
@@ -94,6 +94,7 @@ const KINDS: Record<string, string[]> = {
   await: ["gone", "timeoutSec"],
   scroll: ["target", "amount"],
   read: [],
+  watch: ["until", "everyMs", "confirm", "timeoutSec"],
 };
 
 const GRID_CELL = /^(\w+)\[\s*(\d+)\s*,\s*(\d+)\s*\]$/;
@@ -131,6 +132,11 @@ export function validate(plan: Plan): string[] {
       if (!v || typeof v !== "object" || Array.isArray(v) || !Object.keys(v).length) errs.push(`${where}: fill takes {label: value, …}`);
     } else if (kind === "read") {
       if (typeof v !== "string" || (!placeholder(v) && !plan.grids?.[v])) errs.push(`${where}: read takes the name of a grid declared in grids`);
+    } else if (kind === "watch") {
+      const r = v as Record<string, unknown> | null;
+      const box = r && typeof r === "object" && !Array.isArray(r) && ["x0", "y0", "x1", "y1"].every((k) => typeof r[k] === "number" && (r[k] as number) >= 0);
+      if (!box || (r.x1 as number) <= (r.x0 as number) || (r.y1 as number) <= (r.y0 as number)) errs.push(`${where}: watch takes the region to read, {x0, y0, x1, y1} on the latest screenshot`);
+      if (typeof s.until !== "string" || !s.until.trim()) errs.push(`${where}: watch needs until, e.g. ">= 141 | <= 133" (a number read there) or text to wait for`);
     } else if (kind === "scroll") {
       if (!["up", "down", "left", "right"].includes(String(v)) && !placeholder(v)) errs.push(`${where}: scroll takes up, down, left or right`);
     } else if (typeof v !== "string" && typeof v !== "number") {
@@ -487,7 +493,9 @@ export class Runner {
         for (const x of seg) prepared.push(await this.prepare(job, x.s));
         const steps = prepared.map((x, m) => ({ tool: x.tool, ...x.args, ...(many ? { k: seg[m].k } : {}) }));
         const pace = p.fast === true ? "fast" : p.fast === false ? "normal" : "auto";
-        const r = await this.call("batch", { steps, pace, after: "none" });
+        // A watch holds its batch for as long as it watches
+        const watching = prepared.reduce((t, x) => t + (x.tool === "watch" ? Number(x.args.timeoutSec ?? 60) * 1000 : 0), 0);
+        const r = await this.call("batch", { steps, pace, after: "none" }, 120_000 + watching);
         const data = r.data as { steps?: BatchStep[]; failed?: number | null } | undefined;
         if (!data?.steps) throw new Error(firstLines(r.error ?? r.text ?? "the driver gave no step results (is it up to date?)", 6));
         data.steps.forEach((res, m) => {
@@ -496,7 +504,7 @@ export class Runner {
           const x = prepared[m];
           const what = x.alias ? `${x.what} → ${x.alias} (remembered)` : x.what;
           // What a read step read is the point of it
-          said(seg[m], x.tool === "read_grid" || x.tool === "read_text" || x.tool === "observe" ? `✓ ${what}:\n${res.text}` : `✓ ${what}`);
+          said(seg[m], x.tool === "read_grid" || x.tool === "read_text" || x.tool === "observe" || x.tool === "watch" ? `✓ ${what}:\n${res.text}` : `✓ ${what}`);
           this.noteDone(job, what, res.text);
         });
         if (data.failed == null) {
@@ -546,8 +554,8 @@ export class Runner {
     if (o?.text) job.tail = `Where things stand:\n${o.text.split("\n").slice(0, 45).join("\n")}`;
   }
 
-  private call(tool: ToolName, args: Record<string, unknown>): Promise<ToolResult> {
-    return this.client.call(tool, args, 120_000);
+  private call(tool: ToolName, args: Record<string, unknown>, timeoutMs = 120_000): Promise<ToolResult> {
+    return this.client.call(tool, args, timeoutMs);
   }
 
   private win(window: string | number | undefined) {
@@ -843,6 +851,10 @@ export function translate(s: Step, w: Record<string, unknown>, grids: Record<str
   if (s.scroll !== undefined) {
     const at = s.target !== undefined ? aim(s.target) : {};
     return { tool: "scroll", args: { ...w, ...at, direction: s.scroll, ...pass(["amount"]), ...quiet }, what: `scroll ${s.scroll}`, kind: "click" };
+  }
+  if (s.watch !== undefined) {
+    const r = s.watch as Record<string, number>;
+    return { tool: "watch", args: { x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, until: String(s.until), ...pass(["everyMs", "confirm", "timeoutSec"]), ...quiet }, what: `watch until ${s.until}`, kind: "click" };
   }
   if (s.read !== undefined) {
     const g = grids[String(s.read)];

@@ -51,9 +51,32 @@ pub fn language() -> Option<String> {
     Some(engine().ok()?.RecognizerLanguage().ok()?.LanguageTag().ok()?.to_string())
 }
 
+/// The engine for reading numbers: an English one where its pack is installed, since engines for other
+/// scripts read digits poorly (a Chinese one takes "·" for the decimal point and splits numbers into groups);
+/// else the user's own
+fn number_engine() -> Result<OcrEngine, String> {
+    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let en = windows::Globalization::Language::CreateLanguage(&windows::core::HSTRING::from("en-US"))
+        .ok()
+        .filter(|l| OcrEngine::IsLanguageSupported(l).unwrap_or(false))
+        .and_then(|l| OcrEngine::TryCreateFromLanguage(&l).ok());
+    match en {
+        Some(e) => Ok(e),
+        None => engine(),
+    }
+}
+
 /// Read every line of text in `area`
 pub fn read(area: Area) -> Result<Vec<Line>, String> {
-    let engine = engine()?;
+    read_with(area, engine()?)
+}
+
+/// Read `area`, where what matters is a number
+pub fn read_numbers(area: Area) -> Result<Vec<Line>, String> {
+    read_with(area, number_engine()?)
+}
+
+fn read_with(area: Area, engine: OcrEngine) -> Result<Vec<Line>, String> {
     let max = OcrEngine::MaxImageDimension().unwrap_or(10000) as i32;
     // Small regions are enlarged: the engine reads text best at 20+ pixels tall
     let up: f64 = if (area.width as i64 * area.height as i64) < 900 * 700 { 2.0 } else { 1.0 };

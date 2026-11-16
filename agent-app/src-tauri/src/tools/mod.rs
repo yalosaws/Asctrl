@@ -22,6 +22,7 @@ mod report;
 mod system;
 mod values;
 mod wait;
+mod watch;
 
 use base64::Engine;
 use serde::Serialize;
@@ -414,6 +415,7 @@ async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         "read_text" => look::read_text(ctx, args).await,
         "wait_for" => wait::wait_for(ctx, args).await,
         "read_grid" => grid::read_grid(ctx, args).await,
+        "watch" => watch::watch(ctx, args).await,
         // Acting
         "click" => pointer::click(ctx, args).await,
         "scroll" => pointer::scroll(ctx, args).await,

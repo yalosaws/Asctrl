@@ -425,7 +425,9 @@ server.registerTool(
       "and the next run call returns that failure instead of queueing. " +
       "Steps: {open: program/URL} · {click: text} · {press: text} (UI Automation, no mouse) · {fill: {label: value, …}} · {type: text, into?: label, enter?} · " +
       "{keys: \"ctrl+s\"} · {expect: text shown on success, gone?, timeoutSec?} · {check: a claim about the window (\"the email was sent\"), judged by the decision model, timeoutSec?} · " +
-      "{await: window title, gone?} · {scroll: up|down|left|right, target?, amount?} · {read: grid name} · {tool: " + STEP_TOOLS.join("|") + ", …its args}. " +
+      "{await: window title, gone?} · {scroll: up|down|left|right, target?, amount?} · {read: grid name} · " +
+      "{watch: {x0, y0, x1, y1} (a region on the latest screenshot), until: \">= 141 | <= 133\" or text, everyMs?, confirm? (readings in a row, default 2), timeoutSec? (default 60, up to 600)}: reads the number there " +
+      "about 8 times a second and goes on the moment one condition holds, so the next step (a sell, a click) reacts within a fraction of a second; fails if none held in time · {tool: " + STEP_TOOLS.join("|") + ", …its args}. " +
       "Each step may add window. Text is matched on the computer first; when it matches several controls or none, a decision model picks among a few candidates, " +
       "and only a confident choice is acted on (never something irreversible the plan didn't name). The pace is chosen for you: a step repeated over rows goes fast once its first run " +
       "showed it brings nothing up. Popups that turn up meanwhile are dismissed in between steps: by on, or by a button that only dismisses (Not now, 关闭). End plans with expect.",

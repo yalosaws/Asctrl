@@ -10,6 +10,7 @@ export type ToolName =
   | "read_text"
   | "wait_for"
   | "read_grid"
+  | "watch"
   // Acting
   | "click"
   | "scroll"
