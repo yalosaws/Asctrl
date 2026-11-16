@@ -12,10 +12,12 @@ use crate::{capture, fx, input, screen, uia, winmgr};
 
 mod apps;
 mod batch;
+mod grid;
 mod keys;
 mod locate;
 mod look;
 mod pointer;
+pub mod popups;
 mod report;
 mod system;
 mod values;
@@ -38,6 +40,9 @@ pub struct Output {
     pub file: Option<FileData>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Structured results, for a program reading the reply (a plan's runner reads a batch's steps from it)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 impl Output {
@@ -45,6 +50,22 @@ impl Output {
     pub fn body(&self) -> &str {
         self.text.as_deref().or(self.error.as_deref()).unwrap_or("")
     }
+}
+
+/// A probe (run trying a step as written before deciding another way) that missed: not a failure worth
+/// flashing on the overlay, since the step goes on another way
+pub fn probe_missed(args: &Value, out: &Output) -> bool {
+    const MISS: [&str; 4] = ["equally well", "Nothing in ", "has no item", " is on screen in "];
+    if out.ok {
+        return false;
+    }
+    // A batch that stopped at such a probe: the plan's runner carries on from that step
+    let failed = out.data.as_ref().and_then(|d| Some((d.get("failed")?.as_u64()? as usize, d.get("steps")?.as_array()?)));
+    if let (Some(steps), Some((i, results))) = (args.get("steps").and_then(Value::as_array), failed) {
+        let text = results.get(i).and_then(|r| r.get("text")).and_then(Value::as_str).unwrap_or("");
+        return steps.get(i).is_some_and(|s| bool_arg(s, "probe") == Some(true)) && MISS.iter().any(|m| text.contains(m));
+    }
+    bool_arg(args, "probe") == Some(true) && MISS.iter().any(|m| out.body().contains(m))
 }
 
 #[derive(Serialize)]
@@ -179,6 +200,7 @@ impl Ctx {
         *self.frame.lock().unwrap() = None;
         *self.view.lock().unwrap() = View { scope: Scope::Screen, max_width: 1600 };
         *self.seen.lock().unwrap() = Arc::new(vec![]);
+        popups::stop("");
         uia::reset();
     }
 
@@ -370,11 +392,6 @@ type BoxedRun<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Output> +
 
 /// Run a tool
 pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
-    // fast on a single call (a plan's step, run with fast): an input doesn't wait for the screen to settle,
-    // only for the program to take it. A batch has its own fast.
-    if tool != "batch" && bool_arg(args, "fast") == Some(true) {
-        return FAST.scope(true, run_tool(ctx, tool, args)).await;
-    }
     run_tool(ctx, tool, args).await
 }
 
@@ -394,11 +411,9 @@ async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         // Looking
         "observe" => look::observe(ctx, args).await,
         "screenshot" => look::screenshot(ctx, args).await,
-        "zoom" => look::zoom(ctx, args).await,
-        "find" => look::find(ctx, args).await,
         "read_text" => look::read_text(ctx, args).await,
-        "list_windows" => look::list_windows(ctx).await,
         "wait_for" => wait::wait_for(ctx, args).await,
+        "read_grid" => grid::read_grid(ctx, args).await,
         // Acting
         "click" => pointer::click(ctx, args).await,
         "scroll" => pointer::scroll(ctx, args).await,
@@ -412,14 +427,13 @@ async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         // Programs, windows, clipboard
         "open_app" => apps::open_app(ctx, args).await,
         "focus_window" => apps::focus_window(ctx, args).await,
-        "read_clipboard" => {
+        // With text: put it on the clipboard; without: say what is on it
+        "clipboard" => {
             let _turn = acting().await;
-            blocking(winmgr::clipboard_describe).await
-        }
-        "write_clipboard" => {
-            let _turn = acting().await;
-            let t = str_arg(args, "text").to_string();
-            blocking(move || winmgr::set_clipboard_text(&t).map(|_| format!("Copied to clipboard ({} chars)", t.chars().count()))).await
+            match args.get("text").and_then(Value::as_str).map(str::to_string) {
+                Some(t) => blocking(move || winmgr::set_clipboard_text(&t).map(|_| format!("Copied to clipboard ({} chars)", t.chars().count()))).await,
+                None => blocking(winmgr::clipboard_describe).await,
+            }
         }
         // Shell, files, system
         other => system::run(ctx, other, args).await,
@@ -435,7 +449,7 @@ pub fn fx_before(ctx: &Ctx, tool: &str, args: &Value) -> Value {
     let f = ctx.frame();
     let pt = |kx: &str, ky: &str| f.point(args, kx, ky).ok().map(fx::pt_json);
     match tool {
-        "zoom" => json!({ "from": pt("x0", "y0"), "to": pt("x1", "y1") }),
+        "screenshot" if args.get("x0").is_some() => json!({ "from": pt("x0", "y0"), "to": pt("x1", "y1") }),
         "focus_window" => match winmgr::find_arg(args.get("window")) {
             Ok(Some(h)) => {
                 let h = h.0 as isize;
@@ -495,6 +509,17 @@ mod tests {
         // A screen no wider than the limit is not scaled
         let small = Frame::of(capture::Area { left: 0, top: 0, width: 1366, height: 768 }, 1600);
         assert_eq!((small.scale, small.width, small.height), (1.0, 1366, 768));
+    }
+
+    #[test]
+    fn a_batch_stopped_by_a_missed_probe_is_no_failure_to_flash() {
+        let miss = "Nothing in \"Bench\" shows \"send\"";
+        let out = |text: &str| Output { ok: false, data: Some(serde_json::json!({ "failed": 1, "steps": [{ "ok": true, "text": "" }, { "ok": false, "text": text }] })), ..Default::default() };
+        let args = |probe: bool| serde_json::json!({ "steps": [{ "tool": "keys" }, { "tool": "click", "target": "send", "probe": probe }] });
+        assert!(probe_missed(&args(true), &out(miss)));
+        // Not a probe, or a probe that failed some other way: a real failure
+        assert!(!probe_missed(&args(false), &out(miss)));
+        assert!(!probe_missed(&args(true), &out("Access denied")));
     }
 
     #[test]

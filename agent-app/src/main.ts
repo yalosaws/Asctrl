@@ -6,7 +6,7 @@ import { center, hit, home, initGeo, isTauri, primary, setHome, snap, syncHits, 
 import { orb } from "./orb";
 import { bloom, ripple, sheen } from "./light";
 import { collapse, expand, isShown, relayout as relayoutEdge } from "./edge";
-import { fxEnd, fxPlan, fxStart, fxStep, recallPointers, type FxEvent } from "./fx";
+import { fxEnd, fxPlan, fxStart, fxStep, recallPointers, workAbandoned, type FxEvent } from "./fx";
 import { EASE, play, sleep, SPRING } from "./motion";
 import { runDemo } from "./demo";
 import { setSession } from "./think";
@@ -224,6 +224,7 @@ function render(s: Status) {
   }
   setHome(null);
   hideConsent();
+  if (s.state !== "connected") workAbandoned();
 
   switch (s.state) {
     case "connecting":

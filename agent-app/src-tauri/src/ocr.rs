@@ -60,12 +60,23 @@ pub fn read(area: Area) -> Result<Vec<Line>, String> {
     let k = up.min(max as f64 / area.width.max(area.height) as f64);
     let (w, h) = (((area.width as f64 * k) as i32).max(1), ((area.height as f64 * k) as i32).max(1));
     let px = capture::pixels(area, w, h, true)?;
+    recognize(&engine, &px, w, h, k, (area.left, area.top))
+}
+
+/// Read every line of text in an image (top-down BGRA rows, `w` x `h`), in that image's own pixels
+pub fn read_image(px: &[u8], w: i32, h: i32) -> Result<Vec<Line>, String> {
+    recognize(&engine()?, px, w, h, 1.0, (0, 0))
+}
+
+/// The lines in an image that is the screen at `origin` enlarged `k` times; boxes in screen pixels
+fn recognize(engine: &OcrEngine, px: &[u8], w: i32, h: i32, k: f64, origin: (i32, i32)) -> Result<Vec<Line>, String> {
     let ocr = |e: windows::core::Error| format!("OCR failed: {}", e.message());
     let writer = DataWriter::new().map_err(ocr)?;
-    writer.WriteBytes(&px).map_err(ocr)?;
+    writer.WriteBytes(px).map_err(ocr)?;
     let buf = writer.DetachBuffer().map_err(ocr)?;
     let bmp = SoftwareBitmap::CreateCopyFromBuffer(&buf, BitmapPixelFormat::Bgra8, w, h).map_err(ocr)?;
     let result = engine.RecognizeAsync(&bmp).map_err(ocr)?.join().map_err(ocr)?;
+    let area = Area { left: origin.0, top: origin.1, width: w, height: h };
     let to = |x: f32, o: i32| o + (x as f64 / k).round() as i32;
     let mut out = vec![];
     for line in result.Lines().map_err(ocr)? {

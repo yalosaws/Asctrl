@@ -32,8 +32,8 @@ async function check(label: string, plan: Plan, want: (text: string) => boolean)
 
 try {
   await tech.connectLocalDriver({ launch: false, waitMs: 30_000 });
-  await tech.call("wait_for", { window: "Asctrl Bench", timeoutSec: 15 });
-  const lw = (await tech.call("list_windows", {})).text ?? "";
+  await tech.call("wait_for", { appears: "Asctrl Bench", timeoutSec: 15 });
+  const lw = (await tech.call("observe", { max: 1 })).text ?? "";
   const B = Number(lw.match(/\[(\d+)\][^\n]*"Asctrl Bench"/)![1]);
 
   await check("bench form by labels, all local", { window: B, steps: [{ fill: { Name: "Alice", Agree: true } }, { click: "Submit" }, { expect: "Submitted: Alice" }] }, (t) => t.includes("✓ done") && !t.includes("decision model"));
@@ -58,6 +58,25 @@ try {
     (t) => t.includes("✓ done") && t.includes('✓ check "'),
   );
   await check("check: a claim that doesn't", { window: B, steps: [{ fill: { Agree: false } }, { check: "The Agree box is ticked.", timeoutSec: 1 }] }, (t) => t.includes('✗ check "'));
+  // The whole plan is checked before any of it runs
+  await check(
+    "a plan with mistakes: nothing runs",
+    { window: B, steps: [{ fill: { Name: "Never" } }, { click: "Submit", colour: "red" }, { tool: "format_disk" }, { click: "board[1,1]" }] },
+    (t) => t.startsWith("Not queued: the plan has mistakes") && t.includes('"colour"') && t.includes("format_disk") && t.includes('no grid named "board"'),
+  );
+  // A popup that turns up while a plan runs is dismissed in between its steps (here by the plan's rule); the
+  // dialog is modal, so the fill after it works only once it is gone
+  await check(
+    "popup mid-plan: dismissed in between steps",
+    { window: B, on: { "Bench Dialog": "Close me" }, steps: [{ click: "Open dialog" }, { tool: "wait_for", seconds: 1.5 }, { fill: { Name: "Pop" } }, { click: "Submit" }, { expect: "Submitted: Pop" }] },
+    (t) => t.includes("✓ done") && t.includes('pressed "Close me"'),
+  );
+  // The pace is chosen per step: rows after the first go fast once the first showed the steps bring nothing up
+  await check(
+    "repeat, pace chosen per step",
+    { window: B, repeat: [["A1"], ["A2"], ["A3"], ["A4"]], steps: [{ fill: { Name: "$1" } }, { click: "Submit" }, { expect: "Submitted: $1" }] },
+    (t) => t.includes("✓ done") && /\d+ steps? fast/.test(t),
+  );
   // Settled by an expect, then a dialog that opens late: the model may say "not ready yet", and it is waited for
   await check(
     "dialog still opening after a passed expect",
@@ -75,8 +94,8 @@ try {
 
   // Queued: three plans sent at once, as an AI would while thinking; the second waits for what the first brings up
   await tech.call("open_app", { target: "calc", after: "none" });
-  await tech.call("wait_for", { window: "计算器|Calculator", timeoutSec: 10 });
-  const C = Number(((await tech.call("list_windows", {})).text ?? "").match(/\[(\d+)\][^\n]*"(计算器|Calculator)"/)![1]);
+  await tech.call("wait_for", { appears: "计算器|Calculator", timeoutSec: 10 });
+  const C = Number(((await tech.call("observe", { max: 1 })).text ?? "").match(/\[(\d+)\][^\n]*"(计算器|Calculator)"/)![1]);
   const t0 = performance.now();
   const q1 = await runner.run({ window: C, steps: [{ keys: "escape" }, { click: "一" }, { click: "二" }, { click: "×" }, { click: "七" }, { click: "等于" }, { expect: "84" }], goal: "compute 12 × 7" }, false);
   const q2 = await runner.run({ window: C, when: "84", steps: [{ click: "除以" }, { click: "四" }, { click: "等于" }, { expect: "21" }] }, false);

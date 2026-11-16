@@ -1,36 +1,105 @@
-//! batch: several steps in one call
+//! batch: the steps of a plan, run here in one go so no step waits on a round trip.
+//!
+//! Pace. An input normally waits until the screen has reacted and stopped changing, so the next step sees
+//! what it did; on a screen that animates, that wait is most of the time spent. `pace`:
+//! - "normal": every input waits.
+//! - "fast": no input waits, only for the program to take it; the screen settles once before anything that
+//!   reads it (a wait, a look) and at the end.
+//! - "auto" (default): a step marked with a template number `k` (the same step of a plan repeated over rows
+//!   of data) runs at the normal pace the first time; if that brought no window up and nothing else to the
+//!   front, its later runs go fast. Anything unexpected in a fast run (a window, a popup, a failure) puts
+//!   the rest of the batch back to the normal pace.
+//!
+//! Each step's result comes back in `data` (`steps`: ok, text, fast), so the plan's runner can carry on
+//! from a step that failed without the rest of the batch being sent again.
 
-use super::report::Did;
 use super::*;
+use std::collections::{HashMap, HashSet};
 
 /// Tools a batch may run as steps: looking and acting, nothing that changes files or the system
-const BATCHABLE: [&str; 16] = [
+const BATCHABLE: [&str; 15] = [
     "click", "type_text", "press_keys", "scroll", "drag", "mouse", "set_value", "element_action", "focus_window", "open_app", "wait_for",
-    "write_clipboard", "read_clipboard", "find", "read_text", "observe",
+    "clipboard", "read_text", "observe", "read_grid",
 ];
+/// Steps that put input in, the ones the pace applies to
+const INPUTS: [&str; 8] = ["click", "type_text", "press_keys", "scroll", "drag", "mouse", "set_value", "element_action"];
+/// Steps whose reply is the point of them: kept long
+const READS: [&str; 4] = ["read_text", "observe", "clipboard", "read_grid"];
+const MAX_STEPS: usize = 2000;
 
-/// Run several steps in one call, in order, stopping at the first failure. Each step still waits only until
-/// the screen settles, but the AI saves a whole round trip (and a turn of thinking) per step, and the
-/// outcome is reported once, at the end. With fast, input steps don't wait for the screen at all
-/// (animations would hold every step up); the screen settles once at the end.
+#[derive(Clone, Copy, PartialEq)]
+enum Pace {
+    Auto,
+    Fast,
+    Normal,
+}
+
+/// What is in front and which windows are up: an input that changed either brought something up
+fn windows_now() -> (isize, HashSet<isize>) {
+    (winmgr::foreground(), winmgr::list().into_iter().map(|w| w.handle).collect())
+}
+
+/// Let the screen come to rest after inputs that didn't wait for it (in `area`, else the window in front)
+async fn settle(area: Option<capture::Area>) -> (bool, u128) {
+    let t = std::time::Instant::now();
+    let calm = tokio::task::spawn_blocking(move || {
+        // In a framed region nothing is written off as moving on its own
+        let noise = if area.is_some() { Duration::MAX } else { screen::NOISE_QUICK };
+        screen::wait_stable(area.unwrap_or_else(|| screen::watch_area(None)), Duration::from_millis(150), Duration::from_millis(1500), noise)
+    })
+    .await
+    .unwrap_or(true);
+    (calm, t.elapsed().as_millis())
+}
+
 pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
     let Some(steps) = args.get("steps").and_then(Value::as_array) else { return fail("Missing steps") };
-    if steps.is_empty() || steps.len() > 100 {
-        return fail("Give 1 to 100 steps");
+    if steps.is_empty() || steps.len() > MAX_STEPS {
+        return fail(format!("Give 1 to {MAX_STEPS} steps"));
     }
-    let fast = bool_arg(args, "fast").unwrap_or(false);
+    let pace = match str_arg(args, "pace") {
+        "" | "auto" => Pace::Auto,
+        "fast" => Pace::Fast,
+        "normal" => Pace::Normal,
+        other => return fail(format!("pace: \"{other}\" is not one of auto, fast, normal")),
+    };
+    for (i, s) in steps.iter().enumerate() {
+        let tool = str_arg(s, "tool");
+        if !BATCHABLE.contains(&tool) {
+            return fail(format!("Step {}: \"{tool}\" can't run in a batch; allowed: {}", i + 1, BATCHABLE.join(", ")));
+        }
+    }
+    let area = WATCH.try_with(|w| *w).ok();
     let call = fx::call_id();
     let started = std::time::Instant::now();
-    let mut lines = vec![];
+    let mut results = vec![];
     let mut failed: Option<usize> = None;
+    // Template step -> whether it can go fast (it brought nothing up when it ran at the normal pace)
+    let mut learned: HashMap<u64, bool> = HashMap::new();
+    // Something unexpected happened in a fast run: the normal pace from here on
+    let mut careful = pace == Pace::Normal;
+    // Inputs went in without the screen being let to settle
+    let mut unsettled = false;
+    let mut fast_count = 0usize;
     // One reading of the window for looking ahead (locate::peek)
     let peeked = Arc::new(Mutex::new(None));
     for (i, step) in steps.iter().enumerate() {
-        if failed.is_some() {
-            lines.push(format!("{}. – skipped", i + 1));
-            continue;
-        }
         let tool = str_arg(step, "tool");
+        let k = step.get("k").and_then(Value::as_u64);
+        // A popup being dismissed goes first: this step must not act on the screen it covers
+        popups::clear(Duration::from_secs(2)).await;
+        let input = INPUTS.contains(&tool);
+        let fast = input
+            && match pace {
+                Pace::Fast => !careful,
+                Pace::Normal => false,
+                Pace::Auto => !careful && k.is_some_and(|k| learned.get(&k) == Some(&true)),
+            };
+        // A step that waits or reads sees the screen at rest
+        if !fast && unsettled {
+            settle(area).await;
+            unsettled = false;
+        }
         // While this step runs, find where the next click will land, so its pointer can be on its way before
         // the click happens rather than setting off once it already has. On the side: nothing waits for it.
         if let Some(next) = steps.get(i + 1).filter(|s| str_arg(s, "tool") == "click")
@@ -43,54 +112,63 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
                 }
             });
         }
-        let out = if !BATCHABLE.contains(&tool) {
-            fail(format!("\"{tool}\" can't run in a batch; allowed: {}", BATCHABLE.join(", ")))
-        } else {
-            // Each step animates on its own
-            let id = format!("{call}.{i}");
-            let before = fx_before(ctx, tool, step);
-            fx::emit(serde_json::json!({ "phase": "start", "id": id, "tool": tool, "args": step, "geo": before }));
-            let out = STEP.scope(true, FAST.scope(fast, fx::CALL_ID.scope(id.clone(), run_tool(ctx, tool, step)))).await;
-            let after = fx_after(ctx, tool, &before, &out);
-            let t: String = out.body().chars().take(6000).collect();
-            fx::emit(serde_json::json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "text": t, "geo": after }));
-            out
-        };
-        // What a step read is the point of it; what a step did fits in a line
-        let room = if matches!(tool, "find" | "read_text" | "observe" | "read_clipboard") { 6000 } else { 600 };
+        let before = if input { Some(windows_now()) } else { None };
+        // Each step animates on its own
+        let id = format!("{call}.{i}");
+        let geo = fx_before(ctx, tool, step);
+        fx::emit(serde_json::json!({ "phase": "start", "id": id, "tool": tool, "args": step, "geo": geo }));
+        let out = STEP.scope(true, FAST.scope(fast, fx::CALL_ID.scope(id.clone(), run_tool(ctx, tool, step)))).await;
+        let after = fx_after(ctx, tool, &geo, &out);
+        let t: String = out.body().chars().take(6000).collect();
+        fx::emit(serde_json::json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "quiet": probe_missed(step, &out), "text": t, "geo": after }));
+        // Did it bring anything up? (A popup the watcher is on counts: it was not the step's doing, but the
+        // screen is not what the next step expects until it is gone.)
+        if let Some((fg0, wins0)) = before {
+            let (fg, wins) = windows_now();
+            let quiet = out.ok && fg == fg0 && wins.is_subset(&wins0) && !popups::busy();
+            if fast {
+                fast_count += 1;
+                unsettled = true;
+                if !quiet {
+                    careful = true;
+                    if let Some(k) = k {
+                        learned.insert(k, false);
+                    }
+                }
+            } else if let Some(k) = k {
+                // Learnt the first time; anything unquiet later makes it careful for good
+                let e = learned.entry(k).or_insert(quiet);
+                *e &= quiet;
+            }
+        }
+        let room = if READS.contains(&tool) { 6000 } else { 600 };
         let body: String = out.body().chars().take(room).collect();
-        lines.push(format!("{}. {} {tool}: {body}", i + 1, if out.ok { "✓" } else { "✗" }));
+        results.push(serde_json::json!({ "ok": out.ok, "text": body, "fast": fast }));
         if !out.ok {
             failed = Some(i);
+            break;
         }
     }
-    // Fast steps didn't wait for the screen: let it settle once, so the report shows the outcome
-    let mut settled = String::new();
-    if fast {
-        let t = std::time::Instant::now();
-        // The batch's watch region when it framed one, else the window in front
-        let area = WATCH.try_with(|w| *w).ok();
-        let calm = tokio::task::spawn_blocking(move || {
-            // In a framed region nothing is written off as moving on its own
-            let noise = if area.is_some() { Duration::MAX } else { screen::NOISE_QUICK };
-            screen::wait_stable(area.unwrap_or_else(|| screen::watch_area(None)), Duration::from_millis(250), Duration::from_secs(3), noise)
-        })
-        .await
-        .unwrap_or(true);
-        let ms = t.elapsed().as_millis();
-        settled = if calm { format!(" (fast; screen settled {ms} ms after the last step)") } else { format!(" (fast; screen still changing {ms} ms after the last step)") };
+    let mut tail = String::new();
+    if unsettled {
+        let (calm, ms) = settle(area).await;
+        tail = if calm { format!("; screen settled {ms} ms after the last step") } else { format!("; screen still changing {ms} ms after the last step") };
     }
     let secs = started.elapsed().as_secs_f64();
+    let fast_note = if fast_count > 0 { format!(", {fast_count} fast") } else { String::new() };
     let head = match failed {
-        None => format!("All {} steps done in {secs:.1} s{settled}", steps.len()),
-        Some(i) => format!("Step {} failed after {secs:.1} s, so the rest were skipped", i + 1),
+        None => format!("All {} steps done in {secs:.1} s{fast_note}{tail}", steps.len()),
+        Some(i) => format!("Step {} failed after {secs:.1} s{fast_note}; the rest were not run", i + 1),
     };
-    // One report for the whole batch: where things stand now
-    let did = Did { done: format!("{head}\n{}", lines.join("\n")), change: None, hwnd: None, fresh: false, delivered: false };
-    let mut out = report::conclude(ctx, args, did, true).await;
-    if failed.is_some() {
-        out.ok = false;
-        out.error = out.text.take();
+    let lines: Vec<String> = results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| format!("{}. {} {}: {}", i + 1, if r["ok"] == true { "✓" } else { "✗" }, str_arg(&steps[i], "tool"), r["text"].as_str().unwrap_or("")))
+        .collect();
+    let body = format!("{head}\n{}", lines.join("\n"));
+    let data = Some(serde_json::json!({ "steps": results, "failed": failed }));
+    match failed {
+        None => Output { ok: true, text: Some(body), data, ..Default::default() },
+        Some(_) => Output { ok: false, error: Some(body), data, ..Default::default() },
     }
-    out
 }

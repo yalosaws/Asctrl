@@ -10,7 +10,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { TechClient } from "./tech-client.ts";
-import { Runner } from "./run.ts";
+import { Runner, STEP_TOOLS } from "./run.ts";
 import { DEFAULT_RELAY_URL, type ToolName, type ToolResult } from "../shared/protocol.ts";
 
 /**
@@ -47,11 +47,11 @@ const client = new TechClient(process.env.RELAY_URL ?? DEFAULT_RELAY_URL, proces
 const INSTRUCTIONS = `Asctrl lets you see and operate a Windows computer. Work like this:
 
 1. connect (no arguments = this computer; a 6-digit code = a remote one).
-2. Look once. observe reads the window in front as text: every button, box, menu and list item with a reference like e12, plus text read off the pixels where a program draws its own UI. Take a screenshot when you need to see layout, images or colour.
-3. Act by target. Every action takes target — a reference ("e12") or simply the text the thing shows ("Save") — or x and y on the latest screenshot. References stay valid until the control goes away; you do not need to look again before each action.
-4. Read the reply instead of looking again. Each action says what it did, whether the screen reacted, and what changed among the window's controls (new ones come with references ready to use); a screenshot comes back only when text can't tell.
+2. Plan first, with run. Write the steps by the text they act on ("Compose", "To"), the way you expect the screen to be, without looking first, and end with expect so success is checked. run returns at once: write the next plan while it runs. Text is matched on the computer; only when it fits several controls or none does a decision model choose, and only when it is sure. Popups that turn up while a plan runs are dismissed in between its steps (give the ones you expect in on).
+3. When a plan fails, its report says where things stand (the window's controls, with references): re-plan from there. Look (observe, or screenshot for layout, images and programs that draw their own UI) only when the next plan needs something you can't guess, such as what a page lists.
+4. Single actions (click, type_text, set_value, …) are for one-off corrections. They take target, a reference ("e12") or the text the thing shows, or x and y on the latest screenshot, and their reply says what changed, so you rarely need to look again.
 
-For anything you can plan ahead, use run: write the steps by the text they act on and end with expect; it returns at once, so plan the next part while it runs, and check with progress. Prefer set_value for forms (it fills, ticks, picks and verifies in one call), wait_for instead of guessing delays, and batch for a sequence you already know. If a reply says nothing changed, the action probably missed: look before repeating it. Never guess coordinates: use a target, or x and y you can see on the latest screenshot.`;
+For a screen drawn as a grid (a game board, a calendar), declare it in run's grids and name cells "board[r,c]"; {read: "board"} reads every cell. Never guess coordinates: use a target, or x and y you can see on the latest screenshot.`;
 
 /** The app's orb, so connector lists show it instead of a letter. Sent inline: clients can't reach local files. */
 function orbIcons() {
@@ -108,7 +108,7 @@ async function connectWait(code: string, waitSec: number): Promise<Reply> {
     try {
       const host = await client.connect(code);
       lastCode = code;
-      return say(`Connected to ${host}. Start with observe (the window in front as text) or screenshot.`);
+      return say(`Connected to ${host}. Start with run: a plan of steps by the text they act on.`);
     } catch (e) {
       const msg = (e as Error).message;
       // Only "their app is not online yet" is worth retrying; other errors return immediately
@@ -123,7 +123,7 @@ async function connectLocal(waitSec: number, notPid?: number): Promise<Reply> {
   try {
     const host = await client.connectLocalDriver({ waitMs: Math.max(20, waitSec) * 1000, notPid, launch: notPid === undefined });
     lastCode = "";
-    return say(`Connected to this computer (${host}), directly. Start with observe (the window in front as text) or screenshot.`);
+    return say(`Connected to this computer (${host}), directly. Start with run: a plan of steps by the text they act on.`);
   } catch (e) {
     return say(`Connection failed: ${(e as Error).message}`, true);
   }
@@ -155,7 +155,7 @@ const coord = (what: string) => z.number().min(0).describe(`${what} (pixels on t
 const target = z
   .union([z.string().min(1), z.number().int().min(1)])
   .describe('What to act on: a reference from observe or an earlier reply ("e12"), or the text the thing shows ("Save", "下一步", a file name). Text is matched against control names first, then read off the pixels');
-const windowArg = z.union([z.string().min(1), z.number().int()]).describe("Which window: part of its title or program name (notepad, chrome), or a handle from list_windows. Default: the window in front");
+const windowArg = z.union([z.string().min(1), z.number().int()]).describe("Which window: part of its title or program name (notepad, chrome), or a handle (observe lists them). Default: the window in front");
 const role = z.string().optional().describe("With a text target: only controls of this kind (button, edit, link, checkbox, radio, tab, menuitem, item, combobox, text)");
 const nth = z.number().int().min(1).max(200).optional().describe("With a text target that matches several things equally: which one, in reading order");
 const timeoutSec = z.number().min(0).max(30).optional().describe("With a text target: how long to wait for it to appear; default 1.5");
@@ -181,16 +181,17 @@ server.registerTool(
     description:
       "Read a window as text: its controls (buttons, text boxes, checkboxes, menus, list items, links, text) as a tree, each with a reference like [e12], its state and value, and its centre @(x,y). " +
       "Open menus and drop-downs of the window are included. Where a program draws its own UI (games, canvases, remote desktops, some web pages), the text is read off the pixels instead. " +
-      "The reply also names the window in front and the other open windows. This is the one look that makes everything after it cheap: " +
-      "references stay valid as long as the control exists, and every action's reply tells you what changed. " +
-      "Much cheaper and more exact than a screenshot for finding and reading things; add image: true when you also need to see it.",
+      "The reply also lists every other open window, front to back, with the handle to pass as window. " +
+      "With query: where something is instead, the controls whose name or value contains it (best match first, with references) and, where the program draws its own UI, the places it appears on the pixels. " +
+      "References stay valid as long as the control exists, and every action's reply tells you what changed. Much cheaper and more exact than a screenshot; add image: true when you also need to see it.",
     inputSchema: {
       window: windowArg.optional(),
-      query: z.string().optional().describe("Only list controls whose line contains this (case-insensitive), e.g. a label, or a kind such as Edit"),
+      query: z.string().optional().describe("Text to look for (case and spacing ignored): only what matches it, best first"),
+      role,
       image: z.boolean().optional().describe("Also return a screenshot (of the window, when window is given); default false"),
-      ocr: z.boolean().optional().describe("Read text off the pixels too. Default: only when the controls say little. true adds text the controls don't mention (a canvas inside an ordinary window)"),
+      ocr: z.boolean().optional().describe("Read text off the pixels too. Default: only when the controls say little (with query: when no control matches). true adds text the controls don't mention (a canvas inside an ordinary window)"),
       offscreen: z.boolean().optional().describe("Also list controls scrolled out of view; default false"),
-      max: z.number().int().min(1).max(2000).optional().describe("Most lines to list; default 150. Past it, plain text is left out before controls are"),
+      max: z.number().int().min(1).max(2000).optional().describe("Most lines to list; default 150 (20 with query). Past it, plain text is left out before controls are"),
     },
     annotations: { readOnlyHint: true },
   },
@@ -203,51 +204,20 @@ server.registerTool(
     description:
       "Capture the screen as an image. x and y of later actions refer to the latest screenshot. By default the whole screen (all displays); " +
       "window captures just one window (brought to the front if covered) and display just one display: both are sharper and cost less. " +
-      "Screenshots that come back with later actions use the same view. Use observe to read and find things; a screenshot to see layout, images, colour, or programs that draw their own UI.",
+      "x0, y0, x1, y1: that part of the latest screenshot again at full resolution, to read small text and icons (for reading only: x and y keep referring to the screenshot it came from). " +
+      "Use observe to read and find things; a screenshot to see layout, images, colour, or programs that draw their own UI.",
     inputSchema: {
       window: windowArg.optional(),
       display: z.number().int().min(0).max(16).optional().describe("Display number (from 1); 0 or omitted means all"),
+      x0: coord("Region top-left x").optional(),
+      y0: coord("Region top-left y").optional(),
+      x1: coord("Region bottom-right x").optional(),
+      y1: coord("Region bottom-right y").optional(),
       maxWidth: z.number().int().min(320).max(3840).optional().describe("Maximum width after scaling; default 1600"),
     },
     annotations: { readOnlyHint: true },
   },
   (a) => forward("screenshot", a),
-);
-
-server.registerTool(
-  "zoom",
-  {
-    description:
-      "Re-capture a rectangle of the latest screenshot at full resolution, to read small text, icons and details. " +
-      "The zoomed image is for reading only: x and y of later actions still refer to the screenshot.",
-    inputSchema: {
-      x0: coord("Top-left x"),
-      y0: coord("Top-left y"),
-      x1: coord("Bottom-right x"),
-      y1: coord("Bottom-right y"),
-      maxWidth: z.number().int().min(320).max(3840).optional().describe("Maximum width of the zoomed image; default 1600"),
-    },
-    annotations: { readOnlyHint: true },
-  },
-  (a) => forward("zoom", a),
-);
-
-server.registerTool(
-  "find",
-  {
-    description:
-      "Find where something is: every control in a window whose name or value contains the text (best match first, with references), " +
-      "and, where the program draws its own UI, every place the text appears on the pixels (with coordinates). Does not wait: wait_for does.",
-    inputSchema: {
-      text: z.string().min(1).describe("Text to look for (case and spacing ignored)"),
-      window: windowArg.optional(),
-      role,
-      ocr: z.boolean().optional().describe("Also search the pixels. Default: only when no control matches or the controls say little"),
-      max: z.number().int().min(1).max(200).optional().describe("Most matches to list; default 20"),
-    },
-    annotations: { readOnlyHint: true },
-  },
-  (a) => forward("find", a),
 );
 
 server.registerTool(
@@ -275,30 +245,21 @@ server.registerTool(
 );
 
 server.registerTool(
-  "list_windows",
-  {
-    description: "List the open windows, front to back: handle, program, title, state (in front, minimized, maximized, dialog of …) and position. Dialogs are listed too.",
-    annotations: { readOnlyHint: true },
-  },
-  () => forward("list_windows", {}),
-);
-
-server.registerTool(
   "wait_for",
   {
     description:
       "Wait until something happens, and return the moment it does. Much faster and more reliable than waiting a guessed time. Give exactly one of: " +
-      "window (a window whose title or program name contains this appears), text (this text shows up in the window in front, or in within; among its controls or on its pixels), " +
+      "appears (a window whose title or program name contains this appears), text (this text shows up in window, default the one in front; among its controls or on its pixels), " +
       "stable: true (the screen stops changing, e.g. a page finished loading), or seconds (a plain pause, when nothing else fits). " +
       "Separate alternatives with |, e.g. 'Save As|另存为'. gone: true waits for the window or text to disappear instead. " +
       "The reply lists the controls of what appeared, with references ready to use. Fails with what is in front when the time runs out.",
     inputSchema: {
-      window: z.string().optional().describe("Title or program-name keyword(s), e.g. notepad, 'Settings|设置'"),
+      appears: z.string().optional().describe("Title or program-name keyword(s) of a window to wait for, e.g. notepad, 'Settings|设置'"),
       text: z.string().optional().describe("Text to wait for"),
       stable: z.boolean().optional().describe("Wait for the screen to stop changing"),
       seconds: z.number().min(0).max(60).optional().describe("Just wait this long"),
       gone: z.boolean().optional().describe("Wait for the window / text to disappear instead"),
-      within: windowArg.optional().describe("For text / stable: the window to watch; default the window in front"),
+      window: windowArg.optional().describe("For text / stable: the window to watch; default the window in front"),
       ocr: z.boolean().optional().describe("For text: also read the pixels. Default: yes, at a slower pace than the controls"),
       timeoutSec: z.number().min(0.2).max(300).optional().describe("Give up after this many seconds; default 10"),
       after,
@@ -453,75 +414,38 @@ server.registerTool(
   (a) => forward("mouse", a),
 );
 
-server.registerTool(
-  "element_action",
-  {
-    description:
-      "Run one UI Automation action on a control, without the mouse, the keyboard focus or the window order being touched — it works on a window in the background, and on controls scrolled out of view. " +
-      "Actions: press (what a click would do), toggle, select, expand, collapse, focus, scroll_into_view, scroll (value up / down / left / right, add :page for a page, e.g. down:page). " +
-      "For everyday work click and set_value are simpler; use this to work behind the user's back or when you need exactly one of these.",
-    inputSchema: {
-      target,
-      action: z.enum(["press", "toggle", "select", "expand", "collapse", "focus", "scroll_into_view", "scroll"]).optional().describe("Default press"),
-      value: z.string().optional().describe("For scroll: the direction"),
-      window: windowArg.optional(),
-      role,
-      nth,
-      timeoutSec,
-      after,
-    },
-  },
-  (a) => forward("element_action", a),
-);
-
-const stepTools = ["click", "type_text", "press_keys", "set_value", "scroll", "drag", "mouse", "element_action", "focus_window", "open_app", "wait_for", "write_clipboard", "read_clipboard", "find", "read_text", "observe"] as const;
-
-server.registerTool(
-  "batch",
-  {
-    description:
-      "Run several steps in one call, in order, stopping at the first failure: the fastest way through a sequence you already know, " +
-      "e.g. open_app → wait_for its window → click a menu → type_text → press_keys ctrl+s → wait_for the Save dialog. " +
-      "Each step is { tool, ...that tool's arguments } for: " + stepTools.join(", ") + ". " +
-      "Steps wait only until the screen settles, never a fixed time; put wait_for between steps that open something slowly. " +
-      "fast: true skips even that for input steps, for many inputs into a screen that stays put (a game board, a grid of cells); not when a step opens something the next one needs. " +
-      "Prefer targets (text or references) over coordinates: a step can't see what the one before it brought up. " +
-      "Returns one line per step (✓ / ✗ / skipped) and one report of where things stand at the end.",
-    inputSchema: {
-      steps: z.array(z.object({ tool: z.enum(stepTools) }).passthrough()).min(1).max(100),
-      fast: z.boolean().optional().describe("Input steps don't wait for the screen to settle (about 25 ms each); it settles once at the end. Default false"),
-      after,
-      watch,
-    },
-  },
-  (a) => forward("batch", a),
-);
-
 const runner = new Runner(client);
 
 server.registerTool(
   "run",
   {
     description:
-      "Carry out a plan: steps named by what they act on, written without looking first. Returns at once (queued), so write the next plan while this one runs; " +
-      "call progress to see how plans went. A plan that fails cancels the plans queued behind it, and the next run call returns that failure instead of queueing. " +
+      "Carry out a plan: steps named by what they act on, written without looking first. The whole plan is checked before any of it runs. Returns at once (queued), " +
+      "with the reports of plans that finished since; write the next plan while this one runs, or call progress. A plan that fails cancels the plans queued behind it, " +
+      "and the next run call returns that failure instead of queueing. " +
       "Steps: {open: program/URL} · {click: text} · {press: text} (UI Automation, no mouse) · {fill: {label: value, …}} · {type: text, into?: label, enter?} · " +
-      "{keys: \"ctrl+s\"} · {expect: text shown on success, timeoutSec?} · {check: a claim about the window (\"the email was sent\"), judged by the decision model, timeoutSec?} · {await: window title} · {scroll: up|down, target?} · {tool: any batchable tool, …its args}. " +
-      "Each step may add window. Text is matched on this computer first; when it matches several controls or none, a decision model picks among a few candidates, " +
-      "and only a confident choice is acted on (never something irreversible the plan didn't name). End plans with expect so success is checked without looking.",
+      "{keys: \"ctrl+s\"} · {expect: text shown on success, gone?, timeoutSec?} · {check: a claim about the window (\"the email was sent\"), judged by the decision model, timeoutSec?} · " +
+      "{await: window title, gone?} · {scroll: up|down|left|right, target?, amount?} · {read: grid name} · {tool: " + STEP_TOOLS.join("|") + ", …its args}. " +
+      "Each step may add window. Text is matched on the computer first; when it matches several controls or none, a decision model picks among a few candidates, " +
+      "and only a confident choice is acted on (never something irreversible the plan didn't name). The pace is chosen for you: a step repeated over rows goes fast once its first run " +
+      "showed it brings nothing up. Popups that turn up meanwhile are dismissed in between steps: by on, or by a button that only dismisses (Not now, 关闭). End plans with expect.",
     inputSchema: {
       steps: z.array(z.record(z.string(), z.unknown())).min(1).max(60),
       goal: z.string().optional().describe("One line on what the plan is for; given to the decision model when it has to choose"),
       when: z.string().optional().describe("Start only once this text is on screen (alternatives with |), e.g. what the previous plan should have brought up"),
       whenSec: z.number().min(0).max(60).optional().describe("How long to wait for when; default 5"),
-      on: z.record(z.string(), z.string()).optional().describe('Known interruptions: {"text a popup shows": "what to press"}, e.g. {"Leave site?": "Leave"}'),
+      on: z.record(z.string(), z.string()).optional().describe('Popups you expect: {"text a popup shows": "what to press"}, e.g. {"Leave site?": "Leave"}'),
       window: windowArg.optional(),
       repeat: z
         .array(z.union([z.array(z.union([z.string(), z.number(), z.boolean()])), z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))]))
         .max(1000)
         .optional()
         .describe('Run the steps once per row, writing them only once: [["7","3","21"], …] fills $1 $2 $3 in any step text, [{a:"7"}, …] fills ${a}'),
-      fast: z.boolean().optional().describe("Inputs don't wait for the screen to settle (about 25 ms each), for many inputs into a screen that stays put (a calculator, a grid); expect still checks results"),
+      grids: z
+        .record(z.string(), z.object({ x0: z.number().min(0), y0: z.number().min(0), x1: z.number().min(0), y1: z.number().min(0), rows: z.number().int().min(1).max(100), cols: z.number().int().min(1).max(100) }))
+        .optional()
+        .describe('Grids drawn on screen, by their outer corners on the latest screenshot: {board: {x0, y0, x1, y1, rows: 9, cols: 9}}. Name a cell "board[r,c]" (from 1) wherever a step takes a target'),
+      fast: z.boolean().optional().describe("Leave unset: the pace is chosen per step. true: inputs never wait for the screen to settle; false: they always do"),
       wait: z.boolean().optional().describe("Return only when the plan has run, with its report; default false"),
     },
   },
@@ -588,18 +512,12 @@ server.registerTool(
 );
 
 server.registerTool(
-  "read_clipboard",
-  { description: "Read the clipboard: its text, the list of copied files, or a note that it holds an image.", annotations: { readOnlyHint: true } },
-  () => forward("read_clipboard", {}),
-);
-
-server.registerTool(
-  "write_clipboard",
+  "clipboard",
   {
-    description: "Put text on the clipboard; paste it afterwards with press_keys ctrl+v.",
-    inputSchema: { text: z.string() },
+    description: "The clipboard. With text: put it there (paste it afterwards with press_keys ctrl+v). Without: what is on it, its text, the list of copied files, or a note that it holds an image.",
+    inputSchema: { text: z.string().optional().describe("Text to put on the clipboard; omit to read it") },
   },
-  (a) => forward("write_clipboard", a),
+  (a) => forward("clipboard", a),
 );
 
 // ---------- Shell and system ----------
@@ -609,15 +527,17 @@ server.registerTool(
   {
     description:
       "Run a PowerShell script on the computer and return its output. Commands run in one persistent session, so the current directory and variables carry over (starting in the user's home). " +
-      "Often the fastest and surest way to do something that has a command: files, processes, services, settings, installs. Commands that need interactive input can't run. " +
-      "For commands that may take more than a few minutes (sfc /scannow, DISM, Windows Update, large copies, installers), use background: true and check progress with job_output.",
+      "Often the fastest and surest way to do something that has a command: files, processes, services, settings, installs, system information, the event log. Commands that need interactive input can't run. " +
+      "For commands that may take more than a few minutes (sfc /scannow, DISM, Windows Update, large copies, installers), use background: true and follow it with job. " +
+      "reset: true starts a fresh session first (directory and variables cleared, background jobs stopped).",
     inputSchema: {
-      script: z.string().describe("PowerShell script"),
+      script: z.string().optional().describe("PowerShell script; may be left out with reset"),
       timeoutSec: z.number().int().min(1).max(600).optional().describe("Timeout in seconds; default 60. A timeout resets the session. Ignored for background runs"),
       background: z
         .boolean()
         .optional()
         .describe("Run in the background in a separate PowerShell and return a job id immediately; does not share the session's directory or variables. Stopped when you disconnect"),
+      reset: z.boolean().optional().describe("Start a fresh session first"),
     },
     annotations: { destructiveHint: true },
   },
@@ -625,54 +545,16 @@ server.registerTool(
 );
 
 server.registerTool(
-  "job_output",
+  "job",
   {
-    description: "Show a background job's status and any output since the last check. Without jobId, list all background jobs.",
+    description: "A background job (run_powershell background): its status and the output since the last look (all: everything), or stop: true to stop it with the processes it started. Without jobId: every job.",
     inputSchema: {
       jobId: z.number().int().min(1).optional(),
-      all: z.boolean().optional().describe("Return all output instead of only new output"),
+      all: z.boolean().optional().describe("All output instead of only the new"),
+      stop: z.boolean().optional().describe("Stop the job"),
     },
-    annotations: { readOnlyHint: true },
   },
-  (a) => forward("job_output", a),
-);
-
-server.registerTool(
-  "stop_job",
-  { description: "Stop a background job (including the child processes it started).", inputSchema: { jobId: z.number().int().min(1) } },
-  (a) => forward("stop_job", a),
-);
-
-server.registerTool("reset_shell", { description: "Reset the PowerShell session (clears the current directory and variables, stops background jobs)." }, () => forward("reset_shell", {}));
-
-server.registerTool(
-  "system_info",
-  { description: "Basic info about the computer: OS version, uptime, CPU, memory, free disk space.", annotations: { readOnlyHint: true } },
-  () => forward("system_info", {}),
-);
-
-server.registerTool(
-  "list_processes",
-  {
-    description: "List processes by memory use.",
-    inputSchema: { top: z.number().int().min(1).max(200).optional().describe("How many to show; default 30") },
-    annotations: { readOnlyHint: true },
-  },
-  (a) => forward("list_processes", a),
-);
-
-server.registerTool(
-  "event_log",
-  {
-    description: "Read errors and warnings from the Windows event log.",
-    inputSchema: {
-      log: z.enum(["System", "Application"]).optional().describe("Default System"),
-      hours: z.number().int().min(1).max(720).optional().describe("How many recent hours; default 24"),
-      max: z.number().int().min(1).max(200).optional().describe("Maximum entries; default 30"),
-    },
-    annotations: { readOnlyHint: true },
-  },
-  (a) => forward("event_log", a),
+  (a) => forward("job", a),
 );
 
 server.registerTool(
@@ -771,27 +653,18 @@ server.registerTool(
 );
 
 server.registerTool(
-  "list_dir",
+  "list_files",
   {
-    description: "List the contents of a folder (modified time, size, name).",
-    inputSchema: { path: remotePath.optional().describe("Defaults to the user's home") },
-    annotations: { readOnlyHint: true },
-  },
-  (a) => forward("list_dir", a),
-);
-
-server.registerTool(
-  "find_files",
-  {
-    description: "Find files by name recursively in a folder. Supports * and ? wildcards; separate several with ; (e.g. *.log;*.dmp). Results are newest first.",
+    description:
+      "A folder's contents (modified time, size, name). With pattern: the files under it, at any depth, whose names match, newest first; * and ? wildcards, several separated by ; (e.g. *.log;*.dmp).",
     inputSchema: {
-      path: remotePath.describe("Folder to search from"),
-      pattern: z.string().describe("File-name wildcard"),
-      maxResults: z.number().int().min(1).max(5000).optional().describe("Default 200"),
+      path: remotePath.optional().describe("Folder; defaults to the user's home"),
+      pattern: z.string().optional().describe("File-name wildcard, to search below the folder"),
+      maxResults: z.number().int().min(1).max(5000).optional().describe("With pattern: most files listed; default 200"),
     },
     annotations: { readOnlyHint: true },
   },
-  (a) => forward("find_files", a),
+  (a) => forward("list_files", a),
 );
 
 server.registerTool(
@@ -817,7 +690,7 @@ server.registerTool(
     description:
       "Show where disk space goes under a folder: the largest subfolders as a tree (size and share of the parent) and the largest files. " +
       "One native scan, much faster than PowerShell; a whole system drive usually takes under a minute (stops after 5 minutes with partial totals). " +
-      "Use system_info for free space per drive. Folders the user can't read are skipped and reported; after request_admin the totals are complete. " +
+      "For free space per drive, run_powershell Get-PSDrive. Folders the user can't read are skipped and reported; after request_admin the totals are complete. " +
       "Online-only OneDrive files are not counted; C:\\Windows\\WinSxS looks larger than it is because of hard links.",
     inputSchema: {
       path: remotePath.optional().describe("Folder to scan; default C:\\"),

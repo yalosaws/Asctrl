@@ -108,9 +108,16 @@ fn dispatch(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: &Value) {
         // (a decision being made) are not taken for the AI thinking
         "plan_mark" => {
             let plan = args.get("plan").and_then(Value::as_str).unwrap_or("plan").to_string();
-            let phase = if args.get("end").and_then(Value::as_bool).unwrap_or(false) { "end" } else { "start" };
-            let _ = app.emit("fx", json!({ "phase": phase, "id": format!("plan-{plan}"), "tool": "plan", "ok": true, "args": {}, "geo": {} }));
-            reply_text(&tx, &id, true, "");
+            let end = args.get("end").and_then(Value::as_bool).unwrap_or(false);
+            let _ = app.emit("fx", json!({ "phase": if end { "end" } else { "start" }, "id": format!("plan-{plan}"), "tool": "plan", "ok": true, "args": {}, "geo": {} }));
+            // While it runs, popups that turn up are dismissed in between its steps; at its end, what was done
+            let said = if end {
+                tools::popups::stop(&plan)
+            } else {
+                tools::popups::start(&args);
+                String::new()
+            };
+            reply_text(&tx, &id, true, &said);
         }
         _ => {
             tauri::async_runtime::spawn(async move {
@@ -131,11 +138,7 @@ fn dispatch(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: &Value) {
                 drop(driving);
                 let after = tools::fx_after(&st.ctx, &tool, &before, &out);
                 let shown: String = out.body().chars().take(6000).collect();
-                // A probe (run trying a step as written before deciding another way) that misses is not a failure
-                // worth flashing: the step goes on another way
-                let quiet = !out.ok
-                    && args.get("probe").and_then(Value::as_bool).unwrap_or(false)
-                    && ["equally well", "Nothing in ", "has no item", " is on screen in "].iter().any(|m| shown.contains(m));
+                let quiet = tools::probe_missed(&args, &out);
                 let _ = app.emit("fx", json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "quiet": quiet, "text": shown, "geo": after }));
                 reply(&tx, &id, out);
             });

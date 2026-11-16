@@ -12,7 +12,6 @@ mod jobs;
 mod link;
 mod ocr;
 mod overlay;
-mod powershell;
 mod screen;
 mod shell;
 mod tools;
@@ -212,8 +211,7 @@ pub fn run() {
             disconnect,
             quit,
             overlay::overlay_info,
-            overlay::set_hit_regions,
-            fx::fx_landed
+            overlay::set_hit_regions
         ])
         .setup(|app| {
             overlay::setup(app.handle());

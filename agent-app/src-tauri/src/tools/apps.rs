@@ -3,6 +3,39 @@
 use super::report::Did;
 use super::*;
 
+/// Longest a web page is given to load after it is opened
+const PAGE_LOAD: Duration = Duration::from_secs(10);
+
+/// Wait until the page opened in window `h` has loaded, so the next step reads that page, not the one before it
+/// or a blank new tab: the window's title has stayed the same for a moment and the page has stopped changing
+/// (a spinner counts as change for a while). Ok(how long it took), or Err(budget) if it never settled.
+fn page_loads(h: isize, budget: Duration) -> Result<Duration, Duration> {
+    let start = std::time::Instant::now();
+    let mut title = winmgr::title_of(h);
+    let mut since = std::time::Instant::now();
+    while start.elapsed() < budget {
+        std::thread::sleep(Duration::from_millis(50));
+        let t = winmgr::title_of(h);
+        if t != title {
+            (title, since) = (t, std::time::Instant::now());
+            continue;
+        }
+        if since.elapsed() < Duration::from_millis(400) {
+            continue;
+        }
+        let Some((l, tp, r, b)) = winmgr::rect_of(h) else { return Ok(start.elapsed()) };
+        let area = capture::Area { left: l, top: tp, width: r - l, height: b - tp };
+        let left = budget.saturating_sub(start.elapsed());
+        let calm = screen::wait_stable(area, Duration::from_millis(400), left, Duration::from_millis(1500));
+        // Still the same page all along: loaded
+        if calm && winmgr::title_of(h) == title {
+            return Ok(start.elapsed());
+        }
+        (title, since) = (winmgr::title_of(h), std::time::Instant::now());
+    }
+    Err(budget)
+}
+
 pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
     // Cleared first, so a failed launch never animates toward the previous program's window
     *ctx.opened.lock().unwrap() = None;
@@ -20,10 +53,20 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
     };
     let wait = Duration::from_secs_f64(args.get("timeoutSec").and_then(Value::as_f64).unwrap_or(5.0).clamp(0.0, 60.0));
     let turn = acting().await;
-    let r = tokio::task::spawn_blocking(move || winmgr::open(&target, &a, &cwd, wait).map(|h| (target, h))).await;
+    let r = tokio::task::spawn_blocking(move || {
+        let opened = winmgr::open(&target, &a, &cwd, wait)?;
+        // A web page: the window comes up (or its title changes) long before the page is there
+        let lower = target.to_ascii_lowercase();
+        let loaded = match &opened {
+            Some(o) if lower.contains("://") || lower.starts_with("www.") => Some(page_loads(o.hwnd, PAGE_LOAD)),
+            _ => None,
+        };
+        Ok::<_, String>((target, opened, loaded))
+    })
+    .await;
     drop(turn);
     match r {
-        Ok(Ok((target, opened))) => {
+        Ok(Ok((target, opened, loaded))) => {
             let h = opened.as_ref().map(|o| o.hwnd);
             let in_place = opened.as_ref().is_some_and(|o| o.in_place);
             *ctx.opened.lock().unwrap() = h;
@@ -46,6 +89,11 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
                 ),
                 None => format!("Opened {target}. No window came up within {:.0} s: a console program has none, and a slow one may still be loading (wait_for its window)", wait.as_secs_f64()),
             };
+            let done = match loaded {
+                Some(Ok(t)) => format!("{done}. The page loaded in {:.1} s", t.as_secs_f64()),
+                Some(Err(t)) => format!("{done}. The page was still loading after {:.0} s", t.as_secs_f64()),
+                None => done,
+            };
             report::conclude(ctx, args, Did { done, change: None, hwnd: h, fresh: h.is_some(), delivered: false }, true).await
         }
         Ok(Err(e)) => fail(e),
@@ -57,7 +105,7 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
 pub(super) async fn focus_window(ctx: &Ctx, args: &Value) -> Output {
     let h = match winmgr::find_arg(args.get("window")) {
         Ok(Some(h)) => h.0 as isize,
-        Ok(None) => return fail("Say which window: a handle from list_windows, or part of its title or program name"),
+        Ok(None) => return fail("Say which window: a handle (observe lists them), or part of its title or program name"),
         Err(e) => return fail(e),
     };
     let action = str_arg(args, "action").to_string();

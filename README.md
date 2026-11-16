@@ -29,7 +29,7 @@ It is built around three ideas:
 
 | Path | Description |
 |---|---|
-| `agent-app/src-tauri/src/tools/` | The tools: `look` (observe, screenshot, find, read_text), `locate` (targets), `pointer` / `keys` / `values` (actions), `report` (what a reply says), `wait`, `batch`, `apps`, `system` |
+| `agent-app/src-tauri/src/tools/` | The tools: `look` (observe, screenshot, read_text), `locate` (targets), `pointer` / `keys` / `values` (actions), `report` (what a reply says), `wait`, `grid` (read_grid), `batch` (runs a plan's steps), `popups` (dismissed while a plan runs), `apps`, `system` |
 | `agent-app/src-tauri/src/uia.rs` | UI Automation: scenes, stable references, change detection between readings, operating controls |
 | `agent-app/src-tauri/src/screen.rs` | Telling whether the screen reacted to an action and when it has settled |
 | `agent-app/src-tauri/src/link.rs` | The local link and the relay link; running tool calls |
@@ -37,8 +37,7 @@ It is built around three ideas:
 | `src/console/` | MCP server and the controller library (`TechClient`) |
 | `src/relay/server.ts` | Relay server |
 | `src/shared/protocol.ts` | Message format shared by all parties |
-| `src/agent/` | A minimal command-line driver (Node, 5 tools), for testing the relay protocol |
-| `test/` | End-to-end test, benchmark, manual demo |
+| `test/` | End-to-end test, plan tests, benchmark, profiler |
 
 ## Quick start (Node.js 24+, Rust, Visual Studio C++ build tools)
 
@@ -62,35 +61,29 @@ To drive a **remote** computer, run the driver there, read the 6-digit code next
 
 ## Tools
 
-39 tools. The first group is what makes it a computer-use framework; the rest are the shell and file tools an agent expects.
+30 tools. The first groups are what make it a computer-use framework; the rest are the shell and file tools an agent expects.
 
 | Category | Tool | Purpose |
 |---|---|---|
 | Connection | `connect` / `disconnect` | No arguments: this computer, directly. `code`: a remote one. `waitSec` keeps retrying until the driver is back (after elevation or a restart) |
-| Looking | `observe` | A window as text: its controls as a tree with references, state, value and position; open menus and popups included; text read off the pixels where the controls say little. Names the window in front and the others. `image: true` adds a screenshot |
-| | `screenshot` | The whole screen, one display, or one window (sharper, cheaper). `x`, `y` of later actions refer to the latest one |
-| | `zoom` | Re-capture part of the screenshot at full resolution, to read small text and icons |
-| | `find` | Where something is: matching controls best first (with references), and places the text appears on the pixels |
+| Plans | `run` / `progress` | The main way in: a plan written by the text it acts on, checked whole, run in one go by the driver and queued so the AI writes the next one while it runs (see [Plans](#plans)); `progress` reports how they went |
+| Looking | `observe` | A window as text: its controls as a tree with references, state, value and position; open menus and popups included; text read off the pixels where the controls say little. Lists every other window with its handle. `query`: where something is instead, best match first, on the pixels too. `image: true` adds a screenshot |
+| | `screenshot` | The whole screen, one display, or one window (sharper, cheaper); `x0, y0, x1, y1`: part of the latest one again at full resolution. `x`, `y` of later actions refer to the latest screenshot |
 | | `read_text` | One control's full text, a window's text in reading order, or a region read off the pixels |
-| | `list_windows` | Open windows, front to back, dialogs included |
-| | `wait_for` | Return the moment a window or some text appears (or goes away), or the screen settles; lists the controls of what appeared |
-| Acting | `click` | By target or `x`,`y`. Ordinary programs' controls are pressed through UI Automation (exact, no pointer movement); web pages, games and coordinates get a real mouse click |
+| | `wait_for` | Return the moment a window `appears`, some `text` shows in `window` (or either goes away), or the screen settles; lists the controls of what appeared |
+| Acting | `click` | By target or `x`,`y`. Ordinary programs' controls are pressed through UI Automation (exact, no pointer movement); web pages, games and coordinates get a real mouse click. `mode: "direct"` never uses the mouse |
 | | `type_text` | Type into a target, or into what has the focus; `replace`, `enter`. Reads the field back |
 | | `press_keys` | A key, a combination, or a sequence (`ctrl+a delete`); `repeat`, `holdSec`; `window` brings a window forward first |
-| | `set_value` | Make a control hold a value whatever kind it is — text, on/off, a chosen item, a number — and verify it. Idempotent. `fields` fills a whole form in one call |
+| | `set_value` | Make a control hold a value whatever kind it is — text, on/off, a chosen item, a number, expanded or not — and verify it. Idempotent. `fields` fills a whole form in one call |
 | | `scroll` / `drag` | Wheel over a target; press on one target, move to another, release |
 | | `mouse` | Low-level steps: `move` (hover), `down` / `up` (fine drags), `look` (relative motion for game cameras) |
-| | `element_action` | One UI Automation action (press, toggle, select, expand, collapse, focus, scroll, scroll_into_view) that touches neither mouse, focus nor window order: works on windows in the background |
-| | `batch` | Several steps in one call, stopping at the first failure, with one report at the end. `fast` for many inputs into a screen that stays put |
-| Plans | `run` / `progress` | A plan written by the text it acts on, queued so the AI writes the next one while it runs (see [Plans](#plans)); `progress` reports how they went |
-| Programs | `open_app` | Open a program, file, folder, URL or `ms-settings:` page; waits for its window and lists its controls |
+| Programs | `open_app` | Open a program, file, folder, URL or `ms-settings:` page; waits for its window (for a URL, until the page has loaded) and lists its controls |
 | | `focus_window` | Switch to / minimize / maximize / restore / close / move and resize a window |
-| Clipboard | `read_clipboard` / `write_clipboard` | Text, the list of copied files, or a note that it holds an image |
-| Shell | `run_powershell` | A persistent session (directory and variables carry over); `background: true` for long jobs |
-| | `job_output` / `stop_job` / `reset_shell` | Background job progress / stop it / reset the session |
-| System | `system_info` / `list_processes` / `event_log` | System overview, processes, error log |
+| | `clipboard` | With `text`: put it on the clipboard. Without: its text, the list of copied files, or a note that it holds an image |
+| Shell | `run_powershell` | A persistent session (directory and variables carry over); `background: true` for long jobs; `reset: true` for a fresh session. System information, processes and the event log are a command away |
+| | `job` | A background job's new output (`all` for everything), `stop: true` to stop it; without `jobId`, every job |
 | Files | `read_file` / `write_file` / `edit_file` | Read (line numbers, in parts), write, exact replace. Detects UTF-8 / UTF-16 / ANSI and keeps encoding and line endings |
-| | `list_dir` / `find_files` / `search_files` / `disk_usage` | List; find by name; search contents by regex; where disk space goes |
+| | `list_files` / `search_files` / `disk_usage` | A folder's contents, or with `pattern` the files below it by name; search contents by regex; where disk space goes |
 | | `upload_file` / `download_file` | Copy files between the MCP server's machine and the connected computer (≤ 20 MB) |
 | Privileges | `request_admin` | Ask the person at the computer for administrator rights; the driver restarts elevated and the console reconnects by itself |
 | | `restart_computer` | Restart with the person's consent; the driver reopens after sign-in with the same code |
@@ -98,7 +91,7 @@ To drive a **remote** computer, run the driver there, read the 6-digit code next
 ### Targets
 
 ```jsonc
-{ "target": "e12" }                      // a reference from observe, find, or any reply
+{ "target": "e12" }                      // a reference from observe or any reply
 { "target": "Save" }                     // the text the thing shows: a control's name, else text on the pixels
 { "target": "Delete", "nth": 2 }         // the second of several equally good matches, in reading order
 { "target": "Name", "role": "edit" }     // only controls of that kind
@@ -123,7 +116,7 @@ Changes in "Order form":
 
 ### Plans
 
-Most of a task's time is the AI thinking between steps. `run` takes a whole plan at once and returns straight away, so the AI plans the next part while this one runs:
+Most of a task's time is the AI thinking between steps. `run` takes a whole plan at once and returns straight away (with the reports of plans that finished since), so the AI plans the next part while this one runs. It is the way in: the AI writes a plan without looking first, and looks only when a plan fails (its report says where things stand) or when the next plan needs something it can't guess:
 
 ```jsonc
 run({ goal: "send 你好 to someone@example.com",
@@ -134,11 +127,17 @@ run({ goal: "send 你好 to someone@example.com",
       on: { "Leave site?": "Leave" } })
 ```
 
-Steps: `open`, `click`, `press` (no mouse), `fill` (`{label: value}`), `type` (`into`, `enter`), `keys`, `expect` (text shown on success; `gone`), `check` (a claim about the window, such as "the email was sent", that the decision model judges from the window's controls; asked again until it holds or `timeoutSec` runs out), `await` (a window), `scroll`, or `{ tool, …args }` for any batchable tool. `when` holds a plan until its text is on screen; `on` says what to press when a known popup is in the way.
+Steps: `open`, `click`, `press` (no mouse), `fill` (`{label: value}`), `type` (`into`, `enter`), `keys`, `expect` (text shown on success; `gone`), `check` (a claim about the window, such as "the email was sent", that the decision model judges from the window's controls; asked again until it holds or `timeoutSec` runs out), `await` (a window), `scroll`, `read` (a grid), or `{ tool, …args }` for a tool that can be a step. `when` holds a plan until its text is on screen; `on` says what to press when a known popup turns up. The whole plan is checked before any of it runs: an unknown step, an argument a step doesn't take or a cell outside its grid is reported, and nothing runs.
 
-Each step is first tried as written; the driver matches text on the computer, which costs nothing. Only when the text matches several controls or none is a decision model ([Drex](https://console.nace.ai), `NACE_API_KEY` in `.env`) asked to choose, among up to 40 short candidate lines (typically 150–550 tokens, about 0.5 s). Its answer is acted on only when it is sure (confidence ≥ 0.7, well ahead of the runner-up), and never when it is something irreversible (delete, send, replace…) that the plan didn't name. Besides the candidates, the model may answer that the window is not ready yet (it is waited for), that a popup is in the way (Escape is pressed) or that none fits, and it is told the plan's last steps and whether each changed the screen; when it is unsure the window is given a moment and it is asked once more, and a click it chose that visibly changed nothing is handed back as likely wrong. Right after an action (or a `fast` input) a name that shows nowhere is first given a moment to appear, so "not there yet" is not taken for "called something else". Answers are remembered per program (`~/.asctrl/drex-cache.json`, keyed by the program and its window title), so the same wording later goes straight to the control there and nowhere else; they are kept only once the whole plan has worked, checks included, so a wrong choice is never learnt. Anything else stops the plan with the candidates and a short look at the window.
+The driver runs the plan's steps in one call per stretch (up to the next `check`), so no step waits on a round trip. Each step is tried as written: the driver matches text on the computer, which costs nothing. Only when the text matches several controls or none does the runner step in for that step, with the plan's `on` rules first and then a decision model ([Drex](https://console.nace.ai), `NACE_API_KEY` in `.env`) asked to choose, among up to 40 short candidate lines (typically 150–550 tokens, about 0.5 s). Its answer is acted on only when it is sure (confidence ≥ 0.7, well ahead of the runner-up), and never when it is something irreversible (delete, send, replace…) that the plan didn't name. Besides the candidates, the model may answer that the window is not ready yet (it is waited for), that a popup is in the way (Escape is pressed) or that none fits, and it is told the plan's last steps and whether each changed the screen; when it is unsure the window is given a moment and it is asked once more, and a click it chose that visibly changed nothing is handed back as likely wrong. Right after an action (or a fast input) a name that shows nowhere is first given a moment to appear, so "not there yet" is not taken for "called something else". Answers are remembered per program (`~/.asctrl/drex-cache.json`, keyed by the program and its window title), so the same wording later goes straight to the control there and nowhere else; they are kept only once the whole plan has worked, checks included, so a wrong choice is never learnt. Anything else stops the plan with the candidates and a short look at the window.
 
-The same steps over many sets of data are written once: `repeat: [["7","3","21"], …]` runs them per row, filling `$1 $2 $3` (or `${name}` from `[{name: …}, …]`) in any step text, and the report lists the first row and only what went differently after. `fast: true` lets inputs skip waiting for the screen to settle (about 25 ms each), for a screen that stays put; `expect` still checks each result. Fifty multiplications on Calculator (300 steps, each result checked) take about 39 s at the normal pace and 13 s fast, from a plan a fifth the length of the steps written out.
+The same steps over many sets of data are written once: `repeat: [["7","3","21"], …]` runs them per row, filling `$1 $2 $3` (or `${name}` from `[{name: …}, …]`) in any step text, and the report lists the first row and only what went differently after.
+
+The pace is chosen per step. An input normally waits until the screen has reacted and stopped changing; on a screen that animates, that wait is most of the time. A step repeated over rows runs at the normal pace the first time, and if that brought no window up and nothing else to the front, its later runs go fast (about 25 ms each); the screen settles once before anything that reads it, and anything unexpected in a fast run puts the rest back to the normal pace. `fast: true` / `false` forces either. An Extreme sudoku on sudoku.com (58 cells, a click and a key each) is filled in 6.2 s this way, against 45.7 s at the normal pace.
+
+While a plan runs, the driver watches for windows that weren't there before. One that shows none of the text the plan works with, and has a button the plan named in `on` or one that only dismisses (`Not now`, `Close`, `关闭`, `以后再说`…), is dismissed with a pointer of its own: the press waits its turn among the plan's actions, so it goes in between two steps, and the report says what was pressed. OK, Cancel, Yes and anything destructive are never pressed this way.
+
+A screen drawn as a grid (a game board, a calendar) is declared once, by its corners on the latest screenshot: `grids: { board: { x0, y0, x1, y1, rows: 9, cols: 9 } }`. Steps then name cells as targets (`{ "click": "board[3,5]" }`, also with `$1` from rows), and `{ "read": "board" }` reads every cell: each cell's glyph is cut out against the cell's own background and the glyphs are read together as one line, since the OCR engine reads neither a lone glyph nor a board with its lines. A mark it can't read, or a cell something lies over (a banner, a popup: its background is far from the board's usual one), comes back as `?`, never as a guess or as empty. Like a click by coordinates, a read is checked against the windows as they were on that screenshot: if the window moved, the grid moves with it; if another window has come in front of it, nothing is read. A 9×9 board reads in about 50 ms.
 
 A plan that fails cancels the plans queued behind it, since they were written assuming it would work; the next `run` returns that failure instead of queueing.
 
@@ -147,7 +146,7 @@ A plan that fails cancels the plans queued behind it, since they were written as
 - The local link removes the relay round trip for an AI on the same machine.
 - Actions wait only until the part of the screen they affect stops changing, never a fixed time; what moves on its own (a video, an ad) is left out. Nothing waits for the overlay's animations.
 - Reading a window fetches only what is on screen, in one cross-process call.
-- `batch` and `set_value fields` do in one call what would otherwise take a turn each.
+- A plan runs in one driver call per stretch of steps, and `set_value fields` fills a form in one call.
 
 ## Driver (agent-app)
 
@@ -195,10 +194,10 @@ Type check:
 npm run typecheck
 ```
 
-End-to-end, against the built driver (starts a local relay and the driver; exercises the relay link, the local link, files, shell, clipboard, jobs):
+End-to-end, against the release build (starts a local relay and the driver; exercises the relay link, the local link, files, shell, clipboard, jobs; `--app <exe>` tests another build):
 
 ```bash
-node test/e2e.ts --app agent-app/src-tauri/target/release/asctrl-agent.exe
+npm test
 ```
 
 Speed and reliability on a real desktop (moves the mouse and types for about 20 seconds; leave the computer alone):
@@ -215,29 +214,24 @@ Where the time goes, action by action (the same few actions with and without the
 npm run prof
 ```
 
-Plans (`run`): local matching, the decision model and its memory, queued plans, a failure stopping the queue (bench window and Calculator; `--gmail` also composes and discards a mail in the browser's Gmail, never sending):
+Plans (`run`): local matching, the decision model and its memory, a plan with mistakes refused whole, a popup dismissed mid-plan, the pace chosen per step, queued plans, a failure stopping the queue (bench window and Calculator; `--gmail` also composes and discards a mail in the browser's Gmail, never sending):
 
 ```bash
 node test/run.ts
-```
-
-Single steps by hand:
-
-```bash
-node test/demo-step.ts local - @steps.json
 ```
 
 ## Status (version 0.2.0, November 2026)
 
 What has been shown, on one Windows 11 machine (2560x1440 at 150 %, one display):
 
-- Unit tests 24 / 24, end-to-end 61 / 61, benchmark 14 / 14 tasks in 10.6 s.
-- Per call: pressing a control directly 140–215 ms, a real mouse click about 160 ms, switching windows about 300 ms, `observe` about 35 ms, a screenshot about 50 ms. The version before this one took 451, 586, 751, 41 and 96 ms for the same.
+- Unit tests 29 / 29, end-to-end 59 / 59, plan tests 17 / 17, benchmark 14 / 14 tasks in 11.2 s.
+- Per call: pressing a control directly 140–215 ms, a real mouse click about 160 ms, switching windows about 300 ms, `observe` about 35 ms, a screenshot about 50 ms.
+- An AI (Claude, through these tools) solved Extreme sudokus on sudoku.com: the page opened and waited for, the board read with `read` in under 50 ms (a banner over it reported, not misread), and 53–58 cells filled in about 6 s with the pace chosen per step. Gmail compose-and-discard runs as a plan.
 
 What has not been shown:
 
-- **No AI has driven it through real tasks yet.** Every test is a script with fixed steps: they measure whether the tools are fast and correct, not whether an agent finishes tasks more often. This is the largest gap, and the next thing to do.
-- **Real programs are barely covered.** The benchmark uses a small WinForms window and one Explorer folder. Web pages in a browser, Electron programs (VS Code, WeChat), Office, games and several displays are untested. Web pages are the commonest case and the least certain path here.
+- **Few real tasks.** Apart from the sudoku and Gmail runs, every test is a script with fixed steps: they measure whether the tools are fast and correct, not whether an agent finishes tasks more often.
+- **Real programs are barely covered.** Two web pages, a small WinForms window, Calculator and one Explorer folder. Electron programs (VS Code, WeChat), Office, games and several displays are untested.
 - **No comparison with any other framework**, and no public benchmark has been run.
 - **Little or no test coverage**: drag, scroll, input methods, several displays, windows running as administrator, right-to-left layouts.
 - The code has had no independent review.
@@ -251,7 +245,7 @@ Known limits:
 - The overlay is left out of screen captures, so where the orb points, frames and draws is checked by eye only.
 - Windows only.
 
-Suggested order from here: have a real agent do real tasks in a browser, Settings and Office and fix what fails; an independent code review; then the limits above.
+Suggested order from here: have an agent do more real tasks in a browser, Settings and Office and fix what fails; an independent code review; then the limits above.
 
 ## Security
 

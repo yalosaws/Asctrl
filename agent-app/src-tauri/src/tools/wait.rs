@@ -109,14 +109,14 @@ fn showing(hwnd: isize, texts: &[String], f: &Frame, use_ocr: bool, problem: &mu
 /// Poll until a window or some text shows up (or goes away), or the screen settles.
 /// Returns as soon as it happens, so the AI never has to guess how long to wait.
 pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
-    let window = alternatives(str_arg(args, "window"));
+    let window = alternatives(str_arg(args, "appears"));
     let texts = alternatives(str_arg(args, "text"));
     let stable = bool_arg(args, "stable").unwrap_or(false);
     let seconds = args.get("seconds").and_then(Value::as_f64);
     let gone = bool_arg(args, "gone").unwrap_or(false);
     let given = [!window.is_empty(), !texts.is_empty(), stable, seconds.is_some()].iter().filter(|b| **b).count();
     if given != 1 {
-        return fail("Give exactly one of window, text, stable or seconds");
+        return fail("Give exactly one of appears, text, stable or seconds");
     }
     if let Some(s) = seconds {
         let s = s.clamp(0.0, 60.0);
@@ -124,13 +124,13 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
         return report::conclude(ctx, args, Did::new(format!("Waited {s} s")), false).await;
     }
     let timeout = Duration::from_secs_f64(args.get("timeoutSec").and_then(Value::as_f64).unwrap_or(10.0).clamp(0.2, 300.0));
-    let within = match winmgr::find_arg(args.get("within")) {
+    let within = match winmgr::find_arg(args.get("window")) {
         Ok(w) => w.map(|h| h.0 as isize),
         // The window to look in may itself still be on its way: look it up again on every poll
         Err(_) if !texts.is_empty() || stable => None,
         Err(e) => return fail(e),
     };
-    let within_arg = args.get("within").cloned();
+    let within_arg = args.get("window").cloned();
     let ocr_arg = bool_arg(args, "ocr");
     let f = ctx.frame();
     let r = tokio::task::spawn_blocking(move || -> Result<Did, String> {

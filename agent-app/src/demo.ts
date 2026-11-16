@@ -128,7 +128,7 @@ export async function runDemo(h: Hooks) {
     await s("search_files", { path: "~\\Documents", pattern: "network" }, {}, 1400, true,
       "report.txt:3: the network keeps dropping\nnotes.md:12: home network password is on the back of the router\ntodo.txt:1: call the ISP about the network");
     await sleep(3200);
-    await s("list_dir", { path: "~\\Downloads" }, {}, 700, true,
+    await s("list_files", { path: "~\\Downloads" }, {}, 700, true,
       "C:\\Users\\me\\Downloads (6 items)\n2026-11-01 10:00  <DIR>  installers\\\n2026-11-02 11:00  2.1 MB  driver.zip\n2026-11-03 09:00  80 KB  invoice.pdf\n2026-11-04 12:00  1.2 GB  system-image.iso\n2026-11-05 13:00  4 KB  readme.txt");
     await sleep(2400);
     await s("focus_window", { action: "maximize" }, { rect: [b[0], b[1], b[2], b[3]] }, 600, true, "", {
@@ -139,7 +139,7 @@ export async function runDemo(h: Hooks) {
     await sleep(1000);
     await s("scroll", { amount: 5 }, { at: [W * 0.5, H * 0.5] }, 500);
     await sleep(1200);
-    await s("zoom", {}, { from: [b[0] + 40, b[1] + 60], to: [b[0] + 360, b[1] + 220] }, 900);
+    await s("screenshot", { x0: 0 }, { from: [b[0] + 40, b[1] + 60], to: [b[0] + 360, b[1] + 220] }, 900);
     await sleep(1800);
     await s("download_file", { path: "~\\Downloads\\invoice.pdf" }, {}, 900);
     await sleep(2400);

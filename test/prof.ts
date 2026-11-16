@@ -36,7 +36,7 @@ async function time(label: string, tool: ToolName, args: Record<string, unknown>
 
 try {
   await tech.connectLocalDriver({ launch: false, waitMs: 30_000 });
-  await tech.call("wait_for", { window: WIN, timeoutSec: 30, after: "none" });
+  await tech.call("wait_for", { appears: WIN, timeoutSec: 30, after: "none" });
   const obs = (await tech.call("observe", { window: WIN })).text ?? "";
   const ref = (label: string) => obs.split("\n").find((l) => l.includes(label))?.match(/\[(e\d+)\]/)?.[1] ?? "";
   const pos = (label: string) => {
@@ -45,7 +45,7 @@ try {
   };
   await time("observe (window)", "observe", { window: WIN });
   await time("screenshot (whole screen)", "screenshot", {});
-  await time("list_windows", "list_windows", {});
+  await time("observe, the windows only", "observe", { max: 1 });
   await time("click ref Submit, direct, after none", "click", { target: ref('Button "Submit"'), after: "none" });
   await time("click ref Submit, direct, after auto", "click", { target: ref('Button "Submit"') });
   await time("click text Submit, direct, after none", "click", { target: "Submit", window: WIN, after: "none" });
@@ -72,9 +72,9 @@ try {
   }
   await time("press_keys shift, none", "press_keys", { keys: "shift", window: WIN, after: "none" });
   await time("read_text Notes", "read_text", { target: ref('Edit "Notes"') });
-  await time("find CANVAS (OCR)", "find", { text: "CANVAS-7391", window: WIN });
+  await time("observe query CANVAS (OCR)", "observe", { query: "CANVAS-7391", window: WIN });
   await time("batch fast: 6 clicks x,y + keys", "batch", {
-    fast: true,
+    pace: "fast",
     after: "none",
     steps: [pos('Edit "Name"'), pos('Edit "Notes"'), pos('Edit "Name"'), pos('Edit "Notes"')].map((p) => ({ tool: "click", ...p })).concat([{ tool: "press_keys", keys: "a b c" } as never]),
   });

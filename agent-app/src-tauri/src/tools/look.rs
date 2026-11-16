@@ -1,5 +1,5 @@
-//! Looking at the screen: a window's controls as text (observe), pictures (screenshot, zoom), finding where
-//! something is (find), reading text (read_text), and the list of windows.
+//! Looking at the screen: a window's controls as text, with the other windows (observe), or where something is
+//! (observe with query); pictures, whole or a region again at full resolution (screenshot); text (read_text).
 
 use super::*;
 use crate::ocr;
@@ -61,6 +61,10 @@ pub(super) async fn capture_view(ctx: &Ctx) -> Result<(Image, String), String> {
 }
 
 pub(super) async fn screenshot(ctx: &Ctx, args: &Value) -> Output {
+    // A region of the latest screenshot: that part again at full resolution
+    if args.get("x0").is_some_and(|v| !v.is_null()) {
+        return zoom(ctx, args).await;
+    }
     let window = match winmgr::find_arg(args.get("window")) {
         Ok(w) => w.map(|h| h.0 as isize),
         Err(e) => return fail(e),
@@ -105,7 +109,7 @@ pub(super) async fn screenshot(ctx: &Ctx, args: &Value) -> Output {
     }
 }
 
-pub(super) async fn zoom(ctx: &Ctx, args: &Value) -> Output {
+async fn zoom(ctx: &Ctx, args: &Value) -> Output {
     let g = ctx.frame();
     let area = match g.area(args, 4) {
         Ok(a) => a,
@@ -151,19 +155,6 @@ pub(super) fn win_line(f: &Frame, w: &winmgr::Win) -> String {
     format!("[{}] {} \"{}\"{}{pos}", w.handle, w.process, uia::clip(&w.title, 80), win_flags(w))
 }
 
-pub(super) async fn list_windows(ctx: &Ctx) -> Output {
-    let f = ctx.frame();
-    blocking(move || {
-        let ws = winmgr::list();
-        if ws.is_empty() {
-            return Ok("No windows are open".into());
-        }
-        let lines: Vec<String> = ws.iter().map(|w| win_line(&f, w)).collect();
-        Ok(format!("{} windows, front to back ([handle] program \"title\" position; pass the handle or part of the title as window):\n{}", ws.len(), lines.join("\n")))
-    })
-    .await
-}
-
 /// Text read off a window's pixels that its controls don't already say
 fn pixel_text(scene: &Scene, f: &Frame, all: bool) -> Result<Vec<String>, String> {
     let Some(area) = winmgr::rect_of(scene.hwnd).and_then(clip_to_screen) else { return Ok(vec![]) };
@@ -186,11 +177,16 @@ fn pixel_text(scene: &Scene, f: &Frame, all: bool) -> Result<Vec<String>, String
 /// Read a window's controls as text, with references every action accepts. The one look that makes the rest
 /// cheap: afterwards, each action's reply says what changed.
 pub(super) async fn observe(ctx: &Ctx, args: &Value) -> Output {
+    // Looking for something: the controls that match it, best first, and where it shows on the pixels
+    if !str_arg(args, "query").trim().is_empty() {
+        let mut a = args.clone();
+        a["text"] = a["query"].clone();
+        return find(ctx, &a).await;
+    }
     let window = match winmgr::find_arg(args.get("window")) {
         Ok(w) => w.map(|h| h.0 as isize),
         Err(e) => return fail(e),
     };
-    let query = str_arg(args, "query").to_string();
     let max = int_arg(args, "max", 150, 1, 2000) as usize;
     let offscreen = bool_arg(args, "offscreen").unwrap_or(false);
     let ocr_mode = bool_arg(args, "ocr");
@@ -229,10 +225,10 @@ pub(super) async fn observe(ctx: &Ctx, args: &Value) -> Output {
         if let Ok((x, y)) = input::cursor_pos() {
             out += &format!(" Pointer {}.", f.at(x, y));
         }
-        let others: Vec<String> = wins.iter().filter(|w| w.handle != fg && w.handle != hwnd).take(8).map(|w| format!("\"{}\" ({})", uia::clip(&w.title, 30), w.process)).collect();
-        if !others.is_empty() && query.is_empty() {
-            let more = wins.len().saturating_sub(others.len() + 1);
-            out += &format!("\nAlso open: {}{}.", others.join(", "), if more > 0 { format!(", … {more} more (list_windows)") } else { String::new() });
+        // Every other window, front to back, with the handle to pass as window
+        let others: Vec<String> = wins.iter().filter(|w| w.handle != fg && w.handle != hwnd).map(|w| win_line(&f, w)).collect();
+        if !others.is_empty() {
+            out += &format!("\nAlso open, front to back ([handle] program \"title\"; pass the handle or part of the title as window):\n{}", others.join("\n"));
         }
         if hwnd == 0 {
             return Ok((out + "\nNothing to read: say which window.", winmgr::layout()));
@@ -250,9 +246,9 @@ pub(super) async fn observe(ctx: &Ctx, args: &Value) -> Output {
             scene.nodes.len(),
             if has_shot { " on the screenshot" } else { "" }
         );
-        out += &uia::render(&scene, &uia::Render { query: &query, max, at: &at });
+        out += &uia::render(&scene, &uia::Render { max, at: &at });
         // Programs that draw their own UI say little through their controls: read the pixels too
-        if query.is_empty() && (ocr_mode == Some(true) || (ocr_mode.is_none() && scene.thin())) {
+        if ocr_mode == Some(true) || (ocr_mode.is_none() && scene.thin()) {
             match pixel_text(&scene, &f, scene.thin()) {
                 Ok(lines) if !lines.is_empty() => {
                     let more = if lines.len() > 150 { format!("\n… {} more lines (read_text reads a region)", lines.len() - 150) } else { String::new() };
@@ -287,7 +283,7 @@ pub(super) async fn observe(ctx: &Ctx, args: &Value) -> Output {
 
 /// Where something is: every control whose name or value contains the text, best first, and — in programs
 /// that draw their own UI — every place the text is on the pixels
-pub(super) async fn find(ctx: &Ctx, args: &Value) -> Output {
+async fn find(ctx: &Ctx, args: &Value) -> Output {
     let q = str_arg(args, "text").trim().to_string();
     if q.is_empty() {
         return fail("text is empty");

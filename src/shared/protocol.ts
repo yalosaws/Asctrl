@@ -3,18 +3,13 @@
 
 export type ToolName =
   | "screenshot"
-  | "system_info"
-  | "list_processes"
-  | "event_log"
   | "run_powershell"
   // The following are supported only by the driver app (agent-app)
   // Looking
   | "observe"
-  | "zoom"
-  | "find"
   | "read_text"
-  | "list_windows"
   | "wait_for"
+  | "read_grid"
   // Acting
   | "click"
   | "scroll"
@@ -30,17 +25,13 @@ export type ToolName =
   // Programs, windows, clipboard
   | "open_app"
   | "focus_window"
-  | "read_clipboard"
-  | "write_clipboard"
+  | "clipboard"
+  | "job"
+  | "list_files"
   // Shell, files, system
-  | "reset_shell"
-  | "job_output"
-  | "stop_job"
   | "read_file"
   | "write_file"
   | "edit_file"
-  | "list_dir"
-  | "find_files"
   | "search_files"
   | "disk_usage"
   | "upload_file"
@@ -126,6 +117,8 @@ export interface ToolResult {
   /** File result (download_file, base64) */
   file?: { name: string; data: string };
   error?: string;
+  /** Structured results, for a program reading the reply (a batch's steps) */
+  data?: unknown;
 }
 
 export type Message =

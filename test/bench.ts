@@ -89,7 +89,7 @@ try {
   console.log(`connected directly to the driver on ${tech.hostname}`);
 
   await task("Wait for a program's window; its controls come back listed", async () => {
-    const w = await call("wait_for", { window: WIN, timeoutSec: 30 });
+    const w = await call("wait_for", { appears: WIN, timeoutSec: 30 });
     expect(/\[e\d+\] Button "Submit"/.test(w.text), `controls not listed:\n${w.text}`);
     return `(noticed in ${Math.round(w.ms)} ms)`;
   });
@@ -105,23 +105,23 @@ try {
   await task("Type 500 characters (mixed English / Chinese) into a named field", async () => {
     const sample = "Quick brown fox 敏捷的狐狸 0123456789. ".repeat(20).slice(0, 500);
     // Long text goes in through the clipboard, which must come out of it holding what it held
-    const held = await tech.call("read_clipboard");
+    const held = await tech.call("clipboard");
     const mine = `what was on the clipboard ${Date.now()}`;
-    await call("write_clipboard", { text: mine });
+    await call("clipboard", { text: mine });
     const notes = async () => (await call("read_text", { target: "Notes", window: WIN })).text.replace(/^Notes\n/, "").replace(/\r/g, "");
     const t = await call("type_text", { text: sample, target: "Notes", window: WIN, replace: true });
     const got = await notes();
     expect(got === sample, `typed text differs: got ${got.length} chars: ${JSON.stringify(got.slice(0, 90))}`);
-    const clip = (await call("read_clipboard")).text.trim();
+    const clip = (await call("clipboard")).text.trim();
     expect(clip === mine, `the clipboard was not put back: ${JSON.stringify(clip.slice(0, 60))}`);
     // The same text again: the field reading it already proves nothing, so the paste must still get its time
     await call("type_text", { text: sample, target: "Notes", window: WIN, replace: true });
     await call("type_text", { text: sample.slice(0, 250), target: "Notes", window: WIN });
     const twice = await notes();
     expect(twice === sample + sample.slice(0, 250), `pasting again went wrong: ${twice.length} chars: ${JSON.stringify(twice.slice(0, 90))}`);
-    expect((await call("read_clipboard")).text.trim() === mine, "the clipboard was not put back after pasting again");
+    expect((await call("clipboard")).text.trim() === mine, "the clipboard was not put back after pasting again");
     // The benchmark borrowed the real clipboard: hand back the text it held
-    if (held.ok && held.text && !held.text.startsWith("[") && !held.text.startsWith("(")) await call("write_clipboard", { text: held.text });
+    if (held.ok && held.text && !held.text.startsWith("[") && !held.text.startsWith("(")) await call("clipboard", { text: held.text });
     return `(${Math.round((sample.length / t.ms) * 1000)} chars/s end to end)`;
   });
 
@@ -191,7 +191,7 @@ try {
   });
 
   await task("Find text only the pixels show (OCR)", async () => {
-    const f = await call("find", { text: "CANVAS-7391", window: WIN });
+    const f = await call("observe", { query: "CANVAS-7391", window: WIN });
     expect(/On the pixels/.test(f.text), f.text);
     return `(${Math.round(f.ms)} ms)`;
   });
@@ -204,10 +204,10 @@ try {
 
   await task("Wait for a dialog that opens late, close it", async () => {
     await call("click", { target: "Open dialog", window: WIN, after: "none" });
-    const w = await call("wait_for", { window: "Bench Dialog", timeoutSec: 5 });
+    const w = await call("wait_for", { appears: "Bench Dialog", timeoutSec: 5 });
     expect(/Button "Close me"/.test(w.text), `the dialog's controls are not listed:\n${w.text}`);
     await call("click", { target: "Close me", window: "Bench Dialog", after: "none" });
-    await call("wait_for", { window: "Bench Dialog", gone: true, timeoutSec: 3 });
+    await call("wait_for", { appears: "Bench Dialog", gone: true, timeoutSec: 3 });
     return `(dialog noticed ${Math.round(w.ms)} ms after asking; it opens at ~800 ms)`;
   });
 
@@ -217,7 +217,7 @@ try {
         { tool: "click", target: "CANVAS-7391", window: WIN },
         { tool: "click", target: "CANVAS-7391", window: WIN },
         { tool: "click", target: "Submit", window: WIN },
-        { tool: "wait_for", text: "Canvas clicks: 3", within: WIN, timeoutSec: 3 },
+        { tool: "wait_for", text: "Canvas clicks: 3", window: WIN, timeoutSec: 3 },
       ],
     });
     expect(/All 4 steps done/.test(b.text), b.text);
@@ -229,16 +229,16 @@ try {
     writeFileSync(path.join(folder, "bench-file-4821.txt"), "hello");
     const o = await call("open_app", { target: folder });
     let seen = o.text.includes("bench-file-4821");
-    if (!seen) seen = (await call("wait_for", { text: "bench-file-4821", within: folderName, timeoutSec: 10 })).ok;
+    if (!seen) seen = (await call("wait_for", { text: "bench-file-4821", window: folderName, timeoutSec: 10 })).ok;
     expect(seen, "the file never showed");
     await call("focus_window", { window: folderName, action: "close", after: "none" });
-    await call("wait_for", { window: folderName, gone: true, timeoutSec: 5 });
+    await call("wait_for", { appears: folderName, gone: true, timeoutSec: 5 });
     return `(open_app ${Math.round(o.ms)} ms${o.text.includes("bench-file-4821") ? ", file already in its reply" : ""})`;
   });
 
   await task("Close the program", async () => {
     await call("focus_window", { window: WIN, action: "close", after: "none" });
-    await call("wait_for", { window: WIN, gone: true, timeoutSec: 5 });
+    await call("wait_for", { appears: WIN, gone: true, timeoutSec: 5 });
   });
 } catch (e) {
   console.log(`✘ could not run: ${(e as Error).message}`);

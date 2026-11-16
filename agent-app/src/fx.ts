@@ -3,8 +3,7 @@
 // the last spot straight to the next, never teleporting, and while it works it becomes the thing doing
 // the work (body.ts): pointers it splits into, a frame round a window, the panel.
 
-import { invoke } from "@tauri-apps/api/core";
-import { center, home, isTauri, monitorAt, monitors, pt, rect, type Pt, type R } from "./geo";
+import { center, home, monitorAt, monitors, pt, rect, type Pt, type R } from "./geo";
 import { orb } from "./orb";
 import { toolEnded, toolStarted } from "./think";
 import { BALL, beat, body, busy, DROP_AT, holdUntil, job, keep, more, Pointer, tempo } from "./body";
@@ -39,6 +38,11 @@ const dirName = (p: string) => {
 
 let homeTimer: number | undefined;
 let active = 0;
+/** When the orb last ran out of work */
+let freeSince = 0;
+/** After the work, the orb stays where it was while the AI decides what comes next (the task isn't done), at
+ *  most this long; only then does it go home */
+const STAY_THINKING_MS = 8000;
 
 function attend() {
   active++;
@@ -64,6 +68,7 @@ async function goHomeWhenFree() {
   // While a work area is framed, or the body still has work queued, the orb stays
   if (active > 0 || zone) return;
   if (busy() || pressing > 0) return void (homeTimer = window.setTimeout(goHomeWhenFree, 600));
+  if (orb.isThinking && performance.now() - freeSince < STAY_THINKING_MS) return void (homeTimer = window.setTimeout(goHomeWhenFree, 600));
   await recallPointers();
   // New work came in while they were coming back: the orb stays with it
   if (active > 0 || zone || busy() || pressing > 0) return;
@@ -71,8 +76,15 @@ async function goHomeWhenFree() {
   orb.goTo(home(), "slow");
 }
 
+/** The session ended: work it left unfinished (a plan whose end never came) no longer holds the orb */
+export function workAbandoned() {
+  active = 0;
+  window.clearTimeout(homeTimer);
+}
+
 function release(ok = true, delay = 1500) {
   active = Math.max(0, active - 1);
+  if (active === 0) freeSince = performance.now();
   if (!ok) flashError();
   window.clearTimeout(homeTimer);
   homeTimer = window.setTimeout(goHomeWhenFree, delay);
@@ -674,7 +686,7 @@ function winStart(e: FxEvent) {
   // one of them left behind when the window moves, is the leftover this prevents
   dropZone();
   const r0 = rect(e.geo?.rect);
-  if (!r0) return void landed(e.id, 0);
+  if (!r0) return;
   let settle!: () => void;
   const settled = new Promise<void>((res) => (settle = res));
   const w = { r: r0, on: false, opening: Promise.resolve(), settle, settled };
@@ -690,11 +702,6 @@ function winStart(e: FxEvent) {
     await Promise.all([holdUntil(w.settled, 6000), beat(700)]);
     wins.delete(e.id);
   });
-  landed(e.id, 0);
-}
-
-function landed(id: string, index: number) {
-  if (isTauri) void invoke("fx_landed", { id, index }).catch(() => {});
 }
 
 /** Stiffness of the frame following the window: it keeps up with a maximize or restore without snapping */
@@ -847,17 +854,22 @@ function fileStart(e: FxEvent) {
       })();
       return;
     }
-    case "list_dir":
-      return void skeleton(put(openCard("dir", baseName(path || "~"), path)), 7);
+    case "list_files": {
+      // With a pattern it searches below the folder; without, it lists the folder
+      if (!str(a.pattern)) return void skeleton(put(openCard("dir", baseName(path || "~"), path)), 7);
+      const c = put(openCard("find", str(a.pattern), path));
+      skeleton(c, 5);
+      scan(c, true);
+      return;
+    }
     case "disk_usage": {
       const c = put(openCard("disk", "Disk usage", path || "C:\\"));
       skeleton(c, 5);
       scan(c, true);
       return;
     }
-    case "find_files":
     case "search_files": {
-      const c = put(openCard(e.tool === "find_files" ? "find" : "search", str(a.pattern), path));
+      const c = put(openCard("search", str(a.pattern), path));
       skeleton(c, 5);
       scan(c, true);
       return;
@@ -872,9 +884,9 @@ function fileStart(e: FxEvent) {
       put(c, progress(c, 0.7, 1000));
       return;
     }
-    case "read_clipboard":
-      return void skeleton(put(openCard("clip", "")), 3);
-    case "write_clipboard":
+    case "clipboard":
+      // With text it writes the clipboard; without, it reads it
+      if (a.text === undefined) return void skeleton(put(openCard("clip", "")), 3);
       return void fillLines(put(openCard("clip", "")), lines(str(a.text)), "add");
   }
 }
@@ -893,7 +905,11 @@ async function fileEnd(e: FxEvent) {
       scan(c);
       linger = 2200;
       break;
-    case "list_dir":
+    case "list_files":
+      if (str(e.args?.pattern)) {
+        await fillLines(c, lines(text).map((l) => baseName(l) || l));
+        break;
+      }
       await fillEntries(
         c,
         lines(text)
@@ -903,9 +919,6 @@ async function fileEnd(e: FxEvent) {
             return name.endsWith("\\") ? { name: name.slice(0, -1), dir: true } : { name, dir: false };
           }),
       );
-      break;
-    case "find_files":
-      await fillLines(c, lines(text).map((l) => baseName(l) || l));
       break;
     case "disk_usage":
       // Header, then the largest folders and files as written by the agent
@@ -935,8 +948,8 @@ async function fileEnd(e: FxEvent) {
       }
       break;
     }
-    case "read_clipboard":
-      await fillLines(c, lines(text));
+    case "clipboard":
+      if (e.args?.text === undefined) await fillLines(c, lines(text));
       break;
   }
   orb.setMood("happy");
@@ -948,20 +961,13 @@ async function fileEnd(e: FxEvent) {
 function termCommand(e: FxEvent): string {
   const a = e.args ?? {};
   switch (e.tool) {
-    case "run_powershell":
-      return a.background === true ? `Start-Job { ${str(a.script).trim()} }` : str(a.script).trim();
-    case "system_info":
-      return "Get-ComputerInfo";
-    case "list_processes":
-      return `Get-Process | Sort-Object WorkingSet64 -Descending | Select -First ${num(a.top, 30)}`;
-    case "event_log":
-      return `Get-WinEvent -LogName ${str(a.log) || "System"} -MaxEvents ${num(a.max, 30)}`;
-    case "job_output":
-      return a.jobId === undefined ? "Get-Job" : `Receive-Job -Id ${str(a.jobId)}`;
-    case "stop_job":
-      return `Stop-Job -Id ${str(a.jobId)}`;
-    case "reset_shell":
-      return "exit; powershell";
+    case "run_powershell": {
+      const script = str(a.script).trim();
+      if (a.reset === true && !script) return "exit; powershell";
+      return a.background === true ? `Start-Job { ${script} }` : script;
+    }
+    case "job":
+      return a.jobId === undefined ? "Get-Job" : a.stop === true ? `Stop-Job -Id ${str(a.jobId)}` : `Receive-Job -Id ${str(a.jobId)}`;
     default:
       return e.tool;
   }
@@ -970,10 +976,12 @@ function termCommand(e: FxEvent): string {
 // ---- Dispatch ----
 
 /** Tools that only look: they draw nothing and never wake the orb (a screenshot breathes the edge once, at the end) */
-const LOOKS = new Set(["screenshot", "observe", "find", "read_text", "list_windows"]);
+const LOOKS = new Set(["screenshot", "observe", "read_text"]);
+/** A screenshot of a region: the orb zooms into it */
+const zooms = (e: FxEvent) => e.tool === "screenshot" && e.args?.x0 !== undefined;
 
-const TERM = new Set(["run_powershell", "system_info", "list_processes", "event_log", "job_output", "stop_job", "reset_shell"]);
-const FILE = new Set(["read_file", "write_file", "edit_file", "list_dir", "find_files", "search_files", "disk_usage", "upload_file", "download_file", "read_clipboard", "write_clipboard"]);
+const TERM = new Set(["run_powershell", "job"]);
+const FILE = new Set(["read_file", "write_file", "edit_file", "list_files", "search_files", "disk_usage", "upload_file", "download_file", "clipboard"]);
 
 /** End events carry only the result; args and start geometry are filled in from here */
 const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
@@ -981,17 +989,21 @@ const started = new Map<string, Pick<FxEvent, "args" | "geo">>();
 export function fxStart(e: FxEvent) {
   // A plan running: one piece of work, so the pauses between its steps are not the AI thinking. It draws
   // nothing itself; its steps do.
-  if (e.tool === "plan") return void toolStarted("plan");
+  // The orb stays with the plan's work until the plan is done, however long a step is being decided
+  if (e.tool === "plan") {
+    toolStarted("plan");
+    return void attend();
+  }
   started.set(e.id, { args: e.args, geo: e.geo });
   begun.add(e.id);
   if (begun.size > 400) for (const id of [...begun].slice(0, 200)) begun.delete(id);
   toolStarted(e.tool);
   // Looking changes nothing and draws nothing
-  if (LOOKS.has(e.tool)) return;
+  if (LOOKS.has(e.tool) && !zooms(e)) return;
   attend();
   pulse();
   switch (e.tool) {
-    case "zoom":
+    case "screenshot":
       return zoomStart(e);
     case "click":
     case "element_action":
@@ -1046,7 +1058,10 @@ export function fxStep(e: FxEvent) {
 }
 
 export function fxEnd(ev: FxEvent) {
-  if (ev.tool === "plan") return void toolEnded("plan");
+  if (ev.tool === "plan") {
+    toolEnded("plan");
+    return void release(ev.ok !== false);
+  }
   const st = started.get(ev.id);
   started.delete(ev.id);
   const e: FxEvent = { ...ev, args: ev.args ?? st?.args ?? {}, geo: { ...(st?.geo ?? {}), ...(ev.geo ?? {}) } };
@@ -1057,7 +1072,7 @@ export function fxEnd(ev: FxEvent) {
   ends.delete(e.id);
   waiting?.r(e);
   // Never woke the orb at start, so there is nothing to release. A look that took a picture breathes the edge.
-  if (LOOKS.has(e.tool)) {
+  if (LOOKS.has(e.tool) && !zooms(e)) {
     if (e.tool === "screenshot" || e.geo?.shot) screenshotEnd(e);
     return;
   }

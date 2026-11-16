@@ -1,61 +1,9 @@
-//! The shell, files and system information: everything that is not looking at or operating the screen.
-//! The system_info / list_processes / event_log scripts match the Node version in src/agent/tools.ts.
+//! The shell and files: everything that is not looking at or operating the screen.
 
 use super::*;
-use crate::{files, powershell, shell::Shell};
+use crate::{files, shell::Shell};
 
 const MAX_FILE: usize = 20 * 1024 * 1024;
-
-async fn ps_text(script: &str, timeout_secs: u64) -> Output {
-    let r = powershell::run(script, Duration::from_secs(timeout_secs)).await;
-    if r.timed_out {
-        return fail(format!("Timed out ({timeout_secs} s)"));
-    }
-    let mut parts = vec![r.stdout.trim().to_string()];
-    if !r.stderr.trim().is_empty() {
-        parts.push(format!("[stderr]\n{}", r.stderr.trim()));
-    }
-    if r.exit_code != Some(0) {
-        parts.push(format!("[exit code {:?}]", r.exit_code));
-    }
-    let joined = parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n\n");
-    text(if joined.is_empty() { "(no output)".into() } else { joined })
-}
-
-const SYSTEM_INFO_PS: &str = r#"
-$os = Get-CimInstance Win32_OperatingSystem
-$cs = Get-CimInstance Win32_ComputerSystem
-$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
-$disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
-  [pscustomobject]@{ Drive=$_.DeviceID; SizeGB=[math]::Round($_.Size/1GB,1); FreeGB=[math]::Round($_.FreeSpace/1GB,1) }
-}
-[pscustomobject]@{
-  ComputerName = $env:COMPUTERNAME
-  User         = $env:USERNAME
-  OS           = "$($os.Caption) $($os.Version) build $($os.BuildNumber)"
-  LastBoot     = $os.LastBootUpTime.ToString('yyyy-MM-dd HH:mm')
-  UptimeHours  = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1)
-  Model        = "$($cs.Manufacturer) $($cs.Model)"
-  CPU          = $cpu.Name.Trim()
-  CpuLoadPct   = $cpu.LoadPercentage
-  RamGB        = [math]::Round($cs.TotalPhysicalMemory/1GB,1)
-  RamFreeGB    = [math]::Round($os.FreePhysicalMemory*1KB/1GB,1)
-  Disks        = $disks
-} | ConvertTo-Json -Depth 4
-"#;
-
-const PROCESSES_PS: &str = r#"
-Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First __TOP__ @{n='Name';e={$_.ProcessName}}, Id,
-  @{n='MemMB';e={[math]::Round($_.WorkingSet64/1MB)}}, @{n='CpuSec';e={[math]::Round($_.CPU,1)}},
-  @{n='Title';e={$_.MainWindowTitle}} | Format-Table -AutoSize | Out-String -Width 200
-"#;
-
-const EVENT_LOG_PS: &str = r#"
-$f = @{ LogName='__LOG__'; Level=1,2,3; StartTime=(Get-Date).AddHours(-__HOURS__) }
-Get-WinEvent -FilterHashtable $f -MaxEvents __MAX__ -ErrorAction SilentlyContinue |
-  Select-Object @{n='Time';e={$_.TimeCreated.ToString('MM-dd HH:mm:ss')}}, LevelDisplayName, ProviderName, Id,
-  @{n='Message';e={($_.Message -split "`n")[0]}} | Format-List | Out-String -Width 300
-"#;
 
 async fn shell_run(ctx: &Ctx, script: &str, timeout_secs: u64) -> Output {
     let mut guard = ctx.shell.lock().await;
@@ -128,7 +76,8 @@ pub(super) async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
             let all = bool_arg(args, "replaceAll").unwrap_or(false);
             blocking(move || files::edit(&path, &old, &new, all)).await
         }
-        "list_dir" => {
+        // A folder's contents; with pattern, the files under it whose names match, newest first
+        "list_files" => {
             let p = match str_arg(args, "path") {
                 "" => "~",
                 p => p,
@@ -137,14 +86,10 @@ pub(super) async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 Ok(p) => p,
                 Err(e) => return fail(e),
             };
-            blocking(move || files::list_dir(&path)).await
-        }
-        "find_files" => {
-            let path = match path_arg(args, "path") {
-                Ok(p) => p,
-                Err(e) => return fail(e),
-            };
-            let pattern = str_arg(args, "pattern").to_string();
+            let pattern = str_arg(args, "pattern").trim().to_string();
+            if pattern.is_empty() {
+                return blocking(move || files::list_dir(&path)).await;
+            }
             let max = int_arg(args, "maxResults", 200, 1, 5000) as usize;
             blocking(move || files::find(&path, &pattern, max)).await
         }
@@ -222,46 +167,29 @@ pub(super) async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 Err(e) => fail(e.to_string()),
             }
         }
-        "job_output" => {
+        // A background job: its new output (all of it with all), or stop it; without jobId, the list
+        "job" => {
             let mut jobs = ctx.jobs.lock().unwrap();
-            match args.get("jobId").and_then(Value::as_u64) {
-                None => text(jobs.list()),
-                Some(id) => match jobs.output(id as u32, bool_arg(args, "all").unwrap_or(false)) {
-                    Ok(s) => text(s),
-                    Err(e) => fail(e),
-                },
-            }
-        }
-        "stop_job" => {
-            let Some(id) = args.get("jobId").and_then(Value::as_u64) else { return fail("Missing jobId") };
-            let r = ctx.jobs.lock().unwrap().stop(id as u32);
+            let r = match (args.get("jobId").and_then(Value::as_u64), bool_arg(args, "stop") == Some(true)) {
+                (None, false) => Ok(jobs.list()),
+                (None, true) => Err("Say which job to stop (jobId)".to_string()),
+                (Some(id), true) => jobs.stop(id as u32),
+                (Some(id), false) => jobs.output(id as u32, bool_arg(args, "all").unwrap_or(false)),
+            };
             match r {
                 Ok(s) => text(s),
                 Err(e) => fail(e),
             }
         }
-        "reset_shell" => {
-            ctx.reset_shell().await;
-            text("Reset. The next command runs in a fresh PowerShell (back in the home directory)".into())
-        }
-        "system_info" => ps_text(SYSTEM_INFO_PS, 30).await,
-        "list_processes" => {
-            let top = int_arg(args, "top", 30, 1, 200);
-            ps_text(&PROCESSES_PS.replace("__TOP__", &top.to_string()), 30).await
-        }
-        "event_log" => {
-            let log = match args.get("log").and_then(Value::as_str) {
-                Some("Application") => "Application",
-                _ => "System",
-            };
-            let script = EVENT_LOG_PS
-                .replace("__LOG__", log)
-                .replace("__HOURS__", &int_arg(args, "hours", 24, 1, 720).to_string())
-                .replace("__MAX__", &int_arg(args, "max", 30, 1, 200).to_string());
-            ps_text(&script, 60).await
-        }
         "run_powershell" => {
             let script = str_arg(args, "script");
+            // A fresh session first (directory and variables cleared, background jobs stopped)
+            if bool_arg(args, "reset") == Some(true) {
+                ctx.reset_shell().await;
+                if script.trim().is_empty() {
+                    return text("Reset. The next command runs in a fresh PowerShell (back in the home directory)".into());
+                }
+            }
             if script.trim().is_empty() {
                 return fail("script is empty");
             }
@@ -269,7 +197,7 @@ pub(super) async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 let r = ctx.jobs.lock().unwrap().start(script);
                 return match r {
                     Ok(id) => text(format!(
-                        "Started in the background as job {id}. Use job_output to see progress and output, stop_job to stop it. \
+                        "Started in the background as job {id}. Use job (jobId) to see progress and output, and job with stop: true to stop it. \
                          Background jobs run in a separate PowerShell and do not share the session's directory or variables."
                     )),
                     Err(e) => fail(e),

@@ -644,8 +644,6 @@ pub fn snapshot(hwnd: isize, offscreen: bool) -> Result<Scene, String> {
 
 /// How a scene is written out
 pub struct Render<'a> {
-    /// Only lines containing this (lower-case) text; flat, without nesting
-    pub query: &'a str,
     pub max: usize,
     /// How a screen point is written (on the latest screenshot when it is there)
     pub at: &'a dyn Fn(i32, i32) -> String,
@@ -653,20 +651,7 @@ pub struct Render<'a> {
 
 /// The scene as lines. When it is longer than `max`, plain text goes first (controls matter more), then the tail.
 pub fn render(scene: &Scene, r: &Render) -> String {
-    let q = r.query.trim().to_lowercase();
     let lines: Vec<(usize, String, bool)> = scene.nodes.iter().map(|n| (n.depth, n.line(r.at), n.operable())).collect();
-    if !q.is_empty() {
-        let hits: Vec<&String> = lines.iter().map(|l| &l.1).filter(|l| l.to_lowercase().contains(&q)).collect();
-        if hits.is_empty() {
-            return format!("(no control matches \"{}\"; try a shorter query, or none)", r.query.trim());
-        }
-        let more = hits.len().saturating_sub(r.max);
-        let mut out = hits.iter().take(r.max).map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
-        if more > 0 {
-            out += &format!("\n… {more} more match; narrow the query");
-        }
-        return out;
-    }
     if lines.is_empty() {
         return "(no readable controls: this window draws its own UI, e.g. a game, a canvas or a remote desktop — work from the screenshot or the text read off the pixels)".into();
     }
@@ -682,10 +667,10 @@ pub fn render(scene: &Scene, r: &Render) -> String {
     // Nesting is only kept when nothing was dropped from between the lines
     let mut out = kept.iter().take(r.max).map(|l| if dropped_text == 0 { format!("{}{}", "  ".repeat(l.0.min(12)), l.1) } else { l.1.clone() }).collect::<Vec<_>>().join("\n");
     if dropped_text > 0 {
-        out += &format!("\n… {dropped_text} lines of plain text left out to fit; read them with read_text, or list with query");
+        out += &format!("\n… {dropped_text} lines of plain text left out to fit; read them with read_text, or look for one with query");
     }
     if more > 0 {
-        out += &format!("\n… {more} more controls; narrow it down with query");
+        out += &format!("\n… {more} more controls; look for one with query");
     }
     out
 }
@@ -737,7 +722,7 @@ pub fn changes(scene: &Scene, max: usize, at: &dyn Fn(i32, i32) -> String) -> Op
     }
     // Mostly new: the window shows something else now (another page, another view). List it as it is.
     if !scene.nodes.is_empty() && added.len() * 10 >= scene.nodes.len() * 7 && added.len() > 6 {
-        return Some(format!("The window now shows ({} controls):\n{}", scene.nodes.len(), render(scene, &Render { query: "", max, at })));
+        return Some(format!("The window now shows ({} controls):\n{}", scene.nodes.len(), render(scene, &Render { max, at })));
     }
     let mut out: Vec<String> = vec![];
     let mut room = max;
@@ -786,7 +771,7 @@ pub struct Live {
 pub fn live(rf: u32) -> Result<Live, String> {
     let found = with_reg(|reg| reg.entries.get(&rf).map(|e| (e.el.0.clone(), e.hwnd, e.label.clone())));
     let Some((el, hwnd, label)) = found else {
-        return Err(format!("There is no e{rf}. References come from observe, find, and the replies of actions"));
+        return Err(format!("There is no e{rf}. References come from observe and the replies of actions"));
     };
     // A stale element (its window closed, or the control was rebuilt) fails here
     if unsafe { el.CurrentProcessId() }.is_err() {
@@ -1379,10 +1364,8 @@ mod tests {
             s.nodes.push(node(i * 2 + 1, 1, "Text", "words", 0));
             s.nodes.push(node(i * 2 + 2, 1, "Button", "b", flag::INVOKE));
         }
-        let out = render(&s, &Render { query: "", max: 40, at: &at });
+        let out = render(&s, &Render { max: 40, at: &at });
         assert_eq!(out.matches("Button").count(), 30);
         assert!(out.contains("30 lines of plain text left out"), "{out}");
-        let q = render(&s, &Render { query: "BUTTON", max: 5, at: &at });
-        assert!(q.contains("… 25 more match"), "{q}");
     }
 }

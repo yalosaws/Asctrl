@@ -143,11 +143,11 @@ pub fn info(handle: isize) -> Option<Win> {
 /// Find a window by handle or by a title / process-name keyword. "taskbar" and "desktop" name the shell's own.
 pub fn find(handle: Option<isize>, query: &str) -> Result<HWND, String> {
     if let Some(h) = handle {
-        return if exists(h) && pid_of(h) != std::process::id() { Ok(hwnd(h)) } else { Err(format!("No window with handle {h}; see list_windows")) };
+        return if exists(h) && pid_of(h) != std::process::id() { Ok(hwnd(h)) } else { Err(format!("No window with handle {h}; observe lists the windows with their handles")) };
     }
     let q = query.trim().to_lowercase();
     if q.is_empty() {
-        return Err("Say which window: a handle from list_windows, or part of its title or program name".into());
+        return Err("Say which window: a handle (observe lists them), or part of its title or program name".into());
     }
     let wins = list();
     // Front-most match wins; a title match beats a program-name match further forward only when exact

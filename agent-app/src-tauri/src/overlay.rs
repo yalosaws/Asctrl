@@ -192,7 +192,7 @@ fn harden(win: &WebviewWindow) {
     let h = HWND(h.0);
     HWND_RAW.store(h.0 as isize, std::sync::atomic::Ordering::Relaxed);
     unsafe {
-        // Hidden from the taskbar and Alt+Tab (so list_windows skips it too), and never takes focus on click
+        // Hidden from the taskbar and Alt+Tab (so the windows observe lists skip it too), and never takes focus on click
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         SetWindowLongPtrW(h, GWL_EXSTYLE, ex | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize);
         // Invisible to screen capture, so the AI always sees the real desktop (Windows 10 2004+)

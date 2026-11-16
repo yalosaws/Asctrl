@@ -90,7 +90,7 @@ fn controls_part(f: Frame, hwnd: isize, fresh: bool, force: bool) -> Option<(Str
         Some(d) if d.starts_with("The window now shows") => (d.replacen("The window now shows", &format!("\"{title}\" now shows"), 1), true),
         Some(d) => (format!("Changes in \"{title}\":\n{d}"), true),
         None if scene.nodes.is_empty() => return None,
-        None => (format!("\"{title}\" — {} controls:\n{}", scene.nodes.len(), uia::render(&scene, &uia::Render { query: "", max: MAX_CHANGES + 20, at: &at })), true),
+        None => (format!("\"{title}\" — {} controls:\n{}", scene.nodes.len(), uia::render(&scene, &uia::Render { max: MAX_CHANGES + 20, at: &at })), true),
     };
     uia::remember(&scene);
     Some(out)

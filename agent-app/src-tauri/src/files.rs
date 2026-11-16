@@ -143,7 +143,7 @@ fn sniff_enc(path: &Path) -> Option<Enc> {
 fn read_text(path: &Path) -> Result<(String, Enc), String> {
     let m = std::fs::metadata(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     if m.is_dir() {
-        return Err(format!("{} is a folder; use list_dir", path.display()));
+        return Err(format!("{} is a folder; use list_files", path.display()));
     }
     if m.len() > MAX_READ {
         return Err(format!("File is too large ({} MB); use search_files to search it or download_file to fetch it", m.len() / 1024 / 1024));

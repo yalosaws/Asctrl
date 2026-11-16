@@ -9,7 +9,6 @@
   },
   "scripts": {
     "relay": "node src/relay/server.ts",
-    "agent": "node src/agent/agent.ts",
     "mcp": "node src/console/mcp-server.ts",
     "typecheck": "tsc",
     "test": "node test/e2e.ts",

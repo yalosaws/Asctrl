@@ -29,11 +29,6 @@ pub fn call_id() -> String {
     CALL_ID.try_with(Clone::clone).unwrap_or_default()
 }
 
-/// The overlay used to report when a virtual cursor landed so the real click could wait for it.
-/// Clicks no longer wait; the command stays so an overlay that still calls it gets an answer.
-#[tauri::command]
-pub fn fx_landed(_id: String, _index: usize) {}
-
 pub fn rect_json(r: (i32, i32, i32, i32)) -> Value {
     json!([r.0, r.1, r.2 - r.0, r.3 - r.1])
 }

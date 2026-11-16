@@ -4,7 +4,6 @@
 
 export const clamp = (v: number, a = 0, b = 1) => Math.min(b, Math.max(a, v));
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-export const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
 export const EASE = {
   out: "cubic-bezier(.16,1,.3,1)",
