@@ -28,6 +28,10 @@ const appExe = appIdx >= 0 ? process.argv[appIdx + 1] : path.resolve(import.meta
 // This run's driver writes its address to its own file, so a driver the user already has running is left alone
 const localFile = path.join(tmpdir(), `asctrl-e2e-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
+// Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
+process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
+// Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
+process.env.ASCTRL_CONFIRM ??= "off";
 
 const agent = spawn(appExe, ["--code", CODE, "--relay", `ws://localhost:${PORT}`], { stdio: ["ignore", "pipe", "inherit"] });
 agent.stdout.on("data", (d) => process.stdout.write(`  [agent] ${d}`));

@@ -16,6 +16,10 @@ const exe = appIdx >= 0 ? process.argv[appIdx + 1] : path.join(root, "agent-app/
 const WIN = "Asctrl Bench";
 const localFile = path.join(tmpdir(), `asctrl-prof-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
+// Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
+process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
+// Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
+process.env.ASCTRL_CONFIRM ??= "off";
 
 const relay = startRelay(PORT);
 const agent = spawn(exe, ["--code", "135790", "--relay", `ws://localhost:${PORT}`], { stdio: ["ignore", "ignore", "inherit"] });

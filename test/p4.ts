@@ -21,6 +21,10 @@ const root = path.resolve(import.meta.dirname, "..");
 const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
 const localFile = path.join(tmpdir(), `asctrl-p4-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
+// Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
+process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
+// Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
+process.env.ASCTRL_CONFIRM ??= "off";
 const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] });
 const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
 const tech = new TechClient("ws://127.0.0.1:1", "P4Test");

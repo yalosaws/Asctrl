@@ -38,6 +38,8 @@ It is built around three ideas:
 | `agent-app/src-tauri/src/tools/` | The tools: `look` (observe, screenshot, read_text), `locate` (targets), `pointer` / `keys` / `values` (actions), `report` (what a reply says), `wait`, `grid` (read_grid), `batch` (runs a plan's steps), `popups` (dismissed while a plan runs), `apps`, `system` |
 | `agent-app/src-tauri/src/uia.rs` | UI Automation: scenes, stable references, change detection between readings, operating controls |
 | `agent-app/src-tauri/src/screen.rs` | Telling whether the screen reacted to an action and when it has settled |
+| `agent-app/src-tauri/src/browser_ext.rs` | The person's own browser through Asctrl's extension (`browser-extension/`): the relay the browser starts over native messaging, the named pipe it reaches the driver by, and registering it for Chrome, Edge and Brave |
+| `agent-app/src-tauri/src/safety.rs` | Effect levels (read, reversible, irreversible, external), the person's yes on this computer before what can't be taken back (`ASCTRL_CONFIRM`), and the action log (`%LOCALAPPDATA%\Asctrl\actions.log`) |
 | `agent-app/src-tauri/src/presence.rs` | Whose input is whose: Asctrl marks its own; any other mouse or keyboard input is a person, and actions that need the real mouse, keyboard or focus wait until they stop (`ASCTRL_YIELD_MAX`, `ASCTRL_NO_YIELD=1`) |
 | `agent-app/src-tauri/src/events.rs` | The timeline: windows shown, hidden, destroyed, brought to the front, renamed, as Windows reports them (`ASCTRL_NO_EVENTS=1` turns it off) |
 | `agent-app/src-tauri/src/wgc.rs` | Capturing one window as it draws itself (Windows Graphics Capture), for reading a window others cover |
@@ -319,6 +321,48 @@ The person at the computer comes first, and work that needs no mouse goes on bes
 
 ```bash
 node test/p6.ts
+```
+
+The person's own browser through the extension, and iframes from other sites (starts a Chrome or Edge of its own with the extension loaded, about 90 s):
+
+```bash
+node test/ext.ts
+```
+
+An Electron program (VS Code, a copy of its own) worked through its pages:
+
+```bash
+node test/electron.ts
+```
+
+Programs' popup rules, waiting on a condition and answering a stuck step with code; skills kept by themselves, checked against the window, exported and put right; the person's yes before what can't be taken back; the decision model inside programs; the five tools:
+
+```bash
+node test/l2.ts
+```
+
+```bash
+node test/l4.ts
+```
+
+```bash
+node test/l5.ts
+```
+
+```bash
+node test/p4b.ts
+```
+
+```bash
+node test/tools.ts
+```
+
+To install the extension in your own browser: open `chrome://extensions` (or `edge://extensions`), turn on Developer mode, choose Load unpacked and pick the `browser-extension` folder. The driver registers itself for it each time it starts.
+
+The P0 benchmark: a frontier model does 40 real tasks (a browser, Windows Settings, Word / Excel / PowerPoint, VS Code) through the MCP tools, in headless Claude Code, and each is checked by what it left behind. It records success, time, model calls, tokens and tool calls per task, in `test/out/p0-*.jsonl`. It takes the computer over for the whole run and uses your Claude account; `--dry` only checks the set-up, checks and clean-up; `--only b01,office` runs some; `--root <checkout>` measures another version (e.g. main, for v0.2):
+
+```bash
+node test/p0/run.ts --dry
 ```
 
 Speed and reliability on a real desktop (moves the mouse and types for about 20 seconds; leave the computer alone):
