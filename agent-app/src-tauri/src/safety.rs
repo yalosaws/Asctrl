@@ -228,11 +228,11 @@ pub fn record(tool: &str, args: &Value, l: Level, what: &str, asked: Option<bool
     for t in typed.into_iter().filter(|t| !t.is_empty()) {
         result = result.replace(t, &format!("<{} characters>", t.chars().count()));
     }
-    if result.contains("now reads") || result.contains("it now reads") {
-        if let Some(i) = result.find("reads \"") {
-            result.truncate(i + 6);
-            result.push_str("…\" (not kept)");
-        }
+    if (result.contains("now reads") || result.contains("it now reads"))
+        && let Some(i) = result.find("reads \"")
+    {
+        result.truncate(i + 6);
+        result.push_str("…\" (not kept)");
     }
     let line = json!({
         "at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),

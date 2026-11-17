@@ -684,10 +684,10 @@ pub(super) async fn resume(ctx: &Ctx, args: &Value) -> Output {
         Some(Decision::Instead(tool, i.get("args").cloned().unwrap_or(json!({}))))
     } else if let Some(c) = args.get("code").and_then(Value::as_str).filter(|c| !c.trim().is_empty()) {
         Some(Decision::Code(c.to_string()))
-    } else if let Some(a) = args.get("abort").filter(|v| !v.is_null() && **v != false) {
-        Some(Decision::Abort(a.as_str().map(str::to_string).unwrap_or_else(|| "aborted by the AI".into())))
     } else {
-        None
+        args.get("abort")
+            .filter(|v| !v.is_null() && **v != false)
+            .map(|a| Decision::Abort(a.as_str().map(str::to_string).unwrap_or_else(|| "aborted by the AI".into())))
     };
     if let Some(d) = decision {
         let phase = p.phase();

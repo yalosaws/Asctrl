@@ -174,7 +174,7 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
             } else {
                 let hwnd = scope().unwrap_or_else(winmgr::foreground);
                 // Pixels are read every other poll when not asked for outright: controls answer faster
-                let use_ocr = ocr_arg.unwrap_or(polls % 2 == 0) && ocr_arg != Some(false);
+                let use_ocr = ocr_arg.unwrap_or(polls.is_multiple_of(2)) && ocr_arg != Some(false);
                 if hwnd == 0 { None } else { showing(hwnd, &texts, &f, use_ocr, &mut problem, &mut overruled).map(|(d, in_controls)| (d, Some(hwnd), in_controls)) }
             };
             let s = start.elapsed().as_secs_f64();

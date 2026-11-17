@@ -146,7 +146,6 @@ fn raise() {
 /// The visible windows above the overlay now, front to back. Only topmost windows can be (the overlay is one), so
 /// the walk from the top stops at the overlay, which is normally first, or at the first window that is not topmost.
 fn above_now() -> Vec<isize> {
-    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::*;
     let ours = HWND_RAW.load(std::sync::atomic::Ordering::Relaxed);
     let mut out = Vec::new();
@@ -163,7 +162,7 @@ fn above_now() -> Vec<isize> {
             if IsWindowVisible(h).as_bool() {
                 out.push(h.0 as isize);
             }
-            h = GetWindow(h, GW_HWNDNEXT).unwrap_or(HWND::default());
+            h = GetWindow(h, GW_HWNDNEXT).unwrap_or_default();
         }
     }
     out

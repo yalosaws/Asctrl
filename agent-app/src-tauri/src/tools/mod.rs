@@ -114,12 +114,12 @@ impl Frame {
     }
 
     /// Picture coordinates -> screen coordinates
-    pub fn to_screen(&self, x: f64, y: f64) -> (i32, i32) {
+    pub fn to_screen(self, x: f64, y: f64) -> (i32, i32) {
         (self.left + (x / self.scale).round() as i32, self.top + (y / self.scale).round() as i32)
     }
 
     /// Screen coordinates -> picture coordinates; None when outside the picture
-    pub fn to_shot(&self, x: i32, y: i32) -> Option<(i32, i32)> {
+    pub fn to_shot(self, x: i32, y: i32) -> Option<(i32, i32)> {
         let px = ((x - self.left) as f64 * self.scale).round() as i32;
         let py = ((y - self.top) as f64 * self.scale).round() as i32;
         (px >= 0 && py >= 0 && px <= self.width && py <= self.height).then_some((px, py))
@@ -322,6 +322,8 @@ static YIELDED: Mutex<Vec<(String, Duration)>> = Mutex::new(Vec::new());
 /// until they have stopped for a moment (see presence); Err when they never did. A paste puts the clipboard
 /// back a moment after it returns; whatever acts next waits for that first, so it never sees (or overwrites)
 /// the borrowed clipboard.
+// The reply a caller returns as it is when its turn can't come: boxing it would only move the copy elsewhere
+#[allow(clippy::result_large_err)]
 async fn acting() -> Result<tokio::sync::MutexGuard<'static, ()>, Output> {
     let turn = ACTING.lock().await;
     let start = std::time::Instant::now();

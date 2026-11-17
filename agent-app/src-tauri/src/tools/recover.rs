@@ -165,7 +165,7 @@ pub struct Outcome {
 /// Recover a step whose reply `out` is a miss. `settled`: the screen was at rest before the step (it came first,
 /// or after a wait, or after an input that waited for the screen). `again` runs the step with some arguments
 /// changed, the way the batch runs a step.
-pub async fn recover<'a, F, Fut>(ctx: &Ctx, step: &'a Value, wish: &Wish, on: &[(String, String)], settled: bool, mut out: Output, mut again: F) -> Outcome
+pub async fn recover<F, Fut>(ctx: &Ctx, step: &Value, wish: &Wish, on: &[(String, String)], settled: bool, mut out: Output, mut again: F) -> Outcome
 where
     F: FnMut(Value) -> Fut,
     Fut: std::future::Future<Output = Output>,

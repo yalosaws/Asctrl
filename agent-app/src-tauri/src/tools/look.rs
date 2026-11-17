@@ -151,7 +151,7 @@ fn fill(px: &mut [u8], w: i32, h: i32, (x0, y0, x1, y1): (i32, i32, i32, i32), b
 }
 
 /// A box around each control and its number at its corner, on a picture of `area` scaled by `scale`
-fn draw_marks(px: &mut [u8], w: i32, h: i32, area: capture::Area, scale: f64, marks: &[(u32, (i32, i32, i32, i32))]) {
+fn draw_marks(px: &mut [u8], w: i32, h: i32, area: capture::Area, scale: f64, marks: &[(u32, winmgr::Rect)]) {
     const LINE: [u8; 3] = [255, 0, 200];
     const TAG: [u8; 3] = [0, 230, 255];
     const INK: [u8; 3] = [0, 0, 0];
@@ -185,7 +185,7 @@ async fn marked(ctx: &Ctx, h: isize, max_width: i32) -> Result<Output, String> {
     let r = tokio::task::spawn_blocking(move || -> Result<_, String> {
         let area = winmgr::rect_of(h).and_then(|(l, t, r, b)| clip_to_screen((l, t, r, b))).ok_or("the window is not on the screen")?;
         let scene = uia::snapshot(h, false)?;
-        let marks: Vec<(u32, (i32, i32, i32, i32), String)> = scene
+        let marks: Vec<(u32, winmgr::Rect, String)> = scene
             .nodes
             .iter()
             .filter(|n| uia::interactive_role(n.role) && !n.has(uia::flag::DISABLED))

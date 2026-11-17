@@ -67,8 +67,8 @@ impl Picture {
                 for sy in y0..y1 {
                     for sx in x0..x1 {
                         let s = (sy * sw + sx) * 4;
-                        for c in 0..4 {
-                            sum[c] += self.px[s + c] as u32;
+                        for (c, total) in sum.iter_mut().enumerate() {
+                            *total += self.px[s + c] as u32;
                         }
                     }
                 }
@@ -208,7 +208,7 @@ mod tests {
         assert!(p.cut(Area { left: 99, top: 50, width: 2, height: 1 }, 2, 1).is_err());
         // Half the size: each pixel the average of a 2x2 block
         let half = p.shrink(2, 1);
-        assert_eq!((half[0], half[4]), ((0 + 1 + 10 + 11) / 4, (2 + 3 + 12 + 13) / 4));
+        assert_eq!((half[0], half[4]), ((1 + 10 + 11) / 4, (2 + 3 + 12 + 13) / 4), "pixels 0, 1, 10, 11 and 2, 3, 12, 13");
         assert_eq!(p.shrink(8, 8).len(), p.px.len(), "never larger than it is");
     }
 }

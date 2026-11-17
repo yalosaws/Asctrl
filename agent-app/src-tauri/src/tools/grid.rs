@@ -38,7 +38,7 @@ fn glyphs(px: &[u8], w: i32, h: i32, rows: usize, cols: usize) -> (Vec<Glyph>, V
     let (cw, ch) = (w as f64 / cols as f64, h as f64 / rows as f64);
     // Each cell inside a margin, so the grid lines are left out, with its background: the commonest brightness
     // in it (a highlight is a background too)
-    let cells: Vec<(usize, usize, (i32, i32, i32, i32), f64)> = (0..rows)
+    let cells: Vec<(usize, usize, winmgr::Rect, f64)> = (0..rows)
         .flat_map(|r| (0..cols).map(move |c| (r, c)))
         .filter_map(|(r, c)| {
             let (x0, x1) = ((c as f64 * cw + cw * 0.15) as i32, ((c + 1) as f64 * cw - cw * 0.15) as i32);

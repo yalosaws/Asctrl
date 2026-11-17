@@ -294,6 +294,8 @@ pub async fn local_server(app: AppHandle) {
     }
 }
 
+// The handshake callback's error type is the WebSocket library's own
+#[allow(clippy::result_large_err)]
 async fn local_session(app: AppHandle, stream: tokio::net::TcpStream, token: String) {
     use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
     let _ = stream.set_nodelay(true);
