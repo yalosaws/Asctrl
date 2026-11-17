@@ -9,7 +9,7 @@
 //        PORT (8788), HOST (127.0.0.1; put a TLS proxy such as Caddy in front), TRUST_PROXY (express setting, default "loopback")
 //        RELAY_URL, RELAY_TOKEN  the relay to reach computers through
 //        ASCTRL_DATA_DIR  where keys and tokens are kept (default ./data)
-//        SESSION_IDLE_MIN (120), SESSIONS_PER_KEY (20)
+//        SESSION_IDLE_MIN (120), SESSIONS_PER_KEY (20), LINK_IDLE_MIN (30)
 
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -19,16 +19,24 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { createAsctrlServer, ICON_DIR, ICON_SIZES } from "./mcp-server.ts";
+import { createAsctrlServer, newLink, ICON_DIR, ICON_SIZES, type Link } from "./mcp-server.ts";
 import { TechClient } from "./tech-client.ts";
 import { AsctrlOAuthProvider, AuthStore, callerOf, defaultStoreFile } from "./auth.ts";
 import { DEFAULT_RELAY_URL } from "../shared/protocol.ts";
 
 interface Session {
   transport: StreamableHTTPServerTransport;
-  client: TechClient;
   keyId: string;
+  /** Which shared link it drives */
+  linkKey: string;
   lastSeen: number;
+}
+
+/** A computer connection shared by every session of one caller (access key + client) */
+interface SharedLink {
+  link: Link;
+  keyId: string;
+  lastUsed: number;
 }
 
 export interface HttpOptions {
@@ -40,6 +48,8 @@ export interface HttpOptions {
   store?: AuthStore;
   idleMs?: number;
   sessionsPerKey?: number;
+  /** How long a computer connection no session uses is kept */
+  linkIdleMs?: number;
 }
 
 export function startHttpServer(opts: HttpOptions = {}) {
@@ -51,10 +61,34 @@ export function startHttpServer(opts: HttpOptions = {}) {
   const relayToken = opts.relayToken ?? process.env.RELAY_TOKEN ?? process.env.ASCTRL_RELAY_TOKEN;
   const idleMs = opts.idleMs ?? Number(process.env.SESSION_IDLE_MIN ?? 120) * 60_000;
   const perKey = opts.sessionsPerKey ?? Number(process.env.SESSIONS_PER_KEY ?? 20);
+  const linkIdleMs = opts.linkIdleMs ?? Number(process.env.LINK_IDLE_MIN ?? 30) * 60_000;
   const store = opts.store ?? new AuthStore(defaultStoreFile());
   const provider = new AsctrlOAuthProvider(store);
 
   const sessions = new Map<string, Session>();
+  /**
+   * Computer connections, by access key and client. They outlive sessions: some clients (Grok) open a session
+   * per tool call and close it straight after, which would otherwise drop the computer after every connect.
+   */
+  const links = new Map<string, SharedLink>();
+
+  function linkFor(keyId: string, clientId: string): [string, SharedLink] {
+    const key = `${keyId}|${clientId}`;
+    let l = links.get(key);
+    if (!l) {
+      l = { link: newLink(new TechClient(relayUrl, "AI", relayToken)), keyId, lastUsed: Date.now() };
+      links.set(key, l);
+    }
+    l.lastUsed = Date.now();
+    return [key, l];
+  }
+
+  function dropLink(key: string) {
+    const l = links.get(key);
+    if (!l) return;
+    links.delete(key);
+    l.link.client.disconnect();
+  }
 
   const app = express();
   app.set("trust proxy", process.env.TRUST_PROXY ?? "loopback");
@@ -86,7 +120,7 @@ export function startHttpServer(opts: HttpOptions = {}) {
     const s = sessions.get(id);
     if (!s) return;
     sessions.delete(id);
-    s.client.disconnect();
+    // The computer stays connected for the caller's next session; the sweep lets it go once unused
     void s.transport.close().catch(() => {});
   }
 
@@ -102,6 +136,8 @@ export function startHttpServer(opts: HttpOptions = {}) {
       // A session belongs to whoever opened it
       if (s.keyId !== caller.keyId) return jsonError(res, 403, "This session belongs to someone else");
       s.lastSeen = Date.now();
+      const l = links.get(s.linkKey);
+      if (l) l.lastUsed = Date.now();
       return s.transport.handleRequest(req, res, req.body);
     }
 
@@ -111,23 +147,23 @@ export function startHttpServer(opts: HttpOptions = {}) {
     const mine = [...sessions.entries()].filter(([, s]) => s.keyId === caller.keyId).sort((a, b) => a[1].lastSeen - b[1].lastSeen);
     for (const [old] of mine.slice(0, Math.max(0, mine.length - perKey + 1))) closeSession(old);
 
-    // The consent card on the computer names the app asking; filled in once initialize says who it is
-    const client = new TechClient(relayUrl, "AI", relayToken);
-    const server = createAsctrlServer({ client, hosted: true, iconBaseUrl: publicUrl.href });
+    const [linkKey, shared] = linkFor(caller.keyId, req.auth?.clientId ?? "");
+    const { link } = shared;
+    const server = createAsctrlServer({ link, hosted: true, iconBaseUrl: publicUrl.href });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sid) => {
-        sessions.set(sid, { transport, client, keyId: caller.keyId, lastSeen: Date.now() });
+        sessions.set(sid, { transport, keyId: caller.keyId, linkKey, lastSeen: Date.now() });
       },
     });
+    // The consent card on the computer names the app asking; filled in once initialize says who it is
     server.server.oninitialized = () => {
       const v = server.server.getClientVersion();
       const name = v?.title || v?.name;
-      if (name) client.techName = name.slice(0, 48);
+      if (name && !link.client.connected) link.client.techName = name.slice(0, 48);
     };
     transport.onclose = () => {
       if (transport.sessionId) closeSession(transport.sessionId);
-      client.disconnect();
     };
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
@@ -168,6 +204,11 @@ export function startHttpServer(opts: HttpOptions = {}) {
   const sweep = setInterval(() => {
     const cutoff = Date.now() - idleMs;
     for (const [id, s] of sessions) if (s.lastSeen < cutoff) closeSession(id);
+    // A connection is let go once no session uses it and it has sat unused, or its key was revoked
+    const inUse = new Set([...sessions.values()].map((s) => s.linkKey));
+    const linkCutoff = Date.now() - linkIdleMs;
+    const liveKeys = new Set(store.listKeys().map((k) => k.id));
+    for (const [key, l] of links) if (!liveKeys.has(l.keyId) || (!inUse.has(key) && l.lastUsed < linkCutoff)) dropLink(key);
   }, 60_000);
   sweep.unref();
 
@@ -179,10 +220,11 @@ export function startHttpServer(opts: HttpOptions = {}) {
     new Promise<void>((resolve) => {
       clearInterval(sweep);
       for (const id of [...sessions.keys()]) closeSession(id);
+      for (const key of [...links.keys()]) dropLink(key);
       http.close(() => resolve());
       http.closeAllConnections();
     });
-  return { http, close, sessions, store, mcpUrl };
+  return { http, close, sessions, links, store, mcpUrl };
 }
 
 function log(s: string) {

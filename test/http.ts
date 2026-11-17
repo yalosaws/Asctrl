@@ -118,7 +118,21 @@ try {
     body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list" }),
   });
   check("unknown session → 404", bogus.status === 404, String(bogus.status));
+
+  // ---- A client that opens a session per call and ends it (Grok) keeps the computer ----
+  await a.t.terminateSession();
   await a.c.close();
+  const g = await mcp(alice.key);
+  const later = await g.c.callTool({ name: "observe", arguments: { query: "Next" } });
+  check("computer still connected in the next session", text(later).includes('fake observe {"query":"Next"}'), text(later));
+  await g.t.terminateSession();
+  await g.c.close();
+  check("ending sessions leaves the connection", srv.links.size === 1 && [...srv.links.values()][0].link.client.connected);
+  // Another client with its own sign-in gets its own connection
+  const other = await mcp(bob.key);
+  const none = await other.c.callTool({ name: "observe", arguments: {} });
+  check("another key has no computer until it connects", !!none.isError && text(none).includes("connect first"), text(none));
+  await other.c.close();
 
   // ---- OAuth, the way a connector signs in ----
   const reg = await (

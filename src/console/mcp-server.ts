@@ -97,9 +97,23 @@ function errorReply(e: unknown): Reply {
 
 const say = (text: string, isError = false): Reply => ({ content: [{ type: "text", text }], isError });
 
-export interface ServerOptions {
-  /** The connection to the driver this session drives; one per MCP session */
+/**
+ * Everything about driving one computer that must outlive an MCP session: the connection, the plans queued
+ * on it, and the code it was reached by. Clients that open a new session per tool call (Grok) would
+ * otherwise lose the computer between calls.
+ */
+export interface Link {
   client: TechClient;
+  runner: Runner;
+  /** Code of the last relay connection, so request_admin can reconnect by itself */
+  lastCode: string;
+}
+
+export const newLink = (client: TechClient): Link => ({ client, runner: new Runner(client), lastCode: "" });
+
+export interface ServerOptions {
+  /** The computer this session drives; shared by every session of the same caller on the HTTP server */
+  link: Link;
   /**
    * Running on a server rather than on the user's computer (the HTTP connector): there is no
    * "this computer" to drive, and the server's own files must stay out of reach.
@@ -109,8 +123,9 @@ export interface ServerOptions {
   iconBaseUrl?: string;
 }
 
-/** A fresh MCP server bound to one driver connection */
-export function createAsctrlServer({ client, hosted = false, iconBaseUrl }: ServerOptions): McpServer {
+/** A fresh MCP server bound to one link to a driver */
+export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: ServerOptions): McpServer {
+  const { client } = link;
   const server = new McpServer(
     { name: "asctrl", title: "Asctrl", version: "0.2.0", icons: orbIcons(iconBaseUrl) },
     { instructions: instructions(hosted) },
@@ -124,16 +139,13 @@ export function createAsctrlServer({ client, hosted = false, iconBaseUrl }: Serv
     }
   }
 
-  /** Code of the last relay connection, so request_admin can reconnect by itself */
-  let lastCode = "";
-
   /** Connect to a code; if their app is not online yet, keep retrying for waitSec seconds */
   async function connectWait(code: string, waitSec: number): Promise<Reply> {
     const deadline = Date.now() + waitSec * 1000;
     for (;;) {
       try {
         const host = await client.connect(code);
-        lastCode = code;
+        link.lastCode = code;
         return say(`Connected to ${host}. Start with run: a plan of steps by the text they act on.`);
       } catch (e) {
         const msg = (e as Error).message;
@@ -148,7 +160,7 @@ export function createAsctrlServer({ client, hosted = false, iconBaseUrl }: Serv
   async function connectLocal(waitSec: number, notPid?: number): Promise<Reply> {
     try {
       const host = await client.connectLocalDriver({ waitMs: Math.max(20, waitSec) * 1000, notPid, launch: notPid === undefined });
-      lastCode = "";
+      link.lastCode = "";
       return say(`Connected to this computer (${host}), directly. Start with run: a plan of steps by the text they act on.`);
     } catch (e) {
       return say(`Connection failed: ${(e as Error).message}`, true);
@@ -445,7 +457,7 @@ export function createAsctrlServer({ client, hosted = false, iconBaseUrl }: Serv
     (a) => forward("mouse", a),
   );
 
-  const runner = new Runner(client);
+  const { runner } = link;
 
   server.registerTool(
     "run",
@@ -600,7 +612,7 @@ export function createAsctrlServer({ client, hosted = false, iconBaseUrl }: Serv
         "or when a tool reports that the target window runs as administrator (Windows blocks input to it until the driver is elevated).",
     },
     async () => {
-      const code = lastCode;
+      const code = link.lastCode;
       const wasLocal = client.local;
       const oldPid = client.localPid;
       const r = await forward("request_admin", {});
@@ -792,5 +804,5 @@ export function createAsctrlServer({ client, hosted = false, iconBaseUrl }: Serv
 
 if (import.meta.main) {
   const client = new TechClient(process.env.RELAY_URL ?? DEFAULT_RELAY_URL, process.env.TECH_NAME ?? "AI", resolveRelayToken());
-  await createAsctrlServer({ client }).connect(new StdioServerTransport());
+  await createAsctrlServer({ link: newLink(client) }).connect(new StdioServerTransport());
 }
