@@ -1,5 +1,5 @@
 // Browser preview: a fake desktop plus every animation played in sequence.
-// Add ?state=ready|admin|reboot|connected|offline|connecting to the URL to stop at one state;
+// Add ?state=ready|admin|reboot|act|connected|offline|connecting to the URL to stop at one state;
 // in the console, demoFx("click", {...}) triggers a single effect.
 
 import { fxEnd, fxStart, fxStep, type FxEvent } from "./fx";
@@ -74,6 +74,7 @@ export async function runDemo(h: Hooks) {
       ready: { state: "ready", code: "482913" },
       admin: { state: "admin", ...T },
       reboot: { state: "reboot", ...T },
+      act: { state: "act", ...T, what: 'Click "Send" in "Inbox - Gmail"', level: "external" },
       connected: { state: "connected", techName: "Alex", code: "482913" },
     };
     h.render(map[only] ?? map.ready);

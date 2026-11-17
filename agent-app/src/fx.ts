@@ -222,10 +222,21 @@ function frameZone(r: R, hug = false) {
 /** The frame the agent gave (the work area or the window), or one round the given points */
 function frameFor(e: FxEvent, points: Pt[]): R | null {
   const given = rect(e.geo?.zone);
-  if (given && e.geo?.zoneIsWindow === true) frameZone(given, true);
-  else frameZone(given ? zoneOf([given]) : zoneOf(points.map((p) => ({ x: p.x, y: p.y, w: 0, h: 0 }))));
+  const hug = !!given && e.geo?.zoneIsWindow === true;
+  const want = hug ? given : given ? zoneOf([given]) : zoneOf(points.map((p) => ({ x: p.x, y: p.y, w: 0, h: 0 })));
+  // The same window cut another way (a fill frames its controls, a click the whole window): the frame already up
+  // stays, so the ball does not hop between two spots and the pointers keep their columns on every step
+  if (zone && points.every((p) => within(p, zone!.r)) && (holds(want, zone.r) || holds(zone.r, want))) {
+    window.clearTimeout(zone.timer);
+    return zone.r;
+  }
+  frameZone(want, hug);
   return zone?.r ?? null;
 }
+
+const within = (p: Pt, r: R) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+/** a holds b, give or take a few pixels */
+const holds = (a: R, b: R, slack = 4) => b.x >= a.x - slack && b.y >= a.y - slack && b.x + b.w <= a.x + a.w + slack && b.y + b.h <= a.y + a.h + slack;
 
 /** Let the frame go a while after the last action in it (long enough to span the pause between steps), then send the orb home */
 function unframeLater(ms = 8000, fadeMs = 420) {

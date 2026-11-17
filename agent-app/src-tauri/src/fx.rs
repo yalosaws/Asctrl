@@ -17,8 +17,20 @@ pub fn init(app: AppHandle) {
     let _ = APP.set(app);
 }
 
+/// ASCTRL_FX_LOG=<file>: every animation event is also appended there, one JSON line each with the ms since
+/// the driver started, to see what the overlay was told when its drawing looks wrong
+static FX_LOG: OnceLock<Option<(std::sync::Mutex<std::fs::File>, std::time::Instant)>> = OnceLock::new();
+
 /// Send an animation event to the overlay
 pub fn emit(v: Value) {
+    if let Some((f, t0)) = FX_LOG.get_or_init(|| {
+        let p = std::env::var_os("ASCTRL_FX_LOG")?;
+        let f = std::fs::OpenOptions::new().create(true).append(true).open(p).ok()?;
+        Some((std::sync::Mutex::new(f), std::time::Instant::now()))
+    }) {
+        use std::io::Write;
+        let _ = writeln!(f.lock().unwrap(), "{} {}", t0.elapsed().as_millis(), v);
+    }
     if let Some(app) = APP.get() {
         let _ = app.emit("fx", v);
     }
