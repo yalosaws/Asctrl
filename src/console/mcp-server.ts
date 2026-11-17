@@ -53,7 +53,7 @@ ${hosted ? CONNECT_HOSTED : CONNECT_LOCAL}
 3. When a plan fails, its report says where things stand (the window's controls, with references): re-plan from there. Look (observe, or screenshot for layout, images and programs that draw their own UI) only when the next plan needs something you can't guess, such as what a page lists.
 4. Single actions (click, type_text, set_value, …) are for one-off corrections. They take target, a reference ("e12") or the text the thing shows, or x and y on the latest screenshot, and their reply says what changed, so you rarely need to look again.
 
-Work that loops over rows or branches on what the screen shows is a program (exec): JavaScript the computer runs itself, which comes back only when it ends, asks, or an action fails (it then waits at that line for resume).
+Work that loops over rows or branches on what the screen shows is a program (exec): JavaScript the computer runs itself, which comes back only when it ends, asks, or an action fails (it then waits at that line for resume). Give it learn so it is kept as a skill, and look in skills first: a task done before runs again with skill and new args.
 
 For a screen drawn as a grid (a game board, a calendar), declare it in run's grids and name cells "board[r,c]"; {read: "board"} reads every cell. Never guess coordinates: use a target, or x and y you can see on the latest screenshot.`;
 
@@ -533,9 +533,12 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
         "shows(text) → true/false · read(window) → text · look(window) → observe's reply · tool(name, args) for any other tool · attempt(name, args) (returns a failure instead of stopping) · " +
         "ask(question, details) → your answer · sleep(ms) · log(…) · args (what you pass). opts are the tool's own arguments (window, nth, role, timeoutSec, …). " +
         "When an action fails, the program does not end: it stops at that line (stuck) and this call returns with the failure; fix what is needed with single actions, " +
-        "then resume it (retry, skip, instead, abort). Returns when the program ends, gets stuck, asks, or waitSec passes (then resume waits again).",
+        "then resume it (retry, skip, instead, abort). Returns when the program ends, gets stuck, asks, or waitSec passes (then resume waits again). " +
+        "Write it over args (the rows, the values) and give learn: a program that ends well is then kept as a skill on that computer, and skill: name runs it again with new args, no planning needed.",
       inputSchema: {
-        script: z.string().describe("The program's JavaScript"),
+        script: z.string().optional().describe("The program's JavaScript (or skill)"),
+        skill: z.string().optional().describe("Run this kept skill instead of a script (skills finds them); args are its args"),
+        learn: z.object({ name: z.string(), description: z.string() }).optional().describe("Keep the program as a skill when it ends well: a short name, and what it does in words a later search would use (the program, the task)"),
         args: z.unknown().optional().describe("Given to the program as args (rows to go through, values to fill in)"),
         waitSec: z.number().min(0).max(300).optional().describe("Wait up to this long before answering; default 30"),
         timeoutSec: z.number().min(1).max(3600).optional().describe("Longest the program may run in all; default 600"),
@@ -563,6 +566,25 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
       },
     },
     (a) => forward("resume", a),
+  );
+
+  server.registerTool(
+    "skills",
+    {
+      description:
+        "Programs that worked, kept on this computer to run again (exec with learn keeps one; exec with skill runs one). Lists them best first: by query (what the task is) " +
+        "and by how well each fits the window in front now (the buttons and fields of the windows it was made in). show: one skill's script and record; forget: drop one. " +
+        "Look here before writing a program for a task that may have been done before.",
+      inputSchema: {
+        query: z.string().optional().describe("What the task is, in words"),
+        window: z.union([z.string(), z.number()]).optional().describe("Fit against this window instead of the one in front"),
+        show: z.string().optional().describe("A skill's name: its script, args and how its runs went"),
+        forget: z.string().optional().describe("A skill's name: drop it"),
+        max: z.number().min(1).max(50).optional(),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    (a) => forward("skills", a),
   );
 
   // ---------- Programs, windows, clipboard ----------

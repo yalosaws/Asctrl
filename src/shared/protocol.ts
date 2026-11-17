@@ -24,6 +24,8 @@ export type ToolName =
   /** A program: runs on the computer, comes back when it ends or needs the AI (see ProgramData) */
   | "exec"
   | "resume"
+  /** Programs that worked, kept to run again (exec with learn / skill) */
+  | "skills"
   /** A plan (run) starts or ends: tells the overlay, does nothing else */
   | "plan_mark"
   // Programs, windows, clipboard
@@ -243,5 +245,9 @@ export interface ProgramData {
     /** Asking: what it asks */
     question: { question: unknown; details: unknown } | null;
     log: string[];
+    /** The skill it runs, if it is one */
+    skill: string | null;
+    /** What became of it as a skill (with learn) */
+    learned: string | null;
   };
 }

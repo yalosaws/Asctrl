@@ -20,6 +20,7 @@ mod pointer;
 pub mod popups;
 mod program;
 mod recover;
+mod skills;
 mod report;
 mod system;
 mod values;
@@ -464,6 +465,7 @@ async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         "batch" => batch::batch(ctx, args).await,
         "exec" => program::exec(ctx, args).await,
         "resume" => program::resume(ctx, args).await,
+        "skills" => skills::skills(ctx, args).await,
         // Programs, windows, clipboard
         "open_app" => apps::open_app(ctx, args).await,
         "focus_window" => apps::focus_window(ctx, args).await,

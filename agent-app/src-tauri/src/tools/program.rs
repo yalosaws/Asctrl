@@ -20,6 +20,8 @@
 //!   read(windowOrOpts) → text · look(windowOrOpts) → observe's reply · tool(name, args) · attempt(name, args)
 //!   ask(question, details) → the answer · sleep(ms) · log(…) · args (what exec was given)
 //! opts are the tool's own arguments (window, nth, role, timeoutSec, browser, …).
+//!
+//! `learn: { name, description }` keeps a program that ends well as a skill; `skill: name` runs one (see skills).
 
 use super::*;
 use rquickjs::{Context, Function, Runtime};
@@ -121,6 +123,8 @@ struct Status {
     /// What it asks, { question, details }
     question: Option<Value>,
     ended: Option<Instant>,
+    /// What became of the program as a skill (kept, or why not)
+    skill_note: Option<String>,
 }
 
 /// What the AI says to a waiting program
@@ -140,6 +144,12 @@ pub struct Program {
     changed: tokio::sync::Notify,
     decide: Mutex<Option<smpsc::Sender<Decision>>>,
     stop: Arc<AtomicBool>,
+    /// The skill it runs, if it is one
+    skill: Option<String>,
+    /// Keep it as a skill when it ends well: (name, description)
+    learn: Option<(String, String)>,
+    /// The windows it acted in, with their marks (for learning)
+    marks: Mutex<Vec<(isize, String, Vec<String>)>>,
 }
 
 impl Program {
@@ -262,6 +272,10 @@ impl Host {
             }
             // Stuck at this line until the AI says what to do
             let call = json!({ "tool": name, "args": args });
+            if let Some(sk) = &self.p.skill {
+                let why = out["error"].as_str().or(out["text"].as_str()).unwrap_or("").lines().next().unwrap_or("").to_string();
+                skills::record(sk, skills::Outcome::Stuck(format!("at line {}: {name} failed: {}", line.map_or("?".into(), |l| l.to_string()), uia::clip(&why, 160))));
+            }
             self.p.set(|s| {
                 s.phase = Phase::Stuck;
                 s.call = Some(call);
@@ -377,12 +391,40 @@ fn secs(args: &Value, key: &str, def: f64, min: f64, max: f64) -> Duration {
 
 /// Start a program
 pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
-    let src = str_arg(args, "script").to_string();
+    let input = args.get("args").cloned().unwrap_or(Value::Null);
+    let skill = match str_arg(args, "skill").trim() {
+        "" => None,
+        name => match skills::get(name) {
+            Some(s) => Some(s),
+            None => return fail(format!("There is no skill \"{name}\" (skills lists them)")),
+        },
+    };
+    let src = match &skill {
+        Some(s) if str_arg(args, "script").trim().is_empty() => s.script.clone(),
+        Some(_) => return fail("Give skill or script, not both"),
+        None => str_arg(args, "script").to_string(),
+    };
     if src.trim().is_empty() {
         return fail("script is empty");
     }
+    if let Some(s) = &skill {
+        let missing: Vec<&String> = s.params.iter().filter(|k| input.get(k.as_str()).is_none_or(Value::is_null)).collect();
+        if !missing.is_empty() {
+            return fail(format!("The skill \"{}\" takes args {}: missing {}", s.name, s.params.join(", "), missing.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+    }
+    let learn = match args.get("learn").filter(|v| !v.is_null()) {
+        None => None,
+        Some(l) => {
+            let name = l["name"].as_str().unwrap_or("").trim().to_string();
+            let description = l["description"].as_str().unwrap_or("").trim().to_string();
+            if name.is_empty() || description.is_empty() {
+                return fail("learn: give { name, description } (what the skill does, in words a later search would use)");
+            }
+            Some((name, description))
+        }
+    };
     let Some(me) = ctx.me.upgrade() else { return fail("no session to run a program in") };
-    let input = args.get("args").cloned().unwrap_or(Value::Null);
     let wait = secs(args, "waitSec", 30.0, 0.0, 300.0);
     let life = secs(args, "timeoutSec", 600.0, 1.0, 3600.0);
     let p = {
@@ -397,7 +439,17 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
             ps.map.remove(id);
         }
         ps.next += 1;
-        let p = Arc::new(Program { id: ps.next, started: Instant::now(), status: Mutex::default(), changed: tokio::sync::Notify::new(), decide: Mutex::new(None), stop: Arc::new(AtomicBool::new(false)) });
+        let p = Arc::new(Program {
+            id: ps.next,
+            started: Instant::now(),
+            status: Mutex::default(),
+            changed: tokio::sync::Notify::new(),
+            decide: Mutex::new(None),
+            stop: Arc::new(AtomicBool::new(false)),
+            skill: skill.as_ref().map(|s| s.name.clone()),
+            learn,
+            marks: Mutex::default(),
+        });
         ps.map.insert(p.id, p.clone());
         p
     };
@@ -411,6 +463,17 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
             let mut n = 0;
             while let Some(r) = trx.recv().await {
                 n += 1;
+                // Learning: the make-up of each window it acts in, as it is before the first action there
+                if p.learn.is_some() {
+                    let h = match winmgr::find_arg(r.args.get("window")) {
+                        Ok(Some(h)) => h.0 as isize,
+                        _ => winmgr::foreground(),
+                    };
+                    let known = { p.marks.lock().unwrap().iter().any(|(x, _, _)| *x == h) || p.marks.lock().unwrap().len() >= 4 };
+                    if h != 0 && !known && let Ok(Some((app, m))) = tokio::task::spawn_blocking(move || skills::mark(h)).await {
+                        p.marks.lock().unwrap().push((h, app, m));
+                    }
+                }
                 let out = batch::run_step(&me, &r.tool, &r.args, format!("p{}-{n}", p.id), false).await;
                 let _ = r.reply.send(as_js(&out));
             }
@@ -422,12 +485,41 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
         let pt = p.clone();
         let spawned = std::thread::Builder::new().name(format!("asctrl-program-{}", p.id)).stack_size(8 << 20).spawn(move || {
             let p = pt;
+            if let Some(sk) = &p.skill {
+                skills::record(sk, skills::Outcome::Began);
+            }
+            let params: Vec<String> = input.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
             let host = Host { p: p.clone(), tools: ttx, decisions: drx, deadline };
             let stop = p.stop.clone();
             let end = run_js(&src, &input, deadline, stop, move |op, a| host.call(op, a));
             let timed_out = Instant::now() > deadline;
+            // Ended well: count it for its skill, and keep it as one when asked
+            let mut note = None;
+            if matches!(end, End::Done(_)) {
+                if let Some(sk) = &p.skill {
+                    skills::record(sk, skills::Outcome::Done);
+                }
+                if let Some((name, description)) = &p.learn {
+                    let marks = p.marks.lock().unwrap().clone();
+                    let mut apps: Vec<String> = vec![];
+                    for (_, a, _) in &marks {
+                        if !a.is_empty() && !apps.contains(a) {
+                            apps.push(a.clone());
+                        }
+                    }
+                    let s = skills::Skill { name: name.clone(), description: description.clone(), script: src.clone(), params: params.clone(), apps, marks: marks.into_iter().map(|(_, _, m)| m).collect(), ..Default::default() };
+                    note = Some(match skills::learn(s) {
+                        Ok(true) => format!("Kept as the skill \"{name}\", in place of the one of that name"),
+                        Ok(false) => format!("Kept as the skill \"{name}\""),
+                        Err(e) => format!("Not kept as a skill: {e}"),
+                    });
+                }
+            } else if p.learn.is_some() {
+                note = Some("Not kept as a skill: it did not end well".into());
+            }
             p.set(|s| {
                 s.ended = Some(Instant::now());
+                s.skill_note = note;
                 match end {
                     End::Done(v) => {
                         s.phase = Phase::Done;
@@ -549,6 +641,9 @@ async fn report(p: &Program, wait: Duration) -> Output {
         }
         Phase::Running => text += &format!("\nStill running{at}: resume (id) waits for it again; resume (id, stop: true) stops it."),
     }
+    if let Some(n) = &s.skill_note {
+        text += &format!("\n{n}.");
+    }
     if !s.log.is_empty() {
         let from = s.log.len().saturating_sub(20);
         text += &format!("\nLog{}:\n{}", if from > 0 { format!(" (last 20 of {})", s.log.len()) } else { String::new() }, s.log.iter().skip(from).cloned().collect::<Vec<_>>().join("\n"));
@@ -557,6 +652,7 @@ async fn report(p: &Program, wait: Duration) -> Output {
         "program": {
             "id": p.id, "state": s.phase.as_str(), "line": s.line, "actions": s.actions, "result": s.result, "error": s.error,
             "call": s.call, "failure": s.failure, "question": s.question, "log": s.log.iter().cloned().collect::<Vec<_>>(),
+            "skill": p.skill, "learned": s.skill_note,
         }
     });
     Output { ok: !matches!(s.phase, Phase::Failed | Phase::Stopped), text: Some(text), data: Some(data), ..Default::default() }
