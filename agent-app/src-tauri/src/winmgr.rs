@@ -82,6 +82,19 @@ pub fn pid_of(handle: isize) -> u32 {
     pid
 }
 
+/// Whether process `pid` is still running
+pub fn process_alive(pid: u32) -> bool {
+    use windows::Win32::System::Threading::GetExitCodeProcess;
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code).is_ok();
+        let _ = CloseHandle(h);
+        // STILL_ACTIVE
+        ok && code == 259
+    }
+}
+
 pub fn exists(handle: isize) -> bool {
     handle != 0 && unsafe { IsWindow(Some(hwnd(handle))) }.as_bool()
 }

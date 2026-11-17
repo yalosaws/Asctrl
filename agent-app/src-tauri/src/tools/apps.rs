@@ -43,6 +43,14 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
     if target.is_empty() {
         return fail("target is empty");
     }
+    match str_arg(args, "browser") {
+        "" | "default" => {}
+        "asctrl" => {
+            let _turn = acting().await;
+            return super::web::open(ctx, &target).await;
+        }
+        other => return fail(format!("browser: \"{other}\" is not one of default, asctrl")),
+    }
     let a = str_arg(args, "args").to_string();
     let cwd = match str_arg(args, "cwd") {
         "" => String::new(),

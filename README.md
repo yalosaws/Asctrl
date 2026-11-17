@@ -40,6 +40,8 @@ It is built around three ideas:
 | `agent-app/src-tauri/src/screen.rs` | Telling whether the screen reacted to an action and when it has settled |
 | `agent-app/src-tauri/src/events.rs` | The timeline: windows shown, hidden, destroyed, brought to the front, renamed, as Windows reports them (`ASCTRL_NO_EVENTS=1` turns it off) |
 | `agent-app/src-tauri/src/wgc.rs` | Capturing one window as it draws itself (Windows Graphics Capture), for reading a window others cover |
+| `agent-app/src-tauri/src/cdp.rs` | Asctrl's own browser (Chrome, else Edge, with a profile of its own) and the Chrome DevTools Protocol connection to it |
+| `agent-app/src-tauri/src/tools/web.rs` | The page channel: in that browser, text targets found in the page and acted on through the browser; waits on the page's own events |
 | `agent-app/src-tauri/src/link.rs` | The local link and the relay link; running tool calls |
 | `agent-app/src/` | The overlay UI |
 | `src/console/` | MCP server (`mcp-server.ts`, stdio; `mcp-http.ts`, HTTP connector with `auth.ts`) and the controller library (`TechClient`) |
@@ -135,7 +137,7 @@ Then give the computer's 6-digit code: *Connect with code 123456 and …*. One c
 | | `set_value` | Make a control hold a value whatever kind it is — text, on/off, a chosen item, a number, expanded or not — and verify it. Idempotent. `fields` fills a whole form in one call |
 | | `scroll` / `drag` | Wheel over a target; press on one target, move to another, release |
 | | `mouse` | Low-level steps: `move` (hover), `down` / `up` (fine drags), `look` (relative motion for game cameras) |
-| Programs | `open_app` | Open a program, file, folder, URL or `ms-settings:` page; waits for its window (for a URL, until the page has loaded) and lists its controls |
+| Programs | `open_app` | Open a program, file, folder, URL or `ms-settings:` page; waits for its window (for a URL, until the page has loaded) and lists its controls. `browser: "asctrl"` opens a URL in Asctrl's own browser, where text targets are clicked and typed into through the page, without the mouse, even while other windows cover it |
 | | `focus_window` | Switch to / minimize / maximize / restore / close / move and resize a window |
 | | `clipboard` | With `text`: put it on the clipboard. Without: its text, the list of copied files, or a note that it holds an image |
 | Shell | `run_powershell` | A persistent session (directory and variables carry over); `background: true` for long jobs; `reset: true` for a fresh session. System information, processes and the event log are a command away |
@@ -288,6 +290,12 @@ How long single actions take and how much of it is waiting for the screen afterw
 
 ```bash
 node test/settle.ts
+```
+
+The page channel in Asctrl's own browser (opens it and Calculator for about 20 seconds; the browser keeps its profile in `%LOCALAPPDATA%\Asctrl\browser`):
+
+```bash
+node test/p3.ts
 ```
 
 Speed and reliability on a real desktop (moves the mouse and types for about 20 seconds; leave the computer alone):

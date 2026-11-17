@@ -1,0 +1,39 @@
+<!doctype html>
+<!-- A page for test/p3.ts: controls named every way a page names them, one that only takes real input, one far
+     below the fold, one that changes the page a moment later, two with the same name, and a link to another page. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Asctrl Page Test</title>
+<style>
+  body { font: 16px system-ui, sans-serif; margin: 24px; }
+  .fancy { display: inline-block; padding: 6px 12px; background: #def; cursor: pointer; }
+  #log { margin: 12px 0; padding: 8px; background: #f4f4f4; min-height: 4em; white-space: pre-line; }
+</style>
+</head>
+<body>
+<h1>Asctrl Page Test</h1>
+<div id="log">Log:</div>
+<p>
+  <button id="save">Save</button>
+  <span class="fancy" onclick="say('fancy done')">Fancy action</span>
+  <button id="trusted">Trusted only</button>
+  <button id="late">Late change</button>
+  <button onclick="say('first duplicate')">Duplicate</button>
+  <button onclick="say('second duplicate')">Duplicate</button>
+</p>
+<p><input placeholder="Search here" size="30"></p>
+<p><label for="email">Email address</label> <input id="email" size="30"></p>
+<p><select aria-label="Size" onchange="say('size ' + this.value)"><option>Small</option><option>Large</option></select></p>
+<p><a href="p3b.html">Next page</a></p>
+<div style="margin-top: 3000px"><button onclick="say('deep pressed')">Deep button</button></div>
+<p>END-OF-PAGE-MARKER</p>
+<script>
+  let saves = 0;
+  function say(s) { document.getElementById('log').textContent += '\n' + s; }
+  document.getElementById('save').onclick = () => say('saved ' + ++saves);
+  document.getElementById('trusted').onclick = e => say(e.isTrusted ? 'trusted click' : 'untrusted click');
+  document.getElementById('late').onclick = () => setTimeout(() => say('late done'), 200);
+</script>
+</body>
+</html>

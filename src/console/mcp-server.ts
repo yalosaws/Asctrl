@@ -466,7 +466,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
         "Carry out a plan: steps named by what they act on, written without looking first. The whole plan is checked before any of it runs. Returns at once (queued), " +
         "with the reports of plans that finished since; write the next plan while this one runs, or call progress. A plan that fails cancels the plans queued behind it, " +
         "and the next run call returns that failure instead of queueing. " +
-        "Steps: {open: program/URL} · {click: text} · {press: text} (UI Automation, no mouse) · {fill: {label: value, …}} · {type: text, into?: label, enter?} · " +
+        "Steps: {open: program/URL, browser?: \"asctrl\" (Asctrl's own browser: steps act in the page, without the mouse)} · {click: text} · {press: text} (UI Automation, no mouse) · {fill: {label: value, …}} · {type: text, into?: label, enter?} · " +
         "{keys: \"ctrl+s\"} · {expect: text shown on success, gone?, timeoutSec?} · {check: a claim about the window (\"the email was sent\"), judged by the decision model, timeoutSec?} · " +
         "{await: window title, gone?} · {scroll: up|down|left|right, target?, amount?} · {read: grid name} · " +
         "{watch: {x0, y0, x1, y1} (a region on the latest screenshot), until: \">= 141 | <= 133\" or text, everyMs?, confirm? (readings in a row, default 2), timeoutSec? (default 60, up to 600)}: reads the number there " +
@@ -526,9 +526,13 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     {
       description:
         "Open a program, file, folder or URL as if double-clicked: notepad, control, taskmgr, ms-settings:display, C:\\Users\\xx\\Desktop\\report.docx, https://example.com. " +
-        "Waits for its window, brings it to the front, and lists its controls with references. Runs with the user's current privileges.",
+        "Waits for its window, brings it to the front, and lists its controls with references. Runs with the user's current privileges. " +
+        "browser: \"asctrl\" opens a URL in Asctrl's own browser instead (Chrome or Edge with a profile of its own, kept between runs: the user's usual sign-ins are not there): " +
+        "in it, text targets are found in the page itself and clicked and typed into through the browser, without moving the mouse and even while other windows cover it; " +
+        "it waits for the page to load, and read_text on its window reads the whole page.",
       inputSchema: {
         target: z.string().describe("Program name, path, URL, or a link such as ms-settings:"),
+        browser: z.enum(["default", "asctrl"]).optional().describe("For a URL: the user's default browser (default), or asctrl, Asctrl's own browser driven through the page"),
         args: z.string().optional().describe("Command-line arguments"),
         cwd: z.string().optional().describe("Working directory"),
         timeoutSec: z.number().min(0).max(60).optional().describe("How long to wait for its window; default 5"),

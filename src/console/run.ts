@@ -87,7 +87,7 @@ export const STEP_TOOLS = [
 
 /** Every kind of step: the key that names it, and the other keys it takes (besides window) */
 const KINDS: Record<string, string[]> = {
-  open: ["args", "cwd", "timeoutSec"],
+  open: ["args", "cwd", "timeoutSec", "browser"],
   click: ["role", "nth", "count", "button", "timeoutSec"],
   press: ["role", "nth", "timeoutSec"],
   fill: ["timeoutSec"],
@@ -848,7 +848,7 @@ export function translate(s: Step, w: Record<string, unknown>, grids: Record<str
     const { tool, ...rest } = s;
     return { tool: tool as ToolName, args: { ...w, ...quiet, ...rest }, what: `${tool} ${JSON.stringify(rest).slice(0, 80)}`, kind: "click" };
   }
-  if (s.open !== undefined) return { tool: "open_app", args: { target: s.open, ...pass(["args", "cwd", "timeoutSec"]), ...quiet }, what: `open ${s.open}`, kind: "click" };
+  if (s.open !== undefined) return { tool: "open_app", args: { target: s.open, ...pass(["args", "cwd", "timeoutSec", "browser"]), ...quiet }, what: `open ${s.open}`, kind: "click" };
   if (s.click !== undefined) return { tool: "click", args: { ...w, ...aim(s.click), ...pass(["role", "nth", "count", "button"]), ...quiet }, what: `click "${s.click}"`, kind: "click" };
   if (s.press !== undefined) return { tool: "element_action", args: { ...w, ...aim(s.press), action: "press", ...pass(["role", "nth"]), ...quiet }, what: `press "${s.press}"`, kind: "click" };
   if (s.fill !== undefined) {

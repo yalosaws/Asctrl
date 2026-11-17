@@ -6,6 +6,7 @@
 mod events;
 mod admin;
 mod capture;
+mod cdp;
 mod files;
 mod fx;
 mod input;

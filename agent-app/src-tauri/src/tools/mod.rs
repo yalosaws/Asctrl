@@ -24,6 +24,7 @@ mod system;
 mod values;
 mod wait;
 mod watch;
+mod web;
 
 use base64::Engine;
 use serde::Serialize;
@@ -421,18 +422,31 @@ async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         // Looking
         "observe" => look::observe(ctx, args).await,
         "screenshot" => look::screenshot(ctx, args).await,
-        "read_text" => look::read_text(ctx, args).await,
+        "read_text" => match web::read_text(args).await {
+            Some(o) => o,
+            None => look::read_text(ctx, args).await,
+        },
         "wait_for" => wait::wait_for(ctx, args).await,
         "read_grid" => grid::read_grid(ctx, args).await,
         "watch" => watch::watch(ctx, args).await,
         // Acting
-        "click" => pointer::click(ctx, args).await,
+        // In Asctrl's own browser, text targets go through the page first (see web)
+        "click" => match web::click(ctx, args).await {
+            Some(o) => o,
+            None => pointer::click(ctx, args).await,
+        },
         "scroll" => pointer::scroll(ctx, args).await,
         "drag" => pointer::drag(ctx, args).await,
         "mouse" => pointer::mouse(ctx, args).await,
-        "type_text" => keys::type_text(ctx, args).await,
+        "type_text" => match web::type_text(ctx, args).await {
+            Some(o) => o,
+            None => keys::type_text(ctx, args).await,
+        },
         "press_keys" => keys::press_keys(ctx, args).await,
-        "set_value" => values::set_value(ctx, args).await,
+        "set_value" => match web::set_value(ctx, args).await {
+            Some(o) => o,
+            None => values::set_value(ctx, args).await,
+        },
         "element_action" => values::element_action(ctx, args).await,
         "batch" => batch::batch(ctx, args).await,
         // Programs, windows, clipboard
