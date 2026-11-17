@@ -101,7 +101,10 @@ pub fn start(args: &Value) {
             let Ok(Some(found)) = tokio::task::spawn_blocking(look).await else { continue };
             BUSY.store(true, Ordering::SeqCst);
             // Its turn among the plan's actions: after the step in progress, before the next
-            let turn = acting().await;
+            let Ok(turn) = acting().await else {
+                BUSY.store(false, Ordering::SeqCst);
+                continue;
+            };
             let line = tokio::task::spawn_blocking(move || dismiss(found)).await.unwrap_or_else(|e| e.to_string());
             drop(turn);
             if let Some(w) = WATCH.lock().unwrap().as_mut() {

@@ -303,10 +303,11 @@ fn unlock_foreground() {
     const MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
     let key = |vk, flags| INPUT {
         r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: crate::presence::TAG } },
     };
     let down = KEYBD_EVENT_FLAGS(0);
     let keys = [key(VK_MENU, down), key(MASK, down), key(MASK, KEYEVENTF_KEYUP), key(VK_MENU, KEYEVENTF_KEYUP)];
+    crate::presence::ours();
     unsafe { SendInput(&keys, size_of::<INPUT>() as i32) };
 }
 

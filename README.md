@@ -38,6 +38,7 @@ It is built around three ideas:
 | `agent-app/src-tauri/src/tools/` | The tools: `look` (observe, screenshot, read_text), `locate` (targets), `pointer` / `keys` / `values` (actions), `report` (what a reply says), `wait`, `grid` (read_grid), `batch` (runs a plan's steps), `popups` (dismissed while a plan runs), `apps`, `system` |
 | `agent-app/src-tauri/src/uia.rs` | UI Automation: scenes, stable references, change detection between readings, operating controls |
 | `agent-app/src-tauri/src/screen.rs` | Telling whether the screen reacted to an action and when it has settled |
+| `agent-app/src-tauri/src/presence.rs` | Whose input is whose: Asctrl marks its own; any other mouse or keyboard input is a person, and actions that need the real mouse, keyboard or focus wait until they stop (`ASCTRL_YIELD_MAX`, `ASCTRL_NO_YIELD=1`) |
 | `agent-app/src-tauri/src/events.rs` | The timeline: windows shown, hidden, destroyed, brought to the front, renamed, as Windows reports them (`ASCTRL_NO_EVENTS=1` turns it off) |
 | `agent-app/src-tauri/src/wgc.rs` | Capturing one window as it draws itself (Windows Graphics Capture), for reading a window others cover |
 | `agent-app/src-tauri/src/cdp.rs` | Asctrl's own browser (Chrome, else Edge, with a profile of its own) and the Chrome DevTools Protocol connection to it |
@@ -314,6 +315,12 @@ Skills (opens the bench window for about 15 seconds; keeps its skills in a file 
 node test/p5.ts
 ```
 
+The person at the computer comes first, and work that needs no mouse goes on beside them (opens the bench window and Asctrl's browser for about 40 seconds; the test moves the mouse itself, with `test/jiggle.ps1`):
+
+```bash
+node test/p6.ts
+```
+
 Speed and reliability on a real desktop (moves the mouse and types for about 20 seconds; leave the computer alone):
 
 ```bash
@@ -338,7 +345,7 @@ node test/run.ts
 
 What has been shown, on one Windows 11 machine (2560x1440 at 150 %, one display):
 
-- Unit tests 47 / 47, end-to-end 59 / 59, plan tests 17 / 17, HTTP connector 32 / 32, benchmark 14 / 14 tasks in 11.2 s.
+- Unit tests 48 / 48, end-to-end 59 / 59, plan tests 17 / 17, HTTP connector 32 / 32, benchmark 14 / 14 tasks in 11.2 s.
 - The HTTP connector added in claude.ai (signed in with OAuth), then used from the desktop app to connect to a real computer through the hosted relay and read its screen.
 - Per call: pressing a control directly 140–215 ms, a real mouse click about 160 ms, switching windows about 300 ms, `observe` about 35 ms, a screenshot about 50 ms.
 - An AI (Claude, through these tools) solved Extreme sudokus on sudoku.com: the page opened and waited for, the board read with `read` in under 50 ms (a banner over it reported, not misread), and 53–58 cells filled in about 6 s with the pace chosen per step. Gmail compose-and-discard runs as a plan.

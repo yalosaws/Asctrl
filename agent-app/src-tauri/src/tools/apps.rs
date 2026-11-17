@@ -46,7 +46,10 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
     match str_arg(args, "browser") {
         "" | "default" => {}
         "asctrl" => {
-            let _turn = acting().await;
+            let _turn = match acting().await {
+                Ok(t) => t,
+                Err(o) => return o,
+            };
             return super::web::open(ctx, &target).await;
         }
         other => return fail(format!("browser: \"{other}\" is not one of default, asctrl")),
@@ -60,7 +63,10 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
         },
     };
     let wait = Duration::from_secs_f64(args.get("timeoutSec").and_then(Value::as_f64).unwrap_or(5.0).clamp(0.0, 60.0));
-    let turn = acting().await;
+    let turn = match acting().await {
+        Ok(t) => t,
+        Err(o) => return o,
+    };
     let r = tokio::task::spawn_blocking(move || {
         let opened = winmgr::open(&target, &a, &cwd, wait)?;
         // A web page: the window comes up (or its title changes) long before the page is there
@@ -126,7 +132,10 @@ pub(super) async fn focus_window(ctx: &Ctx, args: &Value) -> Output {
         return fail("Give both x and y to move a window");
     }
     let fx_id = fx::call_id();
-    let turn = acting().await;
+    let turn = match acting().await {
+        Ok(t) => t,
+        Err(o) => return o,
+    };
     let r = tokio::task::spawn_blocking(move || -> Result<Did, String> {
         let hw = winmgr::hwnd(h);
         let at = winmgr::rect_of(h).map(|(l, t, r, b)| ((l + r) / 2, (t + b) / 2));

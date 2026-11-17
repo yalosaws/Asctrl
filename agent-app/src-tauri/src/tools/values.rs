@@ -134,7 +134,10 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Output {
         }
     }
     let (pace, call) = (Pace::current(), fx::call_id());
-    let turn = acting().await;
+    let turn = match acting().await {
+        Ok(t) => t,
+        Err(o) => return o,
+    };
     let r = tokio::task::spawn_blocking(move || -> Result<(Did, bool), Miss> {
         // The screen is compared from just before the first control is touched, in the window it is in
         let mut before: Option<Option<screen::Before>> = None;
@@ -199,7 +202,10 @@ pub(super) async fn element_action(ctx: &Ctx, args: &Value) -> Output {
     let action = str_arg(args, "action").to_string();
     let value = str_arg(args, "value").to_string();
     let (pace, call) = (Pace::current(), fx::call_id());
-    let turn = acting().await;
+    let turn = match acting().await {
+        Ok(t) => t,
+        Err(o) => return o,
+    };
     let r = tokio::task::spawn_blocking(move || -> Result<Did, Miss> {
         let loc = locate::resolve(&ask)?;
         let Some(live) = &loc.live else {

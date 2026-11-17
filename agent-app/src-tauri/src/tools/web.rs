@@ -108,6 +108,30 @@ const SETTLE_MAX: Duration = Duration::from_millis(1500);
 /// Longest wait for a page it went on to load
 const LOAD_MAX: Duration = Duration::from_secs(10);
 
+/// One action at a time in each tab. Not the turn to act with the real mouse and keyboard: a page action uses
+/// neither, nor the focus, so it goes ahead while the mouse works elsewhere, while another tab is busy, and
+/// while the person at the computer uses it.
+static LANES: std::sync::Mutex<Vec<(String, Arc<tokio::sync::Mutex<()>>)>> = std::sync::Mutex::new(Vec::new());
+
+async fn lane(tab: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let m = {
+        let mut lanes = LANES.lock().unwrap();
+        match lanes.iter().find(|(t, _)| t == tab) {
+            Some((_, m)) => m.clone(),
+            None => {
+                // Tabs long closed: their lanes are free, drop them
+                if lanes.len() >= 64 {
+                    lanes.retain(|(_, m)| Arc::strong_count(m) > 1);
+                }
+                let m = Arc::new(tokio::sync::Mutex::new(()));
+                lanes.push((tab.to_string(), m.clone()));
+                m
+            }
+        }
+    };
+    m.lock_owned().await
+}
+
 struct Page {
     c: Arc<Conn>,
     tab: Tab,
@@ -316,7 +340,7 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Option<Output> {
     }
     let (want, nth, wait) = text_target(ctx, args)?;
     let p = page(args).await?;
-    let turn = acting().await;
+    let turn = lane(&p.tab.id).await;
     let k = find(&p, &want, nth, "click", wait).await?;
     if let Some(o) = covered(ctx, &k).await {
         return Some(o);
@@ -391,7 +415,7 @@ pub(super) async fn type_text(ctx: &Ctx, args: &Value) -> Option<Output> {
     }
     let (want, nth, wait) = text_target(ctx, args)?;
     let p = page(args).await?;
-    let turn = acting().await;
+    let turn = lane(&p.tab.id).await;
     let k = find(&p, &want, nth, "field", wait).await?;
     let _ = p.eval(ARM).await;
     let t0 = Instant::now();
@@ -421,7 +445,7 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Option<Output> {
     }
     let (want, nth, wait) = text_target(ctx, args)?;
     let p = page(args).await?;
-    let turn = acting().await;
+    let turn = lane(&p.tab.id).await;
     let k = find(&p, &want, nth, "field", wait).await?;
     let _ = p.eval(ARM).await;
     let t0 = Instant::now();

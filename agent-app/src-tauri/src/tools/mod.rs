@@ -303,12 +303,64 @@ async fn blocking(f: impl FnOnce() -> Result<String, String> + Send + 'static) -
 /// interleave (one moving the pointer while the other presses, or typing into the other's window)
 static ACTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Take the turn to act. A paste puts the clipboard back a moment after it returns; whatever acts next
-/// waits for that first, so it never sees (or overwrites) the borrowed clipboard.
-async fn acting() -> tokio::sync::MutexGuard<'static, ()> {
+/// Someone else has stopped using the mouse and keyboard once they have been still this long
+const PERSON_IDLE: Duration = Duration::from_millis(1000);
+/// Longest an action waits for them before it gives up (ASCTRL_YIELD_MAX, seconds)
+fn yield_max() -> Duration {
+    Duration::from_secs_f64(std::env::var("ASCTRL_YIELD_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0f64).clamp(0.0, 600.0))
+}
+
+/// How long actions waited for the person at the computer, by call, for their replies
+static YIELDED: Mutex<Vec<(String, Duration)>> = Mutex::new(Vec::new());
+
+/// Take the turn to act with the real mouse, keyboard or focus. Someone else using them comes first: wait
+/// until they have stopped for a moment (see presence); Err when they never did. A paste puts the clipboard
+/// back a moment after it returns; whatever acts next waits for that first, so it never sees (or overwrites)
+/// the borrowed clipboard.
+async fn acting() -> Result<tokio::sync::MutexGuard<'static, ()>, Output> {
     let turn = ACTING.lock().await;
+    let start = std::time::Instant::now();
+    let max = yield_max();
+    while let Some(ago) = crate::presence::others_ago().filter(|a| *a < PERSON_IDLE) {
+        if start.elapsed() >= max {
+            let mut out = fail(format!(
+                "Not done: the person at the computer kept using the mouse or keyboard ({} s), and they come first, so nothing was done. Try again in a while, or ask them; actions in Asctrl's own browser don't need the mouse and go ahead meanwhile.",
+                max.as_secs()
+            ));
+            out.data = Some(serde_json::json!({ "busy": true }));
+            return Err(out);
+        }
+        tokio::time::sleep((PERSON_IDLE - ago).min(Duration::from_millis(200)).max(Duration::from_millis(20))).await;
+    }
+    let waited = start.elapsed();
+    if waited >= Duration::from_millis(100) {
+        let mut y = YIELDED.lock().unwrap();
+        y.retain(|(_, d)| *d > Duration::ZERO);
+        if y.len() > 64 {
+            y.remove(0);
+        }
+        y.push((fx::call_id(), waited));
+    }
     let _ = tokio::task::spawn_blocking(keys::clipboard_settled).await;
-    turn
+    Ok(turn)
+}
+
+/// A call's reply says when it waited for the person at the computer
+fn note_yield(out: &mut Output) {
+    let id = fx::call_id();
+    let waited = {
+        let mut y = YIELDED.lock().unwrap();
+        let i = y.iter().position(|(c, _)| *c == id);
+        i.map(|i| y.remove(i).1)
+    };
+    if let Some(w) = waited {
+        let note = format!(" (It first waited {:.1} s for the person at the computer to stop using the mouse and keyboard.)", w.as_secs_f64());
+        match (&mut out.text, &mut out.error) {
+            (Some(t), _) => t.push_str(&note),
+            (None, Some(e)) => e.push_str(&note),
+            _ => {}
+        }
+    }
 }
 
 /// No change within this long after a mouse or keyboard action: nothing happened (or not yet)
@@ -423,11 +475,13 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
 /// Boxed so batch can run tools from inside a tool. A watch argument frames the region input steps wait on.
 fn run_tool<'a>(ctx: &'a Ctx, tool: &'a str, args: &'a Value) -> BoxedRun<'a> {
     Box::pin(async move {
-        match watch_arg(ctx, args) {
+        let mut out = match watch_arg(ctx, args) {
             Err(e) => fail(e),
             Ok(Some(area)) => WATCH.scope(area, dispatch(ctx, tool, args)).await,
             Ok(None) => dispatch(ctx, tool, args).await,
-        }
+        };
+        note_yield(&mut out);
+        out
     })
 }
 
@@ -471,7 +525,10 @@ async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         "focus_window" => apps::focus_window(ctx, args).await,
         // With text: put it on the clipboard; without: say what is on it
         "clipboard" => {
-            let _turn = acting().await;
+            let _turn = match acting().await {
+                Ok(t) => t,
+                Err(o) => return o,
+            };
             match args.get("text").and_then(Value::as_str).map(str::to_string) {
                 Some(t) => blocking(move || winmgr::set_clipboard_text(&t).map(|_| format!("Copied to clipboard ({} chars)", t.chars().count()))).await,
                 None => blocking(winmgr::clipboard_describe).await,

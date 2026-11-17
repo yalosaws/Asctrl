@@ -17,6 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const BLOCKED: &str = "Input was blocked by Windows: the target window may be running as administrator (call request_admin, then reconnect), or the lock screen / UAC prompt is showing";
 
 fn send(inputs: &[INPUT]) -> Result<(), String> {
+    crate::presence::ours();
     let n = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
     if n as usize == inputs.len() { Ok(()) } else { Err(BLOCKED.into()) }
 }
@@ -29,7 +30,7 @@ fn mouse_at(flags: MOUSE_EVENT_FLAGS, data: i32, dx: i32, dy: i32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
-            mi: MOUSEINPUT { dx, dy, mouseData: data as u32, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+            mi: MOUSEINPUT { dx, dy, mouseData: data as u32, dwFlags: flags, time: 0, dwExtraInfo: crate::presence::TAG },
         },
     }
 }
@@ -111,11 +112,12 @@ pub fn elevation_block(hwnd: HWND, what: &str) -> Result<(), String> {
 fn key(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: crate::presence::TAG } },
     }
 }
 
 fn move_to(x: i32, y: i32) -> Result<(), String> {
+    crate::presence::ours();
     // SetCursorPos refused by UIPI reports "The operation completed successfully"; the code is useless
     unsafe { SetCursorPos(x, y) }.map_err(|_| BLOCKED.to_string())
 }

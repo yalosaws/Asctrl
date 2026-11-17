@@ -81,7 +81,10 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
         return fail(format!("mode: \"{mode}\" is not one of auto, mouse, direct"));
     }
     let (pace, call) = (Pace::current(), fx::call_id());
-    let turn = acting().await;
+    let turn = match acting().await {
+        Ok(t) => t,
+        Err(o) => return o,
+    };
     let r = tokio::task::spawn_blocking(move || -> Result<Did, Miss> {
         let loc = locate::resolve(&ask)?;
         let plain = matches!(button.as_str(), "" | "left") && count == 1 && mods.trim().is_empty();
@@ -180,7 +183,10 @@ pub(super) async fn scroll(ctx: &Ctx, args: &Value) -> Output {
     let amount = int_arg(args, "amount", 3, 1, 100) as i32;
     let frame = ctx.frame();
     let (pace, call) = (Pace::current(), fx::call_id());
-    let turn = acting().await;
+    let turn = match acting().await {
+        Ok(t) => t,
+        Err(o) => return o,
+    };
     let r = tokio::task::spawn_blocking(move || -> Result<Did, Miss> {
         let (point, hwnd, desc, note) = match &ask {
             Some(a) => {
@@ -224,7 +230,10 @@ pub(super) async fn drag(ctx: &Ctx, args: &Value) -> Output {
     let button = str_arg(args, "button").to_string();
     let ms = (args.get("seconds").and_then(Value::as_f64).unwrap_or(0.4).clamp(0.05, 10.0) * 1000.0) as u64;
     let (pace, call) = (Pace::current(), fx::call_id());
-    let turn = acting().await;
+    let turn = match acting().await {
+        Ok(t) => t,
+        Err(o) => return o,
+    };
     let r = tokio::task::spawn_blocking(move || -> Result<Did, Miss> {
         // Both ends are found before the button goes down: a drag must never stop half-way looking for its end
         let a = locate::resolve(&from)?;
@@ -267,7 +276,10 @@ pub(super) async fn mouse(ctx: &Ctx, args: &Value) -> Output {
     }
     let look_ms = (args.get("seconds").and_then(Value::as_f64).unwrap_or(0.2).clamp(0.0, 5.0) * 1000.0) as u64;
     let (pace, call) = (Pace::current(), fx::call_id());
-    let turn = acting().await;
+    let turn = match acting().await {
+        Ok(t) => t,
+        Err(o) => return o,
+    };
     let r = tokio::task::spawn_blocking(move || -> Result<Did, Miss> {
         if action == "look" {
             let before = pace.before(None);

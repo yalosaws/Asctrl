@@ -219,7 +219,10 @@ pub(super) async fn type_text(ctx: &Ctx, args: &Value) -> Output {
         (None, Err(e)) => return fail(e),
     };
     let (pace, call) = (Pace::current(), fx::call_id());
-    let turn = acting().await;
+    let turn = match acting().await {
+        Ok(t) => t,
+        Err(o) => return o,
+    };
     let r = tokio::task::spawn_blocking(move || -> Result<Did, Miss> {
         let mut at = None;
         let mut scene = None;
@@ -295,7 +298,10 @@ pub(super) async fn press_keys(ctx: &Ctx, args: &Value) -> Output {
         Err(e) => return fail(e),
     };
     let pace = Pace::current();
-    let turn = acting().await;
+    let turn = match acting().await {
+        Ok(t) => t,
+        Err(o) => return o,
+    };
     let r = tokio::task::spawn_blocking(move || -> Result<Did, String> {
         if let Some(h) = window {
             winmgr::bring_to_front(winmgr::hwnd(h))?;

@@ -14,6 +14,7 @@ mod jobs;
 mod link;
 mod ocr;
 mod overlay;
+mod presence;
 mod screen;
 mod shell;
 mod tools;
@@ -219,6 +220,8 @@ pub fn run() {
         .setup(|app| {
             // The timeline of the desktop's windows, before anything waits on it
             events::start();
+            // Whose input is whose: the person at the computer comes first
+            presence::start();
             overlay::setup(app.handle());
             fx::init(app.handle().clone());
             tauri::async_runtime::spawn(link::relay_loop(app.handle().clone()));

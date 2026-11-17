@@ -1,0 +1,124 @@
+//! Someone else at the keyboard: the person at the computer, or anyone reaching it through another program (a
+//! remote desktop tool). Their mouse and keyboard come first: an action that needs the real mouse, keyboard
+//! or focus waits until they have stopped for a moment (see `tools::acting`), instead of fighting them over
+//! the pointer. Actions that need none of these (a page in Asctrl's own browser) go ahead meanwhile.
+//!
+//! The input Asctrl sends carries a mark of its own (`TAG`, in each input's extra info); low-level hooks see
+//! every mouse and keyboard event and note the time of the last one without it. Moving the pointer with
+//! SetCursorPos sends no marked input, so a move right after Asctrl's own input is taken as Asctrl's.
+//! `ASCTRL_NO_YIELD=1` turns this off.
+
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// The mark on Asctrl's own input ("ASCT")
+pub const TAG: usize = 0x4153_4354;
+
+/// A move this soon after Asctrl's own input is the pointer it moved
+const OWN_MOVE: Duration = Duration::from_millis(120);
+
+static EPOCH: OnceLock<Instant> = OnceLock::new();
+/// Milliseconds since EPOCH (+1, so 0 means never) of the last input by someone else, and of Asctrl's own
+static OTHERS: AtomicU64 = AtomicU64::new(0);
+static OURS: AtomicU64 = AtomicU64::new(0);
+static LIVE: AtomicBool = AtomicBool::new(false);
+
+fn now() -> u64 {
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// Asctrl is about to send input (or move the pointer)
+pub fn ours() {
+    OURS.store(now(), Ordering::SeqCst);
+}
+
+/// An input event seen by the hooks: someone else's unless it carries the mark, or is a move right after ours
+fn seen(tagged: bool, is_move: bool) {
+    if tagged {
+        return;
+    }
+    let t = now();
+    if is_move && t.saturating_sub(OURS.load(Ordering::SeqCst)) < OWN_MOVE.as_millis() as u64 {
+        return;
+    }
+    OTHERS.store(t, Ordering::SeqCst);
+}
+
+/// How long ago someone else last used the mouse or keyboard; None when never (or not watched)
+pub fn others_ago() -> Option<Duration> {
+    if !LIVE.load(Ordering::SeqCst) {
+        return None;
+    }
+    match OTHERS.load(Ordering::SeqCst) {
+        0 => None,
+        t => Some(Duration::from_millis(now().saturating_sub(t))),
+    }
+}
+
+/// Put the hooks in, on a thread of their own that pumps their messages
+pub fn start() {
+    if std::env::var("ASCTRL_NO_YIELD").is_ok_and(|v| v == "1") || LIVE.load(Ordering::SeqCst) {
+        return;
+    }
+    let _ = now();
+    let _ = std::thread::Builder::new().name("asctrl-presence".into()).spawn(hook_thread);
+}
+
+#[cfg(windows)]
+fn hook_thread() {
+    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+
+    unsafe extern "system" fn on_mouse(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
+        if code >= 0 {
+            let m = unsafe { &*(l.0 as *const MSLLHOOKSTRUCT) };
+            seen(m.dwExtraInfo == TAG, w.0 as u32 == WM_MOUSEMOVE);
+        }
+        unsafe { CallNextHookEx(None, code, w, l) }
+    }
+
+    unsafe extern "system" fn on_key(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
+        if code >= 0 {
+            let k = unsafe { &*(l.0 as *const KBDLLHOOKSTRUCT) };
+            seen(k.dwExtraInfo == TAG, false);
+        }
+        unsafe { CallNextHookEx(None, code, w, l) }
+    }
+
+    unsafe {
+        let module = GetModuleHandleW(None).ok().map(|m| m.into());
+        let (Ok(_m), Ok(_k)) = (SetWindowsHookExW(WH_MOUSE_LL, Some(on_mouse), module, 0), SetWindowsHookExW(WH_KEYBOARD_LL, Some(on_key), module, 0)) else { return };
+        LIVE.store(true, Ordering::SeqCst);
+        // Low-level hooks are called through this thread's message queue: it must keep pumping, and quickly
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hook_thread() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_input_without_the_mark_counts_and_not_the_pointer_we_just_moved() {
+        LIVE.store(true, Ordering::SeqCst);
+        OTHERS.store(0, Ordering::SeqCst);
+        seen(true, false);
+        assert_eq!(others_ago(), None, "our own input");
+        ours();
+        seen(false, true);
+        assert_eq!(others_ago(), None, "a move right after ours is the pointer we moved");
+        seen(false, false);
+        assert!(others_ago().is_some_and(|a| a < Duration::from_millis(50)), "a key or click without the mark is someone else's");
+        LIVE.store(false, Ordering::SeqCst);
+        assert_eq!(others_ago(), None, "not watched: nobody to wait for");
+    }
+}
