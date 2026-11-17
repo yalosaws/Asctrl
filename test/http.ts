@@ -13,6 +13,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { startRelay } from "../src/relay/server.ts";
 import { startHttpServer } from "../src/console/mcp-http.ts";
+// The tools by their own names (the five-tool surface has a check of its own in test/tools.ts)
+process.env.ASCTRL_TOOLS = "full";
 import { AuthStore } from "../src/console/auth.ts";
 
 const RELAY_PORT = 18797;
@@ -190,7 +192,7 @@ try {
 
   // ---- The stdio server, on the user's own machine, keeps everything ----
   const sc = new Client({ name: "smoke", version: "1.0.0" });
-  await sc.connect(new StdioClientTransport({ command: process.execPath, args: [path.resolve(import.meta.dirname, "../src/console/mcp-server.ts")] }));
+  await sc.connect(new StdioClientTransport({ command: process.execPath, args: [path.resolve(import.meta.dirname, "../src/console/mcp-server.ts")], env: { ...(process.env as Record<string, string>), ASCTRL_TOOLS: "full" } }));
   const local = (await sc.listTools()).tools.map((t) => t.name);
   check("stdio server keeps file copying and local connect", local.includes("upload_file") && (sc.getInstructions() ?? "").includes("no arguments = this computer"), `${local.length} tools`);
   await sc.close();

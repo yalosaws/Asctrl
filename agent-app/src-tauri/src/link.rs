@@ -16,6 +16,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
+/// The protocol this driver speaks (src/shared/protocol.ts PROTOCOL)
+pub const PROTOCOL: u32 = 2;
+
 /// The agent can sit idle for a long time while the person reads the code out. Without traffic a home
 /// router forgets the connection and the code silently stops working, so ping the relay regularly;
 /// a ping that can't be delivered also makes a dead connection surface as an error.
@@ -124,13 +127,13 @@ fn dispatch(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: &Value) {
                     return;
                 }
                 let before = tools::fx_before(&st.ctx, &tool, &args);
-                let _ = app.emit("fx", json!({ "phase": "start", "id": id, "tool": tool, "args": fx_args(&args), "geo": before }));
+                crate::fx::emit(json!({ "phase": "start", "id": id, "tool": tool, "args": fx_args(&args), "geo": before }));
                 let out = fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args)).await;
                 drop(driving);
                 let after = tools::fx_after(&st.ctx, &tool, &before, &out);
                 let shown: String = out.body().chars().take(6000).collect();
                 let quiet = tools::probe_missed(&args, &out);
-                let _ = app.emit("fx", json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "quiet": quiet, "text": shown, "geo": after }));
+                crate::fx::emit(json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "quiet": quiet, "text": shown, "geo": after }));
                 reply(&tx, &id, out);
             });
         }
@@ -187,7 +190,7 @@ async fn relay_once(app: &AppHandle) -> Result<(), String> {
 
     let code = st.code.lock().unwrap().clone();
     let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "unknown".into());
-    let _ = tx.send(json!({ "type": "agent_hello", "code": code, "hostname": hostname }).to_string());
+    let _ = tx.send(json!({ "type": "agent_hello", "code": code, "hostname": hostname, "protocol": PROTOCOL }).to_string());
     set_relay(app, RelayState::Ready);
 
     let result = loop {
@@ -324,7 +327,7 @@ async fn local_session(app: AppHandle, stream: tokio::net::TcpStream, token: Str
         return;
     }
     let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this computer".into());
-    let paired = json!({ "type": "paired", "hostname": hostname, "local": true, "admin": crate::is_elevated() }).to_string();
+    let paired = json!({ "type": "paired", "hostname": hostname, "local": true, "admin": crate::is_elevated(), "protocol": PROTOCOL }).to_string();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let (stop, mut stopped) = oneshot::channel::<()>();

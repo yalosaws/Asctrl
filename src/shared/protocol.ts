@@ -24,6 +24,8 @@ export type ToolName =
   /** A program: runs on the computer, comes back when it ends or needs the AI (see ProgramData) */
   | "exec"
   | "resume"
+  /** What happened to the windows lately (the timeline) */
+  | "timeline"
   /** Programs that worked, kept to run again (exec with learn / skill) */
   | "skills"
   /** A plan (run) starts or ends: tells the overlay, does nothing else */
@@ -47,11 +49,20 @@ export type ToolName =
 
 // ---- Handshake ----
 
+/**
+ * The version of this protocol: the driver says which it speaks when it registers (and when a controller on the
+ * same machine connects), and the controller is told. 2: typed data in replies, programs, the five-tool surface.
+ * A driver that says nothing is older than 2.
+ */
+export const PROTOCOL = 2;
+
 /** agent -> relay: register, with the code shown to the user on screen */
 export interface AgentHello {
   type: "agent_hello";
   code: string;
   hostname: string;
+  /** The protocol it speaks (see PROTOCOL) */
+  protocol?: number;
 }
 
 /** tech -> relay: ask to connect to a code */
@@ -89,6 +100,8 @@ export interface Paired {
   local?: boolean;
   /** The driver runs as administrator */
   admin?: boolean;
+  /** The protocol the driver speaks (see PROTOCOL); absent: older than 2 */
+  protocol?: number;
 }
 
 /** relay -> either side: an error, or the other side disconnected */

@@ -11,7 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { TechClient } from "./tech-client.ts";
 import { Runner, STEP_TOOLS } from "./run.ts";
-import { DEFAULT_RELAY_URL, type AdminData, type ToolName, type ToolResult } from "../shared/protocol.ts";
+import { DEFAULT_RELAY_URL, type AdminData, type ProgramData, type ToolName, type ToolResult } from "../shared/protocol.ts";
 
 /**
  * The relay token normally arrives via RELAY_TOKEN (expanded from ASCTRL_RELAY_TOKEN in .mcp.json).
@@ -45,6 +45,11 @@ function resolveRelayToken(): string | undefined {
 const CONNECT_LOCAL = "1. connect (no arguments = this computer; a 6-digit code = a remote one).";
 const CONNECT_HOSTED =
   "1. connect with the 6-digit code shown in the Asctrl app on the computer to drive (ask the user for it if you don't have it); the user clicks Allow there.";
+
+/** In compact mode: how the tools named above are reached */
+const COMPACT_NOTE = `
+
+Five tools: connect, query (looking: observe, screenshot, read_text, wait_for, progress, skills, files), act (doing: run a plan, click, type_text, set_value, press_keys, open_app, focus_window, shell and files, ...), exec and resume. query and act take the name of what they do and its arguments: act { do: "run", args: { steps: [...] } }, query { what: "observe", args: { window: "Notepad" } }.`;
 
 const instructions = (hosted: boolean) => `Asctrl lets you see and operate a Windows computer. Work like this:
 
@@ -123,19 +128,59 @@ export interface ServerOptions {
   hosted?: boolean;
   /** Where the icons are served (ending in /), for a server on the web; otherwise they are sent inline */
   iconBaseUrl?: string;
+  /**
+   * Which tools the AI sees. compact (default): five — connect, query (looking), act (doing), exec and resume —
+   * with every other tool reached through query or act by its name. full: every tool on its own.
+   * ASCTRL_TOOLS sets it when this isn't given.
+   */
+  tools?: "compact" | "full";
 }
 
 /** A fresh MCP server bound to one link to a driver */
-export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: ServerOptions): McpServer {
+export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }: ServerOptions): McpServer {
   const { client } = link;
+  const compact = (tools ?? process.env.ASCTRL_TOOLS ?? "compact") !== "full";
   const server = new McpServer(
     { name: "asctrl", title: "Asctrl", version: "0.2.0", icons: orbIcons(iconBaseUrl) },
-    { instructions: instructions(hosted) },
+    { instructions: instructions(hosted) + (compact ? COMPACT_NOTE : "") },
   );
+  // Compact: the tools below are kept here, not shown; query and act reach them by name (see the end)
+  type Kept = { description: string; schema: Record<string, z.ZodType>; annotations?: unknown; handler: (a: Record<string, unknown>) => Promise<Reply> };
+  const kept = new Map<string, Kept>();
+  const keep = ((name: string, cfg: { description?: string; inputSchema?: Record<string, z.ZodType>; annotations?: unknown }, handler: Kept["handler"]) => {
+    kept.set(name, { description: cfg.description ?? "", schema: cfg.inputSchema ?? {}, annotations: cfg.annotations, handler });
+    return undefined;
+  }) as unknown as McpServer["registerTool"];
+  const reg: Pick<McpServer, "registerTool"> = { registerTool: keep };
 
   async function forward(tool: ToolName, args: Record<string, unknown>): Promise<Reply> {
     try {
       return toContent(await client.call(tool, args));
+    } catch (e) {
+      return errorReply(e);
+    }
+  }
+
+  /** exec / resume: a program stuck on words that fit several controls is decided by the decision model first
+   *  (as a plan's step is), and resumed, so the AI hears of it only when the model isn't sure */
+  async function program(tool: "exec" | "resume", args: Record<string, unknown>): Promise<Reply> {
+    try {
+      let r = await client.call(tool, args);
+      const notes: string[] = [];
+      for (let i = 0; i < 6; i++) {
+        const p = (r.data as ProgramData | undefined)?.program;
+        if (p?.state !== "stuck") break;
+        const d = await link.runner.decideForProgram(p);
+        if (!d) break;
+        notes.push(d.note);
+        r = await client.call("resume", { id: p.id, ...d.resume, waitSec: args.waitSec });
+      }
+      if (notes.length) {
+        const head = `Decided on the computer's side, without you:\n${notes.map((n) => `- ${n}`).join("\n")}\n\n`;
+        if (r.ok) r = { ...r, text: head + (r.text ?? "") };
+        else r = { ...r, error: head + (r.error ?? "") };
+      }
+      return toContent(r);
     } catch (e) {
       return errorReply(e);
     }
@@ -161,7 +206,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
 
   async function connectLocal(waitSec: number, notPid?: number): Promise<Reply> {
     try {
-      const host = await client.connectLocalDriver({ waitMs: Math.max(20, waitSec) * 1000, notPid, launch: notPid === undefined });
+      const host = await client.connectLocalDriver({ waitMs: Math.max(20, waitSec) * 1000, notPid, launch: notPid === undefined && process.env.ASCTRL_NO_LAUNCH !== "1" });
       link.lastCode = "";
       return say(`Connected to this computer (${host}), directly. Start with run: a plan of steps by the text they act on.`);
     } catch (e) {
@@ -169,7 +214,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     }
   }
 
-  server.registerTool(
+  reg.registerTool(
     "connect",
     {
       description: hosted
@@ -189,7 +234,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
       code ? connectWait(code, waitSec) : hosted ? Promise.resolve(say("Give the 6-digit code shown in the Asctrl app on the computer", true)) : connectLocal(waitSec),
   );
 
-  server.registerTool("disconnect", { description: "Disconnect from the current computer." }, async () => {
+  reg.registerTool("disconnect", { description: "Disconnect from the current computer." }, async () => {
     client.disconnect();
     return say("Disconnected");
   });
@@ -220,7 +265,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
 
   // ---------- Looking ----------
 
-  server.registerTool(
+  reg.registerTool(
     "observe",
     {
       description:
@@ -243,16 +288,18 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("observe", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "screenshot",
     {
       description:
         "Capture the screen as an image. x and y of later actions refer to the latest screenshot. By default the whole screen (all displays); " +
         "window captures just one window (brought to the front if covered) and display just one display: both are sharper and cost less. " +
         "x0, y0, x1, y1: that part of the latest screenshot again at full resolution, to read small text and icons (for reading only: x and y keep referring to the screenshot it came from). " +
-        "Use observe to read and find things; a screenshot to see layout, images, colour, or programs that draw their own UI.",
+        "Use observe to read and find things; a screenshot to see layout, images, colour, or programs that draw their own UI. " +
+        "marks: true boxes and numbers each control of the window on the picture (12 is the reference e12), to point at what you see by its number.",
       inputSchema: {
         window: windowArg.optional(),
+        marks: z.boolean().optional().describe("Box and number each control of the window (the number is its reference: 12 is e12)"),
         display: z.number().int().min(0).max(16).optional().describe("Display number (from 1); 0 or omitted means all"),
         x0: coord("Region top-left x").optional(),
         y0: coord("Region top-left y").optional(),
@@ -265,7 +312,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("screenshot", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "read_text",
     {
       description:
@@ -289,7 +336,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("read_text", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "wait_for",
     {
       description:
@@ -316,7 +363,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
 
   // ---------- Acting ----------
 
-  server.registerTool(
+  reg.registerTool(
     "click",
     {
       description:
@@ -324,9 +371,12 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
         "A control of an ordinary program is pressed directly through UI Automation — exact, works even when partly covered, and the user's pointer stays put; " +
         "web pages, games, canvases and plain coordinates get a real mouse click (the control is scrolled into view and its window brought forward first). " +
         "A click by x,y is refused, with a fresh screenshot, if another window has since appeared over that point or the window was moved away or resized; if the window only moved, the click moves with it. " +
-        "The reply says whether the screen reacted and what changed, so a miss shows at once.",
+        "The reply says whether the screen reacted and what changed, so a miss shows at once. " +
+        "What sends something out (Send, Submit, Pay, Place order) or can't be undone (Delete, Discard) may wait for the person at the computer to allow it, as set on that computer; " +
+        "a refusal says nothing was done. effect declares such a click when its words don't say so.",
       inputSchema: {
         ...pointing,
+        effect: z.enum(["reversible", "irreversible", "external"]).optional().describe("What the click does, when its words don't say: irreversible (can't be undone) or external (sends, pays, publishes). Only raises the level the computer works out itself"),
         button: z.enum(["left", "right", "middle"]).optional().describe("Default left"),
         count: z.number().int().min(1).max(3).optional().describe("2 = double-click, 3 = triple-click (selects a line); default 1"),
         modifiers: z.string().optional().describe("Keys held while clicking, e.g. ctrl, shift, ctrl+shift"),
@@ -338,7 +388,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("click", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "type_text",
     {
       description:
@@ -360,7 +410,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("type_text", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "press_keys",
     {
       description:
@@ -378,7 +428,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("press_keys", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "set_value",
     {
       description:
@@ -401,7 +451,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => (a.fields || a.value !== undefined ? forward("set_value", a) : Promise.resolve(say("Give value (with target), or fields", true))),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "scroll",
     {
       description:
@@ -418,7 +468,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("scroll", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "drag",
     {
       description: "Press a mouse button on one thing, move to another and release: from / to (references or text) or fromX, fromY / toX, toY. Both ends are found before the button goes down.",
@@ -439,7 +489,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("drag", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "mouse",
     {
       description:
@@ -461,14 +511,14 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
 
   const { runner } = link;
 
-  server.registerTool(
+  reg.registerTool(
     "run",
     {
       description:
         "Carry out a plan: steps named by what they act on, written without looking first. The whole plan is checked before any of it runs. Returns at once (queued), " +
         "with the reports of plans that finished since; write the next plan while this one runs, or call progress. A plan that fails cancels the plans queued behind it, " +
         "and the next run call returns that failure instead of queueing. " +
-        "Steps: {open: program/URL, browser?: \"asctrl\" (Asctrl's own browser: steps act in the page, without the mouse)} · {click: text} · {press: text} (UI Automation, no mouse) · {fill: {label: value, …}} · {type: text, into?: label, enter?} · " +
+        "Steps: {open: program/URL, browser?: \"asctrl\" | \"user\" (Asctrl's own browser, or the user's through the extension: steps act in the page, without the mouse)} · {click: text} · {press: text} (UI Automation, no mouse) · {fill: {label: value, …}} · {type: text, into?: label, enter?} · " +
         "{keys: \"ctrl+s\"} · {expect: text shown on success, gone?, timeoutSec?} · {check: a claim about the window (\"the email was sent\"), judged by the decision model, timeoutSec?} · " +
         "{await: window title, gone?} · {scroll: up|down|left|right, target?, amount?} · {read: grid name} · " +
         "{watch: {x0, y0, x1, y1} (a region on the latest screenshot), until: \">= 141 | <= 133\" or text, everyMs?, confirm? (readings in a row, default 2), timeoutSec? (default 60, up to 600)}: reads the number there " +
@@ -506,7 +556,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     },
   );
 
-  server.registerTool(
+  reg.registerTool(
     "progress",
     {
       description: "How queued plans went: a report for each that finished since last asked (✓/✗ per step, and where things stand after a failure), and where the running one is.",
@@ -521,7 +571,22 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     },
   );
 
-  server.registerTool(
+  reg.registerTool(
+    "timeline",
+    {
+      description:
+        "What happened to the windows lately, from the computer's own timeline (no looking needed): what came up, went away, came to the front, was minimized or restored, with how long ago. " +
+        "Answers \"what just popped up?\" or \"did the dialog close?\" at once.",
+      inputSchema: {
+        seconds: z.number().min(1).max(3600).optional().describe("How far back; default 60"),
+        window: z.string().optional().describe("Only windows whose title or program has this"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    (a) => forward("timeline", a),
+  );
+
+  reg.registerTool(
     "exec",
     {
       description:
@@ -529,57 +594,65 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
         "with loops, ifs and variables, so a long or branching task needs no round trip per step. It has no files, network or processes of its own: " +
         "only these calls, each a tool run as you would run it (replies are { ok, text, error, data }): " +
         "click(target, opts) · press(target) · type(target, text, opts) (target null: where the focus is) · fill({ label: value, … }) · keys(\"ctrl+s\") · " +
-        "open(appOrUrl, opts) (opts.browser: \"asctrl\" for Asctrl's own browser) · waitFor(text, opts) · waitGone(text) · expect(text, opts) (stops there if it doesn't show in 5 s) · " +
+        "open(appOrUrl, opts) (opts.browser: \"asctrl\" for Asctrl's own browser, \"user\" for the user's through the extension) · waitFor(text, opts) · waitGone(text) · expect(text, opts) (stops there if it doesn't show in 5 s) · " +
         "shows(text) → true/false · read(window) → text · look(window) → observe's reply · tool(name, args) for any other tool · attempt(name, args) (returns a failure instead of stopping) · " +
-        "ask(question, details) → your answer · sleep(ms) · log(…) · args (what you pass). opts are the tool's own arguments (window, nth, role, timeoutSec, …). " +
+        "ask(question, details) → your answer · sleep(ms) · log(…) · on(text, press) (a popup showing text that may turn up at any point: press that in it, in between steps) · " +
+        "until(() => condition, { timeoutSec, everyMs }) (waits until it is true, e.g. until(() => shows('Done')) or a number read() gives) · args (what you pass). opts are the tool's own arguments (window, nth, role, timeoutSec, …). " +
         "When an action fails, the program does not end: it stops at that line (stuck) and this call returns with the failure; fix what is needed with single actions, " +
-        "then resume it (retry, skip, instead, abort). Returns when the program ends, gets stuck, asks, or waitSec passes (then resume waits again). " +
-        "Write it over args (the rows, the values) and give learn: a program that ends well is then kept as a skill on that computer, and skill: name runs it again with new args, no planning needed.",
+        "then resume it (retry, skip, instead, code, abort); being stuck also lists the windows that came up and went while it ran. Returns when the program ends, gets stuck, asks, or waitSec passes (then resume waits again). " +
+        "Write it over args (the rows, the values) and give learn: a program that ends well is then kept as a skill on that computer, and skill: name runs it again with new args, no planning needed. " +
+        "A program that ends well without learn is kept too, named after what it did (learn: false keeps it from being kept). A skill runs only when the window in front looks like one it was made in (force: true runs it anyway); " +
+        "one put right with instead (the same action aimed at another control) is changed to match once that run ends well.",
       inputSchema: {
         script: z.string().optional().describe("The program's JavaScript (or skill)"),
         skill: z.string().optional().describe("Run this kept skill instead of a script (skills finds them); args are its args"),
-        learn: z.object({ name: z.string(), description: z.string() }).optional().describe("Keep the program as a skill when it ends well: a short name, and what it does in words a later search would use (the program, the task)"),
+        learn: z.union([z.object({ name: z.string(), description: z.string() }), z.literal(false)]).optional().describe("Keep the program as a skill when it ends well: a short name, and what it does in words a later search would use (the program, the task). false: don't keep it at all"),
+        force: z.boolean().optional().describe("With skill: run it even if the window in front doesn't look like one it was made in"),
         args: z.unknown().optional().describe("Given to the program as args (rows to go through, values to fill in)"),
         waitSec: z.number().min(0).max(300).optional().describe("Wait up to this long before answering; default 30"),
         timeoutSec: z.number().min(1).max(3600).optional().describe("Longest the program may run in all; default 600"),
       },
     },
-    (a) => forward("exec", a),
+    (a) => program("exec", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "resume",
     {
       description:
         "Answer a program that is stuck or asking, or wait for a running one again. Stuck on an action: retry (after you fixed things), skip (value: what the program gets back instead), " +
-        "instead { tool, args } (do this action in its place), or abort (the program gets an error it may catch). Asking: answer. stop: true ends it. Nothing: wait and report where it stands.",
+        "instead { tool, args } (do this action in its place), code (JavaScript run in the program in the action's place, with its calls and args: several steps, a loop; what it returns is what the action returns), " +
+        "or abort (the program gets an error it may catch). Asking: answer. stop: true ends it. Nothing: wait and report where it stands.",
       inputSchema: {
         id: z.union([z.number(), z.string()]).describe("The program's id, from exec"),
         retry: z.boolean().optional(),
         skip: z.boolean().optional(),
         value: z.unknown().optional().describe("With skip: what the action returns to the program"),
         instead: z.object({ tool: z.string(), args: z.record(z.string(), z.unknown()).optional() }).optional(),
+        code: z.string().optional().describe("Stuck: JavaScript to run in the program in the action's place (its calls and args are there; return what the action should return)"),
         abort: z.union([z.boolean(), z.string()]).optional().describe("true, or the error message the program gets"),
         answer: z.unknown().optional().describe("The answer to its question"),
         stop: z.boolean().optional(),
         waitSec: z.number().min(0).max(300).optional().describe("Wait up to this long before answering; default 30"),
       },
     },
-    (a) => forward("resume", a),
+    (a) => program("resume", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "skills",
     {
       description:
         "Programs that worked, kept on this computer to run again (exec with learn keeps one; exec with skill runs one). Lists them best first: by query (what the task is) " +
         "and by how well each fits the window in front now (the buttons and fields of the windows it was made in). show: one skill's script and record; forget: drop one. " +
-        "Look here before writing a program for a task that may have been done before.",
+        "Look here before writing a program for a task that may have been done before. export and import carry skills to another computer.",
       inputSchema: {
         query: z.string().optional().describe("What the task is, in words"),
         window: z.union([z.string(), z.number()]).optional().describe("Fit against this window instead of the one in front"),
         show: z.string().optional().describe("A skill's name: its script, args and how its runs went"),
         forget: z.string().optional().describe("A skill's name: drop it"),
+        export: z.string().optional().describe("A skill's name, or \"all\": as JSON, to import on another computer"),
+        import: z.unknown().optional().describe("Skills as export gave them (the JSON, or the list): kept here, replacing any of the same name"),
         max: z.number().min(1).max(50).optional(),
       },
       annotations: { readOnlyHint: false },
@@ -589,7 +662,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
 
   // ---------- Programs, windows, clipboard ----------
 
-  server.registerTool(
+  reg.registerTool(
     "open_app",
     {
       description:
@@ -597,11 +670,13 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
         "Waits for its window, brings it to the front, and lists its controls with references. Runs with the user's current privileges. " +
         "browser: \"asctrl\" opens a URL in Asctrl's own browser instead (Chrome or Edge with a profile of its own, kept between runs: the user's usual sign-ins are not there): " +
         "in it, text targets are found in the page itself and clicked and typed into through the browser, without moving the mouse and even while other windows cover it; " +
-        "it waits for the page to load, and read_text on its window reads the whole page.",
+        "it waits for the page to load, and read_text on its window reads the whole page. " +
+        "browser: \"user\" opens it in a new tab of the user's own browser, with their sign-ins, worked the same way through Asctrl's extension (once the user has installed it; pages already open in that browser are worked the same way).",
       inputSchema: {
         target: z.string().describe("Program name, path, URL, or a link such as ms-settings:"),
-        browser: z.enum(["default", "asctrl"]).optional().describe("For a URL: the user's default browser (default), or asctrl, Asctrl's own browser driven through the page"),
+        browser: z.enum(["default", "asctrl", "user"]).optional().describe("For a URL: the user's default browser as a double-click would (default); asctrl, Asctrl's own browser driven through the page; user, the user's own browser driven through the page by Asctrl's extension"),
         args: z.string().optional().describe("Command-line arguments"),
+        electron: z.boolean().optional().describe("An Electron program (VS Code, Slack, Teams, Discord, …): start it with a debugging port so its windows are worked through their pages, as in a browser, without the mouse. It must not be running already. The port listens on this computer only, while the program runs"),
         cwd: z.string().optional().describe("Working directory"),
         timeoutSec: z.number().min(0).max(60).optional().describe("How long to wait for its window; default 5"),
         after,
@@ -610,7 +685,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("open_app", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "focus_window",
     {
       description:
@@ -628,7 +703,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("focus_window", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "clipboard",
     {
       description: "The clipboard. With text: put it there (paste it afterwards with press_keys ctrl+v). Without: what is on it, its text, the list of copied files, or a note that it holds an image.",
@@ -639,7 +714,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
 
   // ---------- Shell and system ----------
 
-  server.registerTool(
+  reg.registerTool(
     "run_powershell",
     {
       description:
@@ -661,7 +736,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("run_powershell", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "job",
     {
       description: "A background job (run_powershell background): its status and the output since the last look (all: everything), or stop: true to stop it with the processes it started. Without jobId: every job.",
@@ -674,7 +749,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("job", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "request_admin",
     {
       description:
@@ -706,7 +781,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     },
   );
 
-  server.registerTool(
+  reg.registerTool(
     "restart_computer",
     {
       description:
@@ -727,7 +802,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
 
   const remotePath = z.string().describe("Path on the computer; supports ~ and %ENV_VARS%; relative paths are resolved against the user's home");
 
-  server.registerTool(
+  reg.registerTool(
     "read_file",
     {
       description:
@@ -743,7 +818,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("read_file", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "write_file",
     {
       description: "Write a text file on the computer (overwrites it entirely, creates it and any folders if missing). Existing files keep their encoding by default. Prefer edit_file for small changes.",
@@ -757,7 +832,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("write_file", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "edit_file",
     {
       description:
@@ -774,7 +849,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("edit_file", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "list_files",
     {
       description:
@@ -789,7 +864,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("list_files", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "search_files",
     {
       description: "Search file contents in a file or folder (regular expression). Detects encodings and skips binary files and files over 10 MB.",
@@ -806,7 +881,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     (a) => forward("search_files", a),
   );
 
-  server.registerTool(
+  reg.registerTool(
     "disk_usage",
     {
       description:
@@ -827,9 +902,9 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
 
   // Copying between "this side" and the computer means this server's own disk: fine on the user's machine,
   // never on a shared server, where it would hand every caller the server's files
-  if (hosted) return server;
+  if (hosted) return publish();
 
-  server.registerTool(
+  reg.registerTool(
     "upload_file",
     {
       description: "Copy a file from the machine this server runs on to the connected computer (max 20 MB). For a computer connected directly, an ordinary file copy does the same.",
@@ -849,7 +924,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     },
   );
 
-  server.registerTool(
+  reg.registerTool(
     "download_file",
     {
       description: "Copy a file from the connected computer to the machine this server runs on (max 20 MB).",
@@ -876,7 +951,73 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
     },
   );
 
-  return server;
+  /** What the AI is offered: every tool kept above, or the five (see tools) */
+  function publish(): McpServer {
+    // Tools this server is not to offer at all (ASCTRL_TOOLS_DENY: names, comma-separated), e.g. a benchmark that
+    // wants the AI to work through the apps rather than the shell
+    for (const n of (process.env.ASCTRL_TOOLS_DENY ?? "").split(",").map((x) => x.trim()).filter(Boolean)) kept.delete(n);
+    if (!compact) {
+      for (const [name, k] of kept) server.registerTool(name, { description: k.description, inputSchema: k.schema, annotations: k.annotations as never }, k.handler as never);
+    } else {
+      // connect, exec and resume as they are
+      for (const name of ["connect", "exec", "resume"]) {
+        const k = kept.get(name);
+        if (!k) continue;
+        server.registerTool(name, { description: k.description, inputSchema: k.schema, annotations: k.annotations as never }, k.handler as never);
+      }
+      const LOOK = ["observe", "screenshot", "read_text", "wait_for", "timeline", "progress", "skills", "list_files", "read_file", "search_files", "disk_usage"].filter((n) => kept.has(n));
+      const DO = [...kept.keys()].filter((n) => !LOOK.includes(n) && !["connect", "exec", "resume"].includes(n));
+      // Each tool in a line: what it does (its first sentence) and its args
+      const line = (n: string) => {
+        const k = kept.get(n)!;
+        const what = (/^[^.]*\./.exec(k.description)?.[0] ?? k.description).slice(0, 200);
+        const args = Object.entries(k.schema).map(([a, t]) => (t.isOptional() ? a : `${a}*`)).join(", ");
+        return `- ${n}: ${what}${args ? ` Args: ${args}` : ""}`;
+      };
+      const through = async (n: string, args: unknown): Promise<Reply> => {
+        const k = kept.get(n);
+        if (!k) return say(`No such tool: ${n}`, true);
+        const parsed = z.object(k.schema).safeParse(args ?? {});
+        if (!parsed.success) return say(`${n}: ${parsed.error.issues.map((i) => `${i.path.join(".") || "args"}: ${i.message}`).join("; ")}\n${k.description}`, true);
+        return k.handler(parsed.data as Record<string, unknown>);
+      };
+      server.registerTool(
+        "query",
+        {
+          description:
+            "Look at the computer: what: the kind of look, args: its arguments (* = needed). Reading the screen as controls (observe) is cheaper and more exact than a screenshot. " +
+            "help: a kind's full description.\n" +
+            LOOK.map(line).join("\n"),
+          inputSchema: {
+            what: z.enum(LOOK as [string, ...string[]]).describe("The kind of look"),
+            args: z.record(z.string(), z.unknown()).optional().describe("Its arguments"),
+            help: z.boolean().optional().describe("Only say what this kind does and takes"),
+          },
+          annotations: { readOnlyHint: true },
+        },
+        async ({ what, args, help }) => (help ? say(`${what}: ${kept.get(what)?.description}\nArgs:\n${Object.entries(kept.get(what)?.schema ?? {}).map(([a, t]) => `- ${a}: ${t.description ?? ""}`).join("\n")}`) : through(what, args)),
+      );
+      server.registerTool(
+        "act",
+        {
+          description:
+            "Do something on the computer: do: the action, args: its arguments (* = needed). run carries out a whole plan in one call; the others are single actions for corrections, " +
+            "and the computer's own work (shell, files, admin). help: an action's full description.\n" +
+            DO.map(line).join("\n"),
+          inputSchema: {
+            do: z.enum(DO as [string, ...string[]]).describe("The action"),
+            args: z.record(z.string(), z.unknown()).optional().describe("Its arguments"),
+            help: z.boolean().optional().describe("Only say what this action does and takes"),
+          },
+        },
+        async (a) => (a.help ? say(`${a.do}: ${kept.get(a.do)?.description}\nArgs:\n${Object.entries(kept.get(a.do)?.schema ?? {}).map(([k, t]) => `- ${k}: ${t.description ?? ""}`).join("\n")}`) : through(a.do, a.args)),
+      );
+    }
+
+    return server;
+  }
+
+  return publish();
 }
 
 if (import.meta.main) {

@@ -53,6 +53,8 @@ export class TechClient {
   private ws?: WebSocket;
   private pending = new Map<string, { resolve: (r: ToolResult) => void; reject: (e: Error) => void }>();
   hostname = "";
+  /** The protocol the driver speaks (1: older than the version was sent) */
+  protocol = 0;
   /** Connected straight to a driver on this machine (no relay) */
   local = false;
   /** Pid of the local driver we are connected to */
@@ -133,6 +135,7 @@ export class TechClient {
         if (msg.type === "paired") {
           clearTimeout(timer);
           this.hostname = msg.hostname;
+          this.protocol = typeof msg.protocol === "number" ? msg.protocol : 1;
           this.local = local;
           resolve(msg.hostname);
         } else if (msg.type === "error") {

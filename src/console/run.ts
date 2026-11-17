@@ -24,7 +24,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { TechClient } from "./tech-client.ts";
-import type { ActionData, BatchData, BatchStepResult, Candidate, ObserveData, ToolName, ToolResult } from "../shared/protocol.ts";
+import type { ActionData, BatchData, BatchStepResult, Candidate, ObserveData, ProgramData, ToolName, ToolResult } from "../shared/protocol.ts";
 
 export type Step = Record<string, unknown>;
 /** A grid drawn on screen (a game board, a calendar): cells are named "board[row,col]", from 1 */
@@ -550,6 +550,69 @@ export class Runner {
     }
     const o = await this.call("observe", { silent: true, ...this.win(window), max: 40 }).catch(() => undefined);
     if (o?.text) job.tail = `Where things stand:\n${o.text.split("\n").slice(0, 45).join("\n")}`;
+  }
+
+  /**
+   * A program stuck on an action whose words fit several controls, or none exactly: the decision model chooses,
+   * as it does for a plan's step, before the AI is asked. Returns how to resume it (with a note of what was
+   * decided), or null when this is not such a case or the model isn't sure: then the AI decides.
+   * Something that can't be undone is never chosen on the model's guess alone.
+   */
+  async decideForProgram(p: ProgramData["program"]): Promise<{ resume: Record<string, unknown>; note: string } | null> {
+    if (p.state !== "stuck" || !p.call || !this.drex.ready) return null;
+    const miss = missOf(p.failure?.data);
+    const target = typeof p.call.args.target === "string" ? p.call.args.target : undefined;
+    if (!target || !unresolved(miss)) return null;
+    let cands = miss!.candidates;
+    const what = `${p.call.tool} "${target}"`;
+    // Nothing matched: the program's own call didn't ask for the closest controls. Look once more as a plan's
+    // step would (it may also show up now), for the controls to choose among.
+    if (!cands.length) {
+      const kind = p.call.tool === "set_value" || p.call.tool === "type_text" ? "field" : "click";
+      const r = await this.call("batch", { steps: [{ tool: p.call.tool, ...p.call.args, recover: { kind, late: false }, probe: true }], pace: "normal", after: "none", where: false });
+      const s = (r.data as BatchData | undefined)?.steps?.[0];
+      if (s?.ok) return { resume: { skip: true, value: { ok: true, text: s.text, data: s.data ?? null } }, note: `${what}: it was there when looked for again, and was done` };
+      const m = missOf(s?.data);
+      if (!unresolved(m) || !m!.candidates.length) return null;
+      cands = m!.candidates;
+    }
+    const options: Record<string, string> = Object.fromEntries(cands.slice(0, 12).map((c) => [c.ref, c.label]));
+    options.wait = "The control meant is not on screen yet: the window is still loading or opening something";
+    options.escape = "A popup, menu or dialog is in the way of the control meant: close it with Escape";
+    options.none = "None of these: the control meant is not here";
+    const state = [
+      `Window: ${String(p.call.args.window ?? "the one in front")}.`,
+      p.log.length ? `The program's latest log lines:\n${p.log.slice(-6).join("\n")}` : "",
+      `Action now (line ${p.line ?? "?"} of the program): ${what}.`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    let d;
+    try {
+      d = await this.drex.choose(state, "Which control is the one meant by the action now?", options);
+    } catch {
+      return null;
+    }
+    const probs = Object.values(d.a.probabilities ?? {}).sort((a, b) => b - a);
+    const sure = d.a.confidence >= 0.7 && (probs.length > 1 ? probs[0] - probs[1] : 1) >= 0.3;
+    if (!sure) return null;
+    const w = p.call.args.window !== undefined ? { window: p.call.args.window } : {};
+    const how = `decision model ${d.a.confidence.toFixed(2)}, ${d.tokens} tokens, ${Math.round(d.ms)} ms`;
+    if (d.a.choice === "wait") {
+      await this.call("wait_for", { stable: true, timeoutSec: 4, ...w, after: "none", silent: true });
+      return { resume: { retry: true }, note: `${what}: not on screen yet, waited and tried again (${how})` };
+    }
+    if (d.a.choice === "escape") {
+      await this.call("press_keys", { keys: "escape", ...w, after: "none" });
+      return { resume: { retry: true }, note: `${what}: something was in the way, pressed Escape and tried again (${how})` };
+    }
+    const pick = cands.find((c) => c.ref === d.a.choice);
+    if (!pick) return null;
+    if (DESTRUCTIVE.test(pick.name) && !norm(pick.name).includes(norm(target)) && !DESTRUCTIVE.test(target)) return null;
+    const args = { ...p.call.args, target: pick.ref };
+    delete (args as Record<string, unknown>).nth;
+    delete (args as Record<string, unknown>).role;
+    return { resume: { instead: { tool: p.call.tool, args } }, note: `${what} → ${pick.label} (${how})` };
   }
 
   private call(tool: ToolName, args: Record<string, unknown>, timeoutMs = 120_000): Promise<ToolResult> {

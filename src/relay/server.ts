@@ -22,6 +22,8 @@ const MAX_NAME = 64;
 interface Room {
   agent: WebSocket;
   hostname: string;
+  /** The protocol the driver speaks, passed on to the controller */
+  protocol?: number;
   tech?: WebSocket;
   /** Waiting for the user's consent */
   pending?: WebSocket;
@@ -79,7 +81,7 @@ export function startRelay(port = PORT) {
           role = "agent";
           code = msg.code;
           const hostname = name(msg.hostname, "unknown");
-          rooms.set(code, { agent: ws, hostname });
+          rooms.set(code, { agent: ws, hostname, protocol: typeof msg.protocol === "number" ? msg.protocol : undefined });
           log(`agent online code=${code} host=${hostname}`);
           return;
         }
@@ -118,7 +120,7 @@ export function startRelay(port = PORT) {
         if (!tech) return;
         if (msg.allow === true) {
           room.tech = tech;
-          send(tech, { type: "paired", hostname: room.hostname });
+          send(tech, { type: "paired", hostname: room.hostname, protocol: room.protocol });
           log(`code=${code} user allowed, paired`);
         } else {
           send(tech, { type: "error", message: "The user declined the connection" });
