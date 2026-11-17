@@ -39,7 +39,11 @@ const PRELUDE: &str = r#"(() => {
     if (r && typeof r === 'object' && r.__error !== undefined) { const e = new Error(r.__error); e.result = r.result; throw e; }
     return r;
   };
-  const step = (name, a, lenient) => call('tool', { name, args: a, line: where(), lenient: !!lenient });
+  // A step the AI put right with code (resume code): that code runs here, in the program, in the step's place
+  const step = (name, a, lenient) => {
+    const r = call('tool', { name, args: a, line: where(), lenient: !!lenient });
+    return r && typeof r === 'object' && r.__patch !== undefined ? new Function('args', r.__patch)(globalThis.args) : r;
+  };
   const quiet = o => Object.assign({ after: 'none' }, o);
   const win = o => typeof o === 'string' || typeof o === 'number' ? { window: o } : o;
   globalThis.tool = (name, a = {}) => step(name, a, false);
@@ -57,6 +61,13 @@ const PRELUDE: &str = r#"(() => {
   globalThis.read = (o = {}) => step('read_text', win(o)).text;
   globalThis.look = (o = {}) => step('observe', win(o));
   globalThis.sleep = ms => call('sleep', ms);
+  // A popup that may turn up anywhere along the way: when a new window shows text, press this in it (between steps)
+  globalThis.on = (text, press) => call('on', { text: String(text), press: String(press) });
+  // Wait until f() gives something true (checked every everyMs, default 250), at most timeoutSec (default 30)
+  globalThis.until = (f, o = {}) => {
+    const sec = o.timeoutSec ?? 30, end = Date.now() + sec * 1000;
+    for (;;) { const v = f(); if (v) return v; if (Date.now() > end) throw new Error(`until: not true within ${sec} s`); call('sleep', o.everyMs ?? 250); }
+  };
   globalThis.log = (...a) => call('log', a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' '));
   globalThis.ask = (question, details) => call('ask', { question, details: details === undefined ? null : details, line: where() });
   globalThis.console = { log: globalThis.log, info: globalThis.log, warn: globalThis.log, error: globalThis.log };
@@ -133,6 +144,8 @@ pub enum Decision {
     Retry,
     Skip(Value),
     Instead(String, Value),
+    /// JavaScript to run in the program in the stuck action's place
+    Code(String),
     Answer(Value),
     Abort(String),
 }
@@ -150,6 +163,16 @@ pub struct Program {
     learn: Option<(String, String)>,
     /// The windows it acted in, with their marks (for learning)
     marks: Mutex<Vec<(isize, String, Vec<String>)>>,
+    /// Kept as a skill by itself when it ends well (no learn, and not learn: false)
+    auto: bool,
+    /// Its first actions, as words (the name and description of a skill kept by itself)
+    trail: Mutex<Vec<String>>,
+    /// Actions put right with instead, aimed at another control: (line, the words it aimed at, the new words)
+    fixes: Mutex<Vec<(u64, String, String)>>,
+    /// Its popup rules (on): {text a popup shows: what to press}
+    rules: Mutex<Vec<(String, String)>>,
+    /// Where the desktop's timeline stood when it started: what happened since goes with a report of being stuck
+    seq0: u64,
 }
 
 impl Program {
@@ -248,6 +271,21 @@ impl Host {
                 }
             }
             "tool" => self.tool(a["name"].as_str().unwrap_or("").to_string(), a["args"].clone(), a["line"].as_u64(), a["lenient"] == true),
+            "on" => {
+                let (t, b) = (a["text"].as_str().unwrap_or("").trim().to_string(), a["press"].as_str().unwrap_or("").trim().to_string());
+                if t.is_empty() || b.is_empty() {
+                    return json!({ "__error": "on(text, press): give the text a popup shows and the button to press" });
+                }
+                let rules = {
+                    let mut r = self.p.rules.lock().unwrap();
+                    r.retain(|(x, _)| *x != t);
+                    r.push((t, b));
+                    r.iter().map(|(k, v)| (k.clone(), json!(v))).collect::<serde_json::Map<_, _>>()
+                };
+                // The popup watcher, as for a plan: dismissed in between the program's steps
+                popups::start(&json!({ "plan": format!("program-{}", self.p.id), "on": rules, "keep": [] }));
+                Value::Null
+            }
             other => json!({ "__error": format!("no such call: {other}") }),
         }
     }
@@ -261,6 +299,13 @@ impl Host {
                 return json!({ "__error": format!("a program can't call {name}") });
             }
             self.p.set(|s| s.line = line);
+            {
+                let mut t = self.p.trail.lock().unwrap();
+                if t.len() < 6 {
+                    let at = args.get("target").and_then(skills::target_name).or_else(|| args.get("appears").and_then(Value::as_str).map(str::to_string)).unwrap_or_default();
+                    t.push(if at.is_empty() { name.clone() } else { format!("{name} {at}") });
+                }
+            }
             let (tx, rx) = smpsc::channel();
             if self.tools.send(Req { tool: name.clone(), args: args.clone(), reply: tx }).is_err() {
                 return json!({ "__error": "the session has ended" });
@@ -271,7 +316,7 @@ impl Host {
                 return out;
             }
             // Stuck at this line until the AI says what to do
-            let call = json!({ "tool": name, "args": args });
+            let call = json!({ "tool": name.clone(), "args": args.clone() });
             if let Some(sk) = &self.p.skill {
                 let why = out["error"].as_str().or(out["text"].as_str()).unwrap_or("").lines().next().unwrap_or("").to_string();
                 skills::record(sk, skills::Outcome::Stuck(format!("at line {}: {name} failed: {}", line.map_or("?".into(), |l| l.to_string()), uia::clip(&why, 160))));
@@ -289,8 +334,19 @@ impl Host {
             });
             match d {
                 Some(Decision::Retry) | Some(Decision::Answer(_)) => continue,
-                Some(Decision::Instead(t, a)) => (name, args) = (t, a),
+                Some(Decision::Instead(t, a)) => {
+                    // The same action aimed elsewhere: the script can be changed to match, if this run ends well
+                    if t == name
+                        && let Some(l) = line
+                        && let (Some(old), Some(new)) = (args.get("target").and_then(skills::target_name), a.get("target").and_then(skills::target_name))
+                        && old != new
+                    {
+                        self.p.fixes.lock().unwrap().push((l, old, new));
+                    }
+                    (name, args) = (t, a)
+                }
                 Some(Decision::Skip(v)) => return json!({ "ok": true, "skipped": true, "value": v, "text": "skipped" }),
+                Some(Decision::Code(c)) => return json!({ "__patch": c }),
                 Some(Decision::Abort(why)) => return json!({ "__error": why, "result": out }),
                 None => return json!({ "__error": "no decision came for the action that failed", "result": out }),
             }
@@ -412,8 +468,22 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
         if !missing.is_empty() {
             return fail(format!("The skill \"{}\" takes args {}: missing {}", s.name, s.params.join(", "), missing.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
         }
+        // Made for another window: say so rather than run it into the wrong one
+        if bool_arg(args, "force") != Some(true) {
+            let front = match winmgr::find_arg(args.get("window")) {
+                Ok(Some(h)) => h.0 as isize,
+                _ => winmgr::foreground(),
+            };
+            let s2 = s.clone();
+            if let Ok(Some(why)) = tokio::task::spawn_blocking(move || skills::misfit(&s2, front)).await {
+                let mut o = fail(why);
+                o.data = Some(json!({ "misfit": true }));
+                return o;
+            }
+        }
     }
-    let learn = match args.get("learn").filter(|v| !v.is_null()) {
+    let no_learn = args.get("learn") == Some(&Value::Bool(false));
+    let learn = match args.get("learn").filter(|v| !v.is_null() && !v.is_boolean()) {
         None => None,
         Some(l) => {
             let name = l["name"].as_str().unwrap_or("").trim().to_string();
@@ -447,8 +517,13 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
             decide: Mutex::new(None),
             stop: Arc::new(AtomicBool::new(false)),
             skill: skill.as_ref().map(|s| s.name.clone()),
+            auto: !no_learn && learn.is_none() && skill.is_none(),
             learn,
             marks: Mutex::default(),
+            trail: Mutex::default(),
+            fixes: Mutex::default(),
+            rules: Mutex::default(),
+            seq0: crate::events::seq(),
         });
         ps.map.insert(p.id, p.clone());
         p
@@ -464,7 +539,7 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
             while let Some(r) = trx.recv().await {
                 n += 1;
                 // Learning: the make-up of each window it acts in, as it is before the first action there
-                if p.learn.is_some() {
+                if p.learn.is_some() || p.auto {
                     let h = match winmgr::find_arg(r.args.get("window")) {
                         Ok(Some(h)) => h.0 as isize,
                         _ => winmgr::foreground(),
@@ -474,6 +549,8 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
                         p.marks.lock().unwrap().push((h, app, m));
                     }
                 }
+                // A popup being dismissed goes first
+                popups::clear(Duration::from_secs(2)).await;
                 let out = batch::run_step(&me, &r.tool, &r.args, format!("p{}-{n}", p.id), false).await;
                 let _ = r.reply.send(as_js(&out));
             }
@@ -498,6 +575,32 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
             if matches!(end, End::Done(_)) {
                 if let Some(sk) = &p.skill {
                     skills::record(sk, skills::Outcome::Done);
+                    // Put right on the way: the script changes to match
+                    let fixes = p.fixes.lock().unwrap().clone();
+                    if !fixes.is_empty() {
+                        let (script, notes) = skills::patch_script(&src, &fixes);
+                        note = Some(match skills::rewrite(sk, &script) {
+                            Ok(()) => format!("The skill \"{sk}\" was changed to match how it was put right: {}", notes.join("; ")),
+                            Err(e) => format!("The skill \"{sk}\" could not be changed: {e}"),
+                        });
+                    }
+                }
+                // Kept by itself: worth it when it did a few things
+                if p.auto && p.status.lock().unwrap().actions >= 3 {
+                    let marks = p.marks.lock().unwrap().clone();
+                    let mut apps: Vec<String> = vec![];
+                    for (_, a, _) in &marks {
+                        if !a.is_empty() && !apps.contains(a) {
+                            apps.push(a.clone());
+                        }
+                    }
+                    let trail = p.trail.lock().unwrap().clone();
+                    let name = format!("{}: {}", if apps.is_empty() { "program".to_string() } else { apps.join("+") }, trail.iter().take(2).cloned().collect::<Vec<_>>().join(", "));
+                    let name: String = name.chars().take(80).collect();
+                    let s = skills::Skill { name, description: format!("Kept by itself after it worked: {}", trail.join(", ")), script: src.clone(), params: params.clone(), apps, marks: marks.into_iter().map(|(_, _, m)| m).collect(), ..Default::default() };
+                    if let Ok(Some(n)) = skills::learn_auto(s) {
+                        note = Some(format!("Kept by itself as the skill \"{n}\" (skills finds it; learn: false keeps a program from being kept)"));
+                    }
                 }
                 if let Some((name, description)) = &p.learn {
                     let marks = p.marks.lock().unwrap().clone();
@@ -516,6 +619,12 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
                 }
             } else if p.learn.is_some() {
                 note = Some("Not kept as a skill: it did not end well".into());
+            }
+            if !p.rules.lock().unwrap().is_empty() {
+                let done = popups::stop(&format!("program-{}", p.id));
+                if !done.is_empty() {
+                    p.log(format!("Popups dismissed along the way:\n{done}"));
+                }
             }
             p.set(|s| {
                 s.ended = Some(Instant::now());
@@ -545,7 +654,7 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
             });
         }
     }
-    report(&p, wait).await
+    pictured(ctx, &p, report(&p, wait).await).await
 }
 
 /// Answer a waiting program, or wait for one again
@@ -573,6 +682,8 @@ pub(super) async fn resume(ctx: &Ctx, args: &Value) -> Output {
             return fail("instead: give { tool, args }");
         }
         Some(Decision::Instead(tool, i.get("args").cloned().unwrap_or(json!({}))))
+    } else if let Some(c) = args.get("code").and_then(Value::as_str).filter(|c| !c.trim().is_empty()) {
+        Some(Decision::Code(c.to_string()))
     } else if let Some(a) = args.get("abort").filter(|v| !v.is_null() && **v != false) {
         Some(Decision::Abort(a.as_str().map(str::to_string).unwrap_or_else(|| "aborted by the AI".into())))
     } else {
@@ -583,11 +694,11 @@ pub(super) async fn resume(ctx: &Ctx, args: &Value) -> Output {
         if !phase.waiting() {
             return fail(format!("Program {id} is {}, not waiting for a decision", phase.as_str()));
         }
-        let fits = matches!((&d, phase), (Decision::Answer(_), Phase::Asking) | (Decision::Abort(_), _) | (Decision::Skip(_), _) | (Decision::Retry | Decision::Instead(..), Phase::Stuck));
+        let fits = matches!((&d, phase), (Decision::Answer(_), Phase::Asking) | (Decision::Abort(_), _) | (Decision::Skip(_), _) | (Decision::Retry | Decision::Instead(..) | Decision::Code(_), Phase::Stuck));
         if !fits {
             return fail(match phase {
                 Phase::Asking => format!("Program {id} asked a question: give answer (or abort)"),
-                _ => format!("Program {id} is stuck on an action: give retry, skip (with value), instead {{ tool, args }} or abort"),
+                _ => format!("Program {id} is stuck on an action: give retry, skip (with value), instead {{ tool, args }}, code (JavaScript run in its place) or abort"),
             });
         }
         let sent = p.decide.lock().unwrap().as_ref().map(|tx| tx.send(d).is_ok()).unwrap_or(false);
@@ -600,7 +711,25 @@ pub(super) async fn resume(ctx: &Ctx, args: &Value) -> Output {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    report(&p, wait).await
+    pictured(ctx, &p, report(&p, wait).await).await
+}
+
+/// Stuck: the window it is stuck in, as it is now, goes with the report (taken as it draws itself when others
+/// cover it, so nothing on the screen moves)
+async fn pictured(ctx: &Ctx, p: &Program, mut out: Output) -> Output {
+    if p.phase() != Phase::Stuck {
+        return out;
+    }
+    let window = p.status.lock().unwrap().call.as_ref().and_then(|c| c["args"].get("window").cloned()).unwrap_or(Value::Null);
+    let shot = look::screenshot(ctx, &json!({ "window": window, "maxWidth": 1000 })).await;
+    if shot.image.is_some() {
+        out.image = shot.image;
+        if let Some(t) = out.text.as_mut() {
+            t.push_str("
+The picture is the window it is stuck in, as it is now (x and y refer to it).");
+        }
+    }
+    out
 }
 
 /// Wait up to `wait` for the program to end or to need the AI, then say where it stands
@@ -628,7 +757,7 @@ async fn report(p: &Program, wait: Duration) -> Output {
             let f = s.failure.clone().unwrap_or_default();
             let why = f["error"].as_str().or(f["text"].as_str()).unwrap_or("");
             text += &format!(
-                "\nStuck{at}: {} {} failed:\n{}\nIt waits there. Fix what is needed (single actions), then resume it with retry, skip (value: what the program gets back), instead {{ tool, args }}, or abort (the program gets an error it may catch).",
+                "\nStuck{at}: {} {} failed:\n{}\nIt waits there. Fix what is needed (single actions), then resume it with retry, skip (value: what the program gets back), instead {{ tool, args }}, code (JavaScript run in the action's place, with the program's calls; what it returns is what the action returns), or abort (the program gets an error it may catch).",
                 call["tool"].as_str().unwrap_or(""),
                 uia::clip(&call["args"].to_string(), 300),
                 uia::clip(why, 3000)
@@ -648,8 +777,17 @@ async fn report(p: &Program, wait: Duration) -> Output {
         let from = s.log.len().saturating_sub(20);
         text += &format!("\nLog{}:\n{}", if from > 0 { format!(" (last 20 of {})", s.log.len()) } else { String::new() }, s.log.iter().skip(from).cloned().collect::<Vec<_>>().join("\n"));
     }
+    // Stuck: what came up and went on the desktop while it ran (a dialog that opened is often why)
+    let events = if s.phase == Phase::Stuck { crate::events::since(p.seq0).map(|v| batch::window_events(&v, p.started)) } else { None };
+    if let Some(Value::Array(evs)) = &events
+        && !evs.is_empty()
+    {
+        let lines: Vec<String> = evs.iter().rev().take(8).rev().map(|e| format!("{:.1} s: {} {} \"{}\"", e["ms"].as_u64().unwrap_or(0) as f64 / 1000.0, e["kind"].as_str().unwrap_or(""), e["program"].as_str().unwrap_or(""), e["title"].as_str().unwrap_or(""))).collect();
+        text += &format!("\nWindows since it started (seconds into the program):\n{}", lines.join("\n"));
+    }
     let data = json!({
         "program": {
+            "events": events,
             "id": p.id, "state": s.phase.as_str(), "line": s.line, "actions": s.actions, "result": s.result, "error": s.error,
             "call": s.call, "failure": s.failure, "question": s.question, "log": s.log.iter().cloned().collect::<Vec<_>>(),
             "skill": p.skill, "learned": s.skill_note,
@@ -674,6 +812,19 @@ mod tests {
 
     fn run(src: &str, host: impl Fn(&str, Value) -> Value + 'static) -> End {
         run_js(src, &json!({ "who": "Ann" }), Instant::now() + Duration::from_secs(5), Arc::new(AtomicBool::new(false)), host)
+    }
+
+    #[test]
+    fn until_waits_for_a_condition_and_a_patch_runs_in_the_steps_place() {
+        // until: checks again after each pause, and returns what came true
+        let end = run("let n = 0; const v = until(() => ++n >= 3 && n, { everyMs: 1 }); return v;", |op, _| if op == "sleep" { Value::Null } else { json!({ "ok": true }) });
+        assert_eq!(end, End::Done(json!(3)));
+        // until that never comes true: an error the program can catch
+        let end = run("try { until(() => false, { timeoutSec: 0, everyMs: 1 }); } catch (e) { return e.message; }", |_, _| Value::Null);
+        assert_eq!(end, End::Done(json!("until: not true within 0 s")));
+        // The AI answered a stuck step with code: it runs in the program, with its args, and its value is the step's
+        let end = run("const r = click('Send');\nreturn r;", |op, _| if op == "tool" { json!({ "__patch": "return 'patched for ' + args.who;" }) } else { Value::Null });
+        assert_eq!(end, End::Done(json!("patched for Ann")));
     }
 
     #[test]

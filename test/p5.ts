@@ -22,6 +22,8 @@ const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe
 const localFile = path.join(tmpdir(), `asctrl-p5-local-${process.pid}.json`);
 const skillsFile = path.join(tmpdir(), `asctrl-p5-skills-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
+// Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
+process.env.ASCTRL_CONFIRM ??= "off";
 const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_SKILLS_FILE: skillsFile } });
 const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
 const tech = new TechClient("ws://127.0.0.1:1", "P5Test");

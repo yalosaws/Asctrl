@@ -10,6 +10,13 @@
 //! their marks fit the window in front now, so "I'm in Outlook's new-mail window" finds the skills made there.
 //! Each keeps how its runs went; one that got stuck says where, and learning it again under its name replaces it.
 //!
+//! A program that ends well without `learn` is kept too (`auto`), named after where and what it did, unless it is
+//! a skill already or was sent with `learn: false`; the oldest unused of those go first when there are many.
+//! Running a skill first checks that the window in front looks like one it was made in (not for a skill that
+//! opens its own program). A skill that got stuck and was put right with `instead` (the same action, aimed at
+//! another control) has its script changed to match, once that run ends well. `export` gives skills as JSON for
+//! another computer, where `import` takes them.
+//!
 //! Kept on the computer the skills are for, in %LOCALAPPDATA%\Asctrl\skills.json (ASCTRL_SKILLS_FILE elsewhere).
 
 use super::*;
@@ -39,7 +46,15 @@ pub struct Skill {
     /// Seconds since 1970
     pub learned: u64,
     pub used: Option<u64>,
+    /// Kept by itself (not asked for with learn)
+    #[serde(default)]
+    pub auto: bool,
 }
+
+/// Most skills kept by themselves
+const AUTO_MAX: usize = 40;
+/// Below this fit the window in front is not one the skill was made in
+const FIT_MIN: f64 = 0.25;
 
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -95,6 +110,108 @@ pub fn learn(mut s: Skill) -> Result<bool, String> {
         all.push(s);
         old.is_some()
     })
+}
+
+/// Keep a program that ended well by itself: not when the same script is kept already. Its name, or None.
+pub fn learn_auto(mut s: Skill) -> Result<Option<String>, String> {
+    change(|all| {
+        if all.iter().any(|x| x.script.trim() == s.script.trim()) {
+            return None;
+        }
+        s.auto = true;
+        s.learned = now();
+        // A name of its own
+        let base = s.name.clone();
+        let mut n = 1;
+        while all.iter().any(|x| x.name.eq_ignore_ascii_case(&s.name)) {
+            n += 1;
+            s.name = format!("{base} ({n})");
+        }
+        let name = s.name.clone();
+        all.push(s);
+        // The oldest unused of those kept by themselves go first
+        while all.iter().filter(|x| x.auto).count() > AUTO_MAX {
+            let Some(i) = all.iter().enumerate().filter(|(_, x)| x.auto).min_by_key(|(_, x)| x.used.unwrap_or(x.learned)).map(|(i, _)| i) else { break };
+            all.remove(i);
+        }
+        Some(name)
+    })
+}
+
+/// A skill's script, changed
+pub fn rewrite(name: &str, script: &str) -> Result<(), String> {
+    change(|all| {
+        if let Some(s) = all.iter_mut().find(|x| x.name.eq_ignore_ascii_case(name)) {
+            s.script = script.to_string();
+            s.problem = None;
+        }
+    })
+}
+
+/// The words a target stands for: the text it names, or the name of the control a reference stood for
+pub fn target_name(v: &Value) -> Option<String> {
+    let s = match v {
+        Value::String(s) => s.trim().to_string(),
+        Value::Number(n) => format!("e{n}"),
+        _ => return None,
+    };
+    let r = s.trim_start_matches('[').trim_end_matches(']');
+    match r.strip_prefix('e').or_else(|| r.strip_prefix('E')).and_then(|d| d.parse::<u32>().ok()) {
+        // `Button "Save" [e12]`: the name between the quotes
+        Some(n) => {
+            let l = uia::label_of(n)?;
+            let a = l.find('"')?;
+            let b = l.rfind('"')?;
+            (b > a + 1).then(|| l[a + 1..b].to_string())
+        }
+        None => (!s.is_empty()).then_some(s),
+    }
+}
+
+/// `src` with each fix made: on line `line`, the quoted target `old` becomes `new` (same quotes). What was changed,
+/// and what could not be.
+pub fn patch_script(src: &str, fixes: &[(u64, String, String)]) -> (String, Vec<String>) {
+    let mut lines: Vec<String> = src.lines().map(str::to_string).collect();
+    let mut notes = vec![];
+    for (line, old, new) in fixes {
+        let Some(l) = lines.get_mut((*line as usize).saturating_sub(1)) else { continue };
+        let mut done = false;
+        for q in ['\'', '"', '`'] {
+            let from = format!("{q}{old}{q}");
+            if l.contains(&from) {
+                let esc = new.replace('\\', "\\\\").replace(q, &format!("\\{q}"));
+                *l = l.replacen(&from, &format!("{q}{esc}{q}"), 1);
+                done = true;
+                break;
+            }
+        }
+        notes.push(if done { format!("line {line}: \"{old}\" is now \"{new}\"") } else { format!("line {line}: \"{old}\" not found to change (learn it again)") });
+    }
+    let mut out = lines.join("\n");
+    if src.ends_with('\n') {
+        out.push('\n');
+    }
+    (out, notes)
+}
+
+/// Whether the window in front looks like one `s` was made in: None when it does (or can't tell, or the skill
+/// opens its own program), else why not
+pub fn misfit(s: &Skill, window: isize) -> Option<String> {
+    if s.marks.is_empty() || s.script.contains("open(") || window == 0 {
+        return None;
+    }
+    let (app, here) = mark(window)?;
+    let best = s.marks.iter().map(|m| fit(m, &here)).fold(0.0, f64::max);
+    if best >= FIT_MIN || (best >= FIT_MIN / 2.0 && s.apps.iter().any(|a| a.eq_ignore_ascii_case(&app))) {
+        return None;
+    }
+    Some(format!(
+        "The window in front (\"{}\", {app}) doesn't look like where the skill \"{}\" was made: it fits {:.0}%, and the skill works in {}. Bring that window up first, or pass force: true to run it anyway",
+        uia::clip(&winmgr::title_of(window), 60),
+        s.name,
+        best * 100.0,
+        if s.apps.is_empty() { "another window".into() } else { s.apps.join(", ") }
+    ))
 }
 
 /// How a run of skill `name` went: it began, it got stuck (where), or it ended well
@@ -190,6 +307,44 @@ fn ago(t: u64) -> String {
 
 /// The skills tool: find, show or forget
 pub(super) async fn skills(_ctx: &Ctx, args: &Value) -> Output {
+    if let Some(which) = args.get("export").and_then(Value::as_str) {
+        let all = { let _one = LOCK.lock().unwrap(); load() };
+        let picked: Vec<Skill> = all.into_iter().filter(|s| which.eq_ignore_ascii_case("all") || s.name.eq_ignore_ascii_case(which)).map(|s| Skill { runs: 0, done: 0, stuck: 0, problem: None, used: None, ..s }).collect();
+        if picked.is_empty() {
+            return fail(format!("There is no skill \"{which}\" (export: a name, or \"all\")"));
+        }
+        let json = serde_json::to_string(&picked).unwrap_or_default();
+        let mut out = text(format!("{} skill(s), as JSON for import on another computer:\n{json}", picked.len()));
+        out.data = Some(json!({ "skills": picked }));
+        return out;
+    }
+    if let Some(v) = args.get("import").filter(|v| !v.is_null()) {
+        let v = match v {
+            Value::String(s) => match serde_json::from_str::<Value>(s) {
+                Ok(v) => v,
+                Err(e) => return fail(format!("import: not JSON: {e}")),
+            },
+            v => v.clone(),
+        };
+        let list: Vec<Skill> = match v {
+            Value::Array(a) => a.into_iter().filter_map(|x| serde_json::from_value(x).ok()).collect(),
+            o => serde_json::from_value(o).ok().into_iter().collect(),
+        };
+        if list.is_empty() {
+            return fail("import: give skills as export gave them (a list, or one)");
+        }
+        let mut names = vec![];
+        for s in list {
+            if s.name.trim().is_empty() || s.script.trim().is_empty() {
+                continue;
+            }
+            names.push(s.name.clone());
+            if let Err(e) = learn(Skill { auto: false, ..s }) {
+                return fail(e);
+            }
+        }
+        return text(format!("Imported {} skill(s): {}", names.len(), names.join(", ")));
+    }
     if let Some(name) = args.get("forget").and_then(Value::as_str) {
         return match change(|all| {
             let n = all.len();
@@ -276,6 +431,17 @@ pub(super) async fn skills(_ctx: &Ctx, args: &Value) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fix_changes_the_quoted_target_on_its_line_only() {
+        let src = "fill({ Name: args.name });\nclick('Send');\nwaitFor(\"Sent\");\nclick('Send');\n";
+        let (out, notes) = patch_script(src, &[(2, "Send".into(), "Send now".into()), (3, "Gone".into(), "X".into())]);
+        assert_eq!(out, "fill({ Name: args.name });\nclick('Send now');\nwaitFor(\"Sent\");\nclick('Send');\n");
+        assert!(notes[0].contains("is now") && notes[1].contains("not found"), "{notes:?}");
+        // The new words keep the script valid: their quote is escaped
+        let (out, _) = patch_script("click(\"OK\")", &[(1, "OK".into(), "Say \"yes\"".into())]);
+        assert_eq!(out, "click(\"Say \\\"yes\\\"\")");
+    }
 
     fn m(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
