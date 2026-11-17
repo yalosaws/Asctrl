@@ -24,15 +24,25 @@ use std::time::Instant;
 /// Finds `want` among the page's elements. `kind`: "click" or "field". Returns how many fit equally well and,
 /// when one is chosen (the only one, or `nth`), where it is in the page's viewport after scrolling it into
 /// view, and what is on top of it there. The chosen element is kept as window.__asctrlPick.
+/// Same-origin iframes are searched too (their elements' places are given in the top page's viewport);
+/// cross-origin ones run in another process and are left to the other ways of finding.
 const FIND: &str = r#"((want, nth, kind) => {
   const norm = s => (s || '').replace(/[\s\u200b-\u200f\u202a-\u202e]+/g, ' ').trim().toLowerCase();
   const w = norm(want);
   const FIELD = 'input:not([type=button]):not([type=submit]):not([type=reset]):not([type=image]):not([type=hidden]),textarea,select,[contenteditable=""],[contenteditable=true],[role=textbox],[role=combobox],[role=searchbox]';
   const INTER = FIELD + ',a[href],button,summary,[role=button],[role=link],[role=menuitem],[role=tab],[role=checkbox],[role=radio],[role=option],[role=switch],[onclick],[tabindex]:not([tabindex="-1"])';
   const all = [];
-  const walk = root => { for (const el of root.querySelectorAll('*')) { all.push(el); if (el.shadowRoot) walk(el.shadowRoot); } };
+  const walk = root => { for (const el of root.querySelectorAll('*')) {
+    all.push(el);
+    if (el.shadowRoot) walk(el.shadowRoot);
+    if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') { let d = null; try { d = el.contentDocument; } catch (e) {} if (d && d.documentElement) walk(d); }
+  } };
   walk(document);
-  const byId = (el, id) => (el.getRootNode().getElementById ? el.getRootNode().getElementById(id) : null) || document.getElementById(id);
+  // The frames an element sits in, innermost first, and where its viewport starts in the top page's
+  const frames = el => { const out = []; let w = el.ownerDocument.defaultView; while (w && w !== window && w.frameElement) { out.push(w.frameElement); w = w.parent; } return out; };
+  const origin = el => { let x = 0, y = 0; for (const f of frames(el)) { const r = f.getBoundingClientRect(), cs = f.ownerDocument.defaultView.getComputedStyle(f);
+    x += r.left + f.clientLeft + parseFloat(cs.paddingLeft); y += r.top + f.clientTop + parseFloat(cs.paddingTop); } return { x, y }; };
+  const byId = (el, id) => (el.getRootNode().getElementById ? el.getRootNode().getElementById(id) : null) || el.ownerDocument.getElementById(id);
   const name = el => {
     const a = el.getAttribute('aria-label'); if (a && a.trim()) return a;
     const lb = el.getAttribute('aria-labelledby');
@@ -45,7 +55,7 @@ const FIND: &str = r#"((want, nth, kind) => {
     if (el.tagName === 'IMG') return el.alt || el.title || '';
     return el.innerText || el.title || '';
   };
-  const shown = el => { const r = el.getBoundingClientRect(); if (r.width < 1 || r.height < 1) return false; const s = getComputedStyle(el); return s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0'; };
+  const shown = el => { const r = el.getBoundingClientRect(); if (r.width < 1 || r.height < 1) return false; const s = el.ownerDocument.defaultView.getComputedStyle(el); return s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0'; };
   const role = el => el.getAttribute('role') || ({ A: 'link', BUTTON: 'button', SUMMARY: 'button', TEXTAREA: 'field', SELECT: 'list', LABEL: 'label',
     INPUT: el.type === 'checkbox' ? 'checkbox' : el.type === 'radio' ? 'radio' : ['button', 'submit', 'reset'].includes(el.type) ? 'button' : 'field' })[el.tagName] || (el.isContentEditable ? 'field' : 'text');
   const found = new Map();
@@ -79,11 +89,17 @@ const FIND: &str = r#"((want, nth, kind) => {
   const i = nth ? nth - 1 : (top.length === 1 ? 0 : -1);
   if (i < 0 || i >= top.length) return res;
   const el = top[i].el;
-  let r = el.getBoundingClientRect();
-  if (r.top < 0 || r.left < 0 || r.bottom > innerHeight || r.right > innerWidth) { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); r = el.getBoundingClientRect(); }
+  const view = r => { const o = origin(el); return { left: r.left + o.x, top: r.top + o.y, right: r.right + o.x, bottom: r.bottom + o.y, width: r.width, height: r.height }; };
+  let r = view(el.getBoundingClientRect());
+  const fv = el.ownerDocument.defaultView, fr = el.getBoundingClientRect();
+  if (r.top < 0 || r.left < 0 || r.bottom > innerHeight || r.right > innerWidth || fr.top < 0 || fr.left < 0 || fr.bottom > fv.innerHeight || fr.right > fv.innerWidth) {
+    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); r = view(el.getBoundingClientRect()); }
   const x = Math.min(Math.max(r.left + r.width / 2, 1), innerWidth - 1), y = Math.min(Math.max(r.top + r.height / 2, 1), innerHeight - 1);
+  // What is on top there: down through the frames to the one the element is in, then its shadow roots
   let hit = document.elementFromPoint(x, y);
-  while (hit && hit.shadowRoot) { const h = hit.shadowRoot.elementFromPoint(x, y); if (!h || h === hit) break; hit = h; }
+  while (hit && (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME')) { let d = null; try { d = hit.contentDocument; } catch (e) {} if (!d) break;
+    const o = origin(d.documentElement); const h = d.elementFromPoint(x - o.x, y - o.y); if (!h) break; hit = h; }
+  while (hit && hit.shadowRoot) { const o = origin(hit); const h = hit.shadowRoot.elementFromPoint(x - o.x, y - o.y); if (!h || h === hit) break; hit = h; }
   const over = hit && !(el === hit || el.contains(hit) || hit.contains(el) || (hit.tagName === 'LABEL' && hit.control === el))
     ? (hit.tagName.toLowerCase() + (norm(hit.innerText) ? ' "' + norm(hit.innerText).slice(0, 60) + '"' : '')) : null;
   window.__asctrlPick = el;
@@ -95,7 +111,9 @@ const ARM: &str = r#"(() => {
   const m = window.__asctrlMut = { n: 0, last: performance.now() };
   if (window.__asctrlObs) window.__asctrlObs.disconnect();
   const o = window.__asctrlObs = new MutationObserver(r => { m.n += r.length; m.last = performance.now(); });
-  o.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  const opts = { subtree: true, childList: true, attributes: true, characterData: true };
+  o.observe(document, opts);
+  for (const f of document.querySelectorAll('iframe,frame')) { try { if (f.contentDocument) o.observe(f.contentDocument, opts); } catch (e) {} }
   return true;
 })()"#;
 
@@ -113,7 +131,7 @@ const LOAD_MAX: Duration = Duration::from_secs(10);
 /// while the person at the computer uses it.
 static LANES: std::sync::Mutex<Vec<(String, Arc<tokio::sync::Mutex<()>>)>> = std::sync::Mutex::new(Vec::new());
 
-async fn lane(tab: &str) -> tokio::sync::OwnedMutexGuard<()> {
+pub(super) async fn lane(tab: &str) -> tokio::sync::OwnedMutexGuard<()> {
     let m = {
         let mut lanes = LANES.lock().unwrap();
         match lanes.iter().find(|(t, _)| t == tab) {
@@ -132,19 +150,35 @@ async fn lane(tab: &str) -> tokio::sync::OwnedMutexGuard<()> {
     m.lock_owned().await
 }
 
+#[derive(Clone)]
 struct Page {
     c: Arc<Conn>,
     tab: Tab,
     hwnd: isize,
+    /// The frame of another site the element acted on is in: its session (scripts run there)
+    frame: Option<String>,
 }
 
 impl Page {
     async fn eval(&self, js: &str) -> Result<Value, String> {
-        cdp::eval(&self.c, &self.tab, js).await
+        cdp::eval_in(&self.c, self.frame.as_deref().unwrap_or(&self.tab.session), js).await
     }
 
+    /// Input through the browser. The mouse goes to the tab, at a point of its viewport (the browser passes it on
+    /// to the frame under it); keys and text to the frame that has the focus, else the tab
     async fn input(&self, method: &str, params: Value) -> Result<Value, String> {
+        if method != "Input.dispatchMouseEvent"
+            && let Some(f) = &self.frame
+            && let Ok(r) = self.c.call(Some(f), method, params.clone()).await
+        {
+            return Ok(r);
+        }
         self.c.call(Some(&self.tab.session), method, params).await
+    }
+
+    /// The same page, acting in the frame where `k` was found
+    fn at(&self, k: &Pick) -> Page {
+        Page { frame: k.frame.clone(), ..self.clone() }
     }
 }
 
@@ -155,8 +189,12 @@ async fn page(args: &Value) -> Option<Page> {
         Ok(None) => winmgr::foreground(),
         Err(_) => return None,
     };
+    page_of(hwnd).await
+}
+
+async fn page_of(hwnd: isize) -> Option<Page> {
     let (c, tab) = cdp::tab_in(hwnd).await?;
-    Some(Page { c, tab, hwnd })
+    Some(Page { c, tab, hwnd, frame: None })
 }
 
 /// The text the call names as its target, when it names one by text (no reference, point or role)
@@ -179,6 +217,8 @@ struct Pick {
     y: f64,
     /// Another element on top of it where it would be pressed
     over: Option<String>,
+    /// In a frame of another site: its session (x, y are in the tab's viewport all the same)
+    frame: Option<String>,
 }
 
 impl Pick {
@@ -189,21 +229,46 @@ impl Pick {
 
 /// Look `want` up in the page until it shows, up to `wait`. None when it fits several elements equally well (and
 /// no `nth` says which) or none: the usual lookup takes over and says so.
+/// The page first, then the frames of other sites in it (each a page of its own to the browser).
 async fn find(p: &Page, want: &str, nth: Option<usize>, kind: &str, wait: Duration) -> Option<Pick> {
     let call = format!("{FIND}({}, {}, {})", json!(want), nth.map_or("null".to_string(), |n| n.to_string()), json!(kind));
+    let pick = |k: &Value, frame: Option<String>, (dx, dy): (f64, f64)| -> Option<Pick> {
+        Some(Pick {
+            role: k["role"].as_str().unwrap_or("element").into(),
+            name: k["name"].as_str().unwrap_or("").into(),
+            x: k["x"].as_f64()? + dx,
+            y: k["y"].as_f64()? + dy,
+            over: k["over"].as_str().map(str::to_string),
+            frame,
+        })
+    };
     let start = Instant::now();
     loop {
         let r = p.eval(&call).await.ok()?;
         if let Some(k) = r.get("pick").filter(|k| k.is_object()) {
-            return Some(Pick {
-                role: k["role"].as_str().unwrap_or("element").into(),
-                name: k["name"].as_str().unwrap_or("").into(),
-                x: k["x"].as_f64()?,
-                y: k["y"].as_f64()?,
-                over: k["over"].as_str().map(str::to_string),
-            });
+            return pick(k, None, (0.0, 0.0));
         }
-        if r["count"].as_u64().unwrap_or(0) > 1 || start.elapsed() >= wait {
+        let mut count = r["count"].as_u64().unwrap_or(0);
+        if count == 0 {
+            for f in p.c.frames_of(&p.tab.session) {
+                let r = match cdp::eval_in(&p.c, &f.session, &call).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        p.c.forget_frame(&f.session);
+                        continue;
+                    }
+                };
+                if let Some(k) = r.get("pick").filter(|k| k.is_object()) {
+                    let origin = cdp::frame_origin(&p.c, &p.tab, &f.id).await?;
+                    return pick(k, Some(f.session.clone()), origin);
+                }
+                count += r["count"].as_u64().unwrap_or(0);
+                if count > 0 {
+                    break;
+                }
+            }
+        }
+        if count > 1 || start.elapsed() >= wait {
             return None;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -338,19 +403,81 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Option<Output> {
     if !plain || matches!(str_arg(args, "mode"), "mouse" | "direct") {
         return None;
     }
-    let (want, nth, wait) = text_target(ctx, args)?;
+    let Some((want, nth, wait)) = text_target(ctx, args) else { return point_click(ctx, args).await };
     let p = page(args).await?;
     let turn = lane(&p.tab.id).await;
     let k = find(&p, &want, nth, "click", wait).await?;
+    let p = p.at(&k);
     if let Some(o) = covered(ctx, &k).await {
         return Some(o);
+    }
+    Some(press(ctx, args, &p, &k, turn).await)
+}
+
+/// A click by reference or by a point on a screenshot, in a browser window that others cover: the browser is
+/// given the click at that place of its page, so it stays where it is (in front, the mouse does it as usual)
+async fn point_click(ctx: &Ctx, args: &Value) -> Option<Output> {
+    let ask = Ask::of(ctx, args).ok()??;
+    let hwnd = match (&ask.target, winmgr::find_arg(args.get("window")).ok().flatten()) {
+        (_, Some(h)) => h.0 as isize,
+        (Target::Ref(rf), None) => uia::hwnd_of(*rf)?,
+        (Target::Point(..), None) => ctx.frame().own?,
+        _ => return None,
+    };
+    if winmgr::foreground() == hwnd || winmgr::pid_of(winmgr::foreground()) == winmgr::pid_of(hwnd) {
+        return None;
+    }
+    let p = page_of(hwnd).await?;
+    // Where on the screen: the point, or the middle of the control the reference stands for
+    let a2 = ask.clone();
+    let (sx, sy) = tokio::task::spawn_blocking(move || locate::resolve(&a2).ok().map(|l| l.point)).await.ok()??;
+    let (l, t, _, _) = winmgr::page_rect(hwnd, "Chrome_RenderWidgetHostHWND")?;
+    let turn = lane(&p.tab.id).await;
+    let dpr = p.eval("devicePixelRatio").await.ok()?.as_f64().unwrap_or(1.0).max(0.25);
+    let (x, y) = ((sx - l) as f64 / dpr, (sy - t) as f64 / dpr);
+    let what = p.eval(&format!("(() => {{ const e = document.elementFromPoint({x}, {y}); if (!e) return null; window.__asctrlPick = e; const t = (e.getAttribute('aria-label') || e.innerText || e.value || e.title || '').replace(/\\s+/g, ' ').trim(); return [e.tagName.toLowerCase(), t.slice(0, 60)]; }})()")).await.ok()?;
+    if what.is_null() {
+        return None;
+    }
+    let k = Pick { role: what[0].as_str().unwrap_or("element").into(), name: what[1].as_str().unwrap_or("").into(), x, y, over: None, frame: None };
+    Some(press(ctx, args, &p, &k, turn).await)
+}
+
+/// The person's own browser doesn't draw a window others cover (it runs without Asctrl's flags), and input sent
+/// to it waits seconds for a frame. There the element is clicked by the page's script instead: at once, but the
+/// page can tell (its events are not "trusted"), and a few pages ignore such clicks.
+const SCRIPT_CLICK: &str = r#"(() => {
+  const el = window.__asctrlPick; if (!el) return false;
+  const W = el.ownerDocument.defaultView, o = { bubbles: true, cancelable: true, composed: true, view: W, button: 0, buttons: 1 };
+  for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) el.dispatchEvent(new (t.startsWith('pointer') ? W.PointerEvent : W.MouseEvent)(t, o));
+  if (el.focus) el.focus();
+  el.click();
+  return true;
+})()"#;
+
+/// Whether `p` is a window of the person's own browser that other windows cover now
+fn theirs_covered(p: &Page) -> bool {
+    p.c.theirs && winmgr::rect_of(p.hwnd).is_some_and(|(l, t, r, b)| winmgr::covered(p.hwnd, crate::capture::Area { left: l, top: t, width: r - l, height: b - t }))
+}
+
+/// Press at `k` in the page, wait for what it set off, and say so
+async fn press(ctx: &Ctx, args: &Value, p: &Page, k: &Pick, turn: tokio::sync::OwnedMutexGuard<()>) -> Output {
+    if theirs_covered(p) {
+        let _ = p.eval(ARM).await;
+        let t0 = Instant::now();
+        if p.eval(SCRIPT_CLICK).await.ok() != Some(Value::Bool(true)) {
+            return fail(format!("Could not click {} in the page", k.desc()));
+        }
+        let effect = settle(p, t0).await;
+        drop(turn);
+        return reply(ctx, args, p, format!("Clicked {} in the page by its script (the window is covered, and this browser doesn't draw covered windows, so a real click would wait for it; the page can tell a script click, and a few pages ignore one).", k.desc()), effect).await;
     }
     let _ = p.eval(ARM).await;
     let t0 = Instant::now();
     let at = |kind: &str| json!({ "type": kind, "x": k.x, "y": k.y, "button": if kind == "mouseMoved" { "none" } else { "left" }, "clickCount": 1 });
     for kind in ["mouseMoved", "mousePressed"] {
         if let Err(e) = p.input("Input.dispatchMouseEvent", at(kind)).await {
-            return Some(fail(format!("The browser did not take the click: {e}")));
+            return fail(format!("The browser did not take the click: {e}"));
         }
     }
     // A page that opens an alert from the click holds the release's answer until the alert is closed
@@ -360,31 +487,31 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Option<Output> {
         (_, Some(a)) => {
             drop(turn);
             let msg = a.params["message"].as_str().unwrap_or("");
-            return Some(text(format!("Clicked {} in the page, through the browser. The page opened a dialog that waits for an answer: \"{}\" (press_keys enter accepts it, escape dismisses it).", k.desc(), uia::clip(msg, 200))));
+            return text(format!("Clicked {} in the page, through the browser. The page opened a dialog that waits for an answer: \"{}\" (press_keys enter accepts it, escape dismisses it).", k.desc(), uia::clip(msg, 200)));
         }
-        (Ok(Err(e)), _) => return Some(fail(format!("The browser did not take the click: {e}"))),
-        _ => settle(&p, t0).await,
+        (Ok(Err(e)), _) => return fail(format!("The browser did not take the click: {e}")),
+        _ => settle(p, t0).await,
     };
     drop(turn);
-    Some(reply(ctx, args, &p, format!("Clicked {} in the page, through the browser (the mouse did not move).", k.desc()), effect).await)
+    reply(ctx, args, p, format!("Clicked {} in the page, through the browser (the mouse did not move, and the window stayed where it is).", k.desc()), effect).await
 }
 
 /// Put `text` in the picked field: at its end, or in place of what it holds
 async fn put(p: &Page, text: &str, replace: bool) -> Result<(), String> {
     let focus = format!(
         r#"(() => {{
-  const el = window.__asctrlPick; el.focus();
-  if ({replace}) {{ if (el.select) el.select(); else document.execCommand('selectAll'); }}
+  const el = window.__asctrlPick, doc = el.ownerDocument; el.focus();
+  if ({replace}) {{ if (el.select) el.select(); else doc.execCommand('selectAll'); }}
   else if (typeof el.value === 'string' && el.setSelectionRange) {{ try {{ el.setSelectionRange(el.value.length, el.value.length); }} catch (e) {{}} }}
-  else {{ const s = getSelection(); s.selectAllChildren(el); s.collapseToEnd(); }}
-  return document.activeElement === el || el.contains(document.activeElement) || (el.shadowRoot && el.shadowRoot.activeElement !== null);
+  else {{ const s = doc.defaultView.getSelection(); s.selectAllChildren(el); s.collapseToEnd(); }}
+  return doc.activeElement === el || el.contains(doc.activeElement) || (el.shadowRoot && el.shadowRoot.activeElement !== null);
 }})()"#
     );
     if p.eval(&focus).await? != Value::Bool(true) {
         return Err("the field did not take the focus".into());
     }
     if replace && text.is_empty() {
-        p.eval("document.execCommand('delete')").await?;
+        p.eval("window.__asctrlPick.ownerDocument.execCommand('delete')").await?;
         return Ok(());
     }
     p.input("Input.insertText", json!({ "text": text })).await.map(|_| ())
@@ -417,6 +544,7 @@ pub(super) async fn type_text(ctx: &Ctx, args: &Value) -> Option<Output> {
     let p = page(args).await?;
     let turn = lane(&p.tab.id).await;
     let k = find(&p, &want, nth, "field", wait).await?;
+    let p = p.at(&k);
     let _ = p.eval(ARM).await;
     let t0 = Instant::now();
     if let Err(e) = put(&p, &t, replace).await {
@@ -447,6 +575,7 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Option<Output> {
     let p = page(args).await?;
     let turn = lane(&p.tab.id).await;
     let k = find(&p, &want, nth, "field", wait).await?;
+    let p = p.at(&k);
     let _ = p.eval(ARM).await;
     let t0 = Instant::now();
     let kind = p.eval("(() => { const el = window.__asctrlPick; return el.tagName === 'SELECT' ? 'select' : (el.type === 'checkbox' || el.type === 'radio') ? 'check' : 'text'; })()").await.ok()?;
@@ -460,7 +589,7 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Option<Output> {
             let js = format!(
                 r#"(() => {{ const el = window.__asctrlPick, w = {}.trim().toLowerCase();
   const o = [...el.options].find(o => o.text.trim().toLowerCase() === w) || [...el.options].find(o => o.value.toLowerCase() === w) || [...el.options].find(o => o.text.trim().toLowerCase().includes(w));
-  if (!o) return null; el.value = o.value; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return o.text.trim(); }})()"#,
+  if (!o) return null; const E = el.ownerDocument.defaultView.Event; el.value = o.value; el.dispatchEvent(new E('input', {{ bubbles: true }})); el.dispatchEvent(new E('change', {{ bubbles: true }})); return o.text.trim(); }})()"#,
                 json!(value)
             );
             match p.eval(&js).await {
@@ -479,6 +608,17 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Option<Output> {
 /// Most of a page's text in one reply
 const MAX_TEXT: usize = 100_000;
 
+/// After fast plan steps in a page: wait for the page (its own changes, not the screen) to settle before a step
+/// that reads it. The last step armed the change counter; its changes are counted from then.
+pub(super) async fn settle_after_fast(args: &Value) -> Option<(bool, u128)> {
+    let p = page(args).await?;
+    let _turn = lane(&p.tab.id).await;
+    // The action was a moment ago: what has not changed by now counts as quiet sooner
+    let t0 = Instant::now().checked_sub(QUIET / 2).unwrap_or_else(Instant::now);
+    let e = settle(&p, t0).await;
+    Some((!matches!(e, Effect::Busy { .. }), t0.elapsed().as_millis()))
+}
+
 /// The text of the whole page (not only what is on screen), for read_text on the browser's window with nothing
 /// narrower asked. None: not for this channel.
 pub(super) async fn read_text(args: &Value) -> Option<Output> {
@@ -486,19 +626,29 @@ pub(super) async fn read_text(args: &Value) -> Option<Output> {
         return None;
     }
     let p = page(args).await?;
-    let r = p.eval("[document.title, location.href, document.body ? document.body.innerText : '']").await.ok()?;
-    let body = r[2].as_str().unwrap_or("");
+    let r = p.eval("[document.title, location.href, (() => { const t = d => { let s = d.body ? d.body.innerText : ''; for (const f of d.querySelectorAll('iframe,frame')) { let c = null; try { c = f.contentDocument; } catch (e) {} if (c) s += '\\n' + t(c); } return s; }; return t(document); })()]").await.ok()?;
+    let mut all = r[2].as_str().unwrap_or("").to_string();
+    for f in p.c.frames_of(&p.tab.session) {
+        if let Ok(Value::String(t)) = cdp::eval_in(&p.c, &f.session, "document.body ? document.body.innerText : ''").await {
+            all.push('\n');
+            all.push_str(&t);
+        }
+    }
+    let body = all.as_str();
     let (shown, more) = match body.char_indices().nth(MAX_TEXT) {
         Some((i, _)) => (&body[..i], format!("\n… the page goes on ({} characters in all)", body.chars().count())),
         None => (body, String::new()),
     };
-    Some(text(format!("The page \"{}\" ({}), all of it, not only what is on screen:\n{shown}{more}", uia::clip(r[0].as_str().unwrap_or(""), 80), r[1].as_str().unwrap_or(""))))
+    let mut out = text(format!("The page \"{}\" ({}), all of it, not only what is on screen:\n{shown}{more}", uia::clip(r[0].as_str().unwrap_or(""), 80), r[1].as_str().unwrap_or("")));
+    out.data = Some(json!({ "channel": "page" }));
+    Some(out)
 }
 
-/// Open `url` in Asctrl's own browser and wait for it to load
-pub(super) async fn open(ctx: &Ctx, url: &str) -> Output {
+/// Open `url` in Asctrl's own browser, or (`theirs`) in a new tab of the person's own browser through the extension
+pub(super) async fn open(ctx: &Ctx, url: &str, theirs: bool) -> Output {
     let t0 = Instant::now();
-    let (c, id) = match cdp::open(url).await {
+    let opened = if theirs { cdp::open_in_theirs(url).await } else { cdp::open(url).await };
+    let (c, id) = match opened {
         Ok(x) => x,
         Err(e) => return fail(e),
     };
@@ -535,12 +685,20 @@ pub(super) async fn open(ctx: &Ctx, url: &str) -> Output {
     }
     let how = if loaded { format!("loaded in {} ms", t0.elapsed().as_millis()) } else { format!("still loading after {} s", LOAD_MAX.as_secs()) };
     let win = hwnd.map(|h| format!(", window handle {h}")).unwrap_or_default();
-    let mut out = text(format!(
-        "Opened \"{}\" ({at}) in Asctrl's own browser ({}, its own profile in {}){win}: {how}. In this browser, text targets are found in the page itself and pressed and typed into through the browser, without the mouse, even while other windows cover it.",
-        uia::clip(&title, 80),
-        c.name,
-        cdp::profile_dir().display()
-    ));
+    let mut out = text(if theirs {
+        format!(
+            "Opened \"{}\" ({at}) in a new tab of the person's own browser ({}, through Asctrl's extension, with the sites they are signed in to){win}: {how}. In this browser, text targets are found in the page itself and pressed and typed into through the browser, without the mouse.",
+            uia::clip(&title, 80),
+            c.name
+        )
+    } else {
+        format!(
+            "Opened \"{}\" ({at}) in Asctrl's own browser ({}, its own profile in {}){win}: {how}. In this browser, text targets are found in the page itself and pressed and typed into through the browser, without the mouse, even while other windows cover it.",
+            uia::clip(&title, 80),
+            c.name,
+            cdp::profile_dir().display()
+        )
+    });
     out.data = Some(json!({ "channel": "page", "handle": hwnd, "url": at, "title": title }));
     out
 }

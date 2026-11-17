@@ -45,16 +45,30 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
     }
     match str_arg(args, "browser") {
         "" | "default" => {}
-        "asctrl" => {
+        b @ ("asctrl" | "user") => {
             let _turn = match acting().await {
                 Ok(t) => t,
                 Err(o) => return o,
             };
-            return super::web::open(ctx, &target).await;
+            return super::web::open(ctx, &target, b == "user").await;
         }
-        other => return fail(format!("browser: \"{other}\" is not one of default, asctrl")),
+        other => return fail(format!("browser: \"{other}\" is not one of default, asctrl, user")),
     }
-    let a = str_arg(args, "args").to_string();
+    let mut a = str_arg(args, "args").to_string();
+    // An Electron program, to be worked through its pages: started with a debugging port of its own
+    let mut target = target;
+    let electron = if bool_arg(args, "electron") == Some(true) {
+        let Some(port) = crate::cdp::free_port() else { return fail("no free port for the program's debugging") };
+        // A command-line launcher (VS Code's bin\code.cmd) passes on only the options it knows: start the
+        // program itself
+        if let Some(exe) = electron_exe(&target) {
+            target = exe;
+        }
+        a = format!("{a} --remote-debugging-port={port}").trim().to_string();
+        Some(port)
+    } else {
+        None
+    };
     let cwd = match str_arg(args, "cwd") {
         "" => String::new(),
         c => match resolve_path(c) {
@@ -108,11 +122,47 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
                 Some(Err(t)) => format!("{done}. The page was still loading after {:.0} s", t.as_secs_f64()),
                 None => done,
             };
+            let done = match electron {
+                Some(port) => match crate::cdp::attach_app(port, Duration::from_secs(20), h.map(winmgr::pid_of).unwrap_or(0)).await {
+                    Ok(c) => format!("{done}. It is an Electron program ({}), started with a debugging port: its windows are worked through their pages, as in a browser, text targets found in the page and pressed and typed into without the mouse", c.name),
+                    Err(e) => format!("{done}. It can't be worked through its pages: {e}"),
+                },
+                None => done,
+            };
             report::conclude(ctx, args, Did { done, change: None, hwnd: h, fresh: h.is_some(), delivered: false }, true).await
         }
         Ok(Err(e)) => fail(e),
         Err(e) => fail(e.to_string()),
     }
+}
+
+/// The program behind a name or a launcher: name.exe on the PATH, or for a launcher script in a bin folder
+/// (bin\code.cmd) the program beside that folder (Code.exe). None: use the name as it is.
+fn electron_exe(target: &str) -> Option<String> {
+    let p = std::path::Path::new(target);
+    let candidates: Vec<std::path::PathBuf> = if p.is_absolute() {
+        vec![p.to_path_buf()]
+    } else {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path).flat_map(|d| ["exe", "cmd", "bat"].map(|e| d.join(format!("{target}.{e}")))).filter(|f| f.is_file()).collect()
+    };
+    for f in candidates {
+        let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if ext == "exe" {
+            return Some(f.to_string_lossy().into_owned());
+        }
+        if matches!(ext.as_str(), "cmd" | "bat")
+            && let Some(bin) = f.parent().filter(|d| d.file_name().is_some_and(|n| n.eq_ignore_ascii_case("bin")))
+            && let Some(home) = bin.parent()
+        {
+            let stem = f.file_stem()?.to_string_lossy().to_lowercase();
+            let exes: Vec<std::path::PathBuf> = std::fs::read_dir(home).ok()?.filter_map(|e| e.ok().map(|e| e.path())).filter(|x| x.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))).collect();
+            if let Some(x) = exes.iter().find(|x| x.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == stem)).or(exes.first().filter(|_| exes.len() == 1)) {
+                return Some(x.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Switch to a window, or minimize / maximize / restore / close / move it

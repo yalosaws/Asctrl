@@ -19,6 +19,10 @@ const root = path.resolve(import.meta.dirname, "..");
 const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
 const localFile = path.join(tmpdir(), `asctrl-p3-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
+// Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
+process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
+// Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
+process.env.ASCTRL_CONFIRM ??= "off";
 const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] });
 const tech = new TechClient("ws://127.0.0.1:1", "P3Test");
 let failures = 0;
@@ -63,6 +67,9 @@ try {
   await act("a field by its label", "set_value", { target: "Email address", value: "a@b.c" }, /Asctrl Page Test/);
   await act("a list by its aria-label", "set_value", { target: "Size", value: "Large" }, /size Large/);
   await act("a change that comes a moment later", "click", { target: "Late change" }, /late done/);
+  await act("a field inside an iframe", "set_value", { target: "Ticket subject", value: "Printer" }, /Asctrl Page Test/);
+  await act("a list inside an iframe", "set_value", { target: "Priority", value: "High" }, /Asctrl Page Test/);
+  await act("a button inside an iframe", "click", { target: "Open ticket" }, /ticket Printer High/);
 
   const all = await page();
   say(/END-OF-PAGE-MARKER/.test(all), `read_text read the whole page, below the fold too (${all.length} characters)`);
@@ -73,6 +80,13 @@ try {
   const front = ((await tech.call("observe", { max: 1 })).data as ObserveData).windows.find((x) => x.front)?.handle;
   const moved = cursor();
   say(front === C && moved === mouse, `Calculator stayed in front and the mouse stayed at ${mouse} (now ${moved})`);
+
+  // A reference (from observe) in the covered browser: the click goes through the page, nothing comes forward
+  const seen = (await tech.call("observe", { window: W, query: "Duplicate" })).text ?? "";
+  const ref = /\[(e\d+)\][^\n]*Duplicate/.exec(seen)?.[1];
+  const byRef = await tech.call("click", { window: W, target: ref ?? "e0", after: "none" });
+  const front2 = ((await tech.call("observe", { max: 1 })).data as ObserveData).windows.find((x) => x.front)?.handle;
+  say(!!ref && byRef.ok && (byRef.data as { channel?: string } | undefined)?.channel === "page" && /duplicate/.test(await page()) && front2 === C, `a reference (${ref}) clicked through the page while covered, Calculator still in front: ${first(byRef.text ?? byRef.error)}`);
 
   const n = await tech.call("click", { window: W, target: "Next page", after: "none" });
   say(n.ok && /It loaded "Second Page"/.test(n.text ?? ""), `a link, waited for until the next page loaded: ${first(n.text ?? n.error)}`);

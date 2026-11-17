@@ -11,6 +11,12 @@
 //!
 //! One WebSocket to the browser; each tab is reached through a session on it (flat mode). Events are kept per
 //! session for a moment, so an action can tell whether the page started loading another one.
+//!
+//! The person's own browser (Chrome or Edge with Asctrl's extension, see `browser_ext`) is reached the same way:
+//! the extension answers the same calls over native messaging, so a `Conn` is either.
+//!
+//! So are Electron programs (VS Code, Slack, Teams, ...) that `open_app` started with `electron: true`: they are
+//! Chromium inside, started with a debugging port of their own (`attach_app`), and their windows are pages.
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -28,6 +34,17 @@ const START: Duration = Duration::from_secs(15);
 const KEEP: usize = 512;
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+
+/// A frame of a tab that runs in a process of its own (an iframe from another site): reached through a session
+/// of its own, attached as the tab's session is (auto-attach, flat mode)
+#[derive(Clone, Debug)]
+pub struct Frame {
+    pub session: String,
+    /// Its frame id (the target id of an iframe target), to find its element in the page above
+    pub id: String,
+}
+
+type Frames = Arc<Mutex<HashMap<String, Vec<Frame>>>>;
 
 /// Something the browser said on its own
 #[derive(Clone, Debug)]
@@ -49,8 +66,13 @@ pub struct Conn {
     pub pid: u32,
     /// Which browser (for replies)
     pub name: String,
+    /// The person's own browser (through the extension), started without Asctrl's flags: a window others cover
+    /// stops drawing, and input to it waits for a frame
+    pub theirs: bool,
     /// Tab (target id) -> session id, with Page events on
     sessions: Mutex<HashMap<String, String>>,
+    /// A tab's session -> the frames of other sites in it
+    frames: Frames,
 }
 
 /// A tab
@@ -151,12 +173,26 @@ impl Conn {
         let r = self.call(None, "Target.attachToTarget", json!({ "targetId": id, "flatten": true })).await?;
         let s = r["sessionId"].as_str().ok_or("the browser gave no session")?.to_string();
         self.call(Some(&s), "Page.enable", json!({})).await?;
+        // Iframes from other sites run in processes of their own: have them attached as they come
+        let _ = self.call(Some(&s), "Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true })).await;
         self.sessions.lock().unwrap().insert(id.to_string(), s.clone());
         Ok(s)
     }
 
     pub async fn tab(&self, id: &str, title: &str, url: &str) -> Result<Tab, String> {
         Ok(Tab { id: id.into(), session: self.session(id).await?, title: title.into(), url: url.into() })
+    }
+
+    /// The frames of other sites in the tab whose session is `session`
+    pub fn frames_of(&self, session: &str) -> Vec<Frame> {
+        self.frames.lock().unwrap().get(session).cloned().unwrap_or_default()
+    }
+
+    /// A frame that no longer answers (its page went, or the browser let go of the tab)
+    pub fn forget_frame(&self, session: &str) {
+        for v in self.frames.lock().unwrap().values_mut() {
+            v.retain(|f| f.session != session);
+        }
     }
 
     /// Events on `session` since `t`
@@ -172,17 +208,88 @@ impl Conn {
 
 /// Connect to a browser listening at `port` (`path` from its DevToolsActivePort file)
 async fn connect(port: u16, path: &str, pid: u32, name: String) -> Result<Arc<Conn>, String> {
-    let url = format!("ws://127.0.0.1:{port}{path}");
-    let (ws, _) = tokio::time::timeout(Duration::from_secs(5), tokio_tungstenite::connect_async(url.as_str()))
+    connect_url(&format!("ws://127.0.0.1:{port}{path}"), pid, name).await
+}
+
+/// Electron programs started with a debugging port (open_app electron: true)
+static APPS: Mutex<Vec<Arc<Conn>>> = Mutex::new(Vec::new());
+
+/// A port nobody listens on now
+pub fn free_port() -> Option<u16> {
+    std::net::TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok().map(|a| a.port())
+}
+
+/// What `GET path` on 127.0.0.1:`port` answers (the body), if it answers
+async fn http_get(port: u16, path: &str) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::time::timeout(Duration::from_millis(500), tokio::net::TcpStream::connect(("127.0.0.1", port))).await.ok()?.ok()?;
+    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes()).await.ok()?;
+    // Read until the body is all there (by its Content-Length): the server need not close the connection
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut buf = vec![];
+    let mut chunk = [0u8; 4096];
+    loop {
+        let text = String::from_utf8_lossy(&buf).to_string();
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let len = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()));
+            if len.is_some_and(|n| body.len() >= n) {
+                return Some(body.to_string());
+            }
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(left, s.read(&mut chunk)).await {
+            Ok(Ok(0)) => return String::from_utf8_lossy(&buf).split_once("\r\n\r\n").map(|(_, b)| b.to_string()),
+            Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+            _ => return None,
+        }
+    }
+}
+
+/// An Electron program started with `--remote-debugging-port=port`: wait up to `wait` for the port, connect,
+/// and keep it. Its windows are its main process's: that pid is asked of the program itself.
+pub async fn attach_app(port: u16, wait: Duration, pid: u32) -> Result<Arc<Conn>, String> {
+    let start = Instant::now();
+    let mut last = "it opened no debugging port (was it running already? It must be started fresh: close it first)".to_string();
+    // A program may answer on the port and then hand over to another process of its own (VS Code does as it
+    // starts): keep trying until a connection holds
+    while start.elapsed() < wait {
+        if let Some(b) = http_get(port, "/json/version").await
+            && let Ok(version) = serde_json::from_str::<Value>(&b)
+            && let Some(url) = version["webSocketDebuggerUrl"].as_str()
+        {
+            // The program's own name in its user agent (Code/1.142.0), not Chrome's or Electron's
+            let ua = version["User-Agent"].as_str().unwrap_or("");
+            let name = ua
+                .split_whitespace()
+                .filter_map(|t| t.split_once('/').map(|(n, _)| n))
+                .find(|n| !matches!(*n, "Mozilla" | "AppleWebKit" | "Chrome" | "Electron" | "Safari" | "Gecko)"))
+                .unwrap_or("the program")
+                .to_string();
+            match connect_url(url, pid, name).await {
+                Ok(c) if c.call(None, "Target.getTargets", json!({})).await.is_ok() => {
+                    let mut all = APPS.lock().unwrap();
+                    all.retain(|x| x.alive());
+                    all.push(c.clone());
+                    return Ok(c);
+                }
+                Ok(_) => last = "its debugging connection closed at once".into(),
+                Err(e) => last = e,
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    Err(last)
+}
+
+/// Connect to the DevTools WebSocket at `url`
+async fn connect_url(url: &str, pid: u32, name: String) -> Result<Arc<Conn>, String> {
+    let (ws, _) = tokio::time::timeout(Duration::from_secs(5), tokio_tungstenite::connect_async(url))
         .await
         .map_err(|_| "the browser did not take the connection".to_string())?
         .map_err(|e| format!("could not connect to the browser: {e}"))?;
     let (mut sink, mut stream) = ws.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let pending: Pending = Arc::default();
-    let alive = Arc::new(AtomicBool::new(true));
-    let events: Arc<Mutex<VecDeque<Event>>> = Arc::default();
-    let arrived = Arc::new(Notify::new());
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
         while let Some(m) = rx.recv().await {
             if sink.send(tokio_tungstenite::tungstenite::Message::text(m)).await.is_err() {
@@ -190,12 +297,34 @@ async fn connect(port: u16, path: &str, pid: u32, name: String) -> Result<Arc<Co
             }
         }
     });
+    tokio::spawn(async move {
+        while let Some(Ok(msg)) = stream.next().await {
+            if let Ok(text) = msg.to_text()
+                && in_tx.send(text.to_string()).is_err()
+            {
+                break;
+            }
+        }
+    });
+    let c = wire(tx, in_rx, pid, name, false);
+    // Tabs opened from a page (target=_blank, window.open) are new targets: say so as they come
+    let _ = c.call(None, "Target.setDiscoverTargets", json!({ "discover": true })).await;
+    Ok(c)
+}
+
+/// The protocol over a line transport: `tx` takes the messages to send, `rx` gives those that arrive; the
+/// connection is closed when `rx` ends.
+pub fn wire(tx: mpsc::UnboundedSender<String>, mut rx: mpsc::UnboundedReceiver<String>, pid: u32, name: String, theirs: bool) -> Arc<Conn> {
+    let pending: Pending = Arc::default();
+    let alive = Arc::new(AtomicBool::new(true));
+    let events: Arc<Mutex<VecDeque<Event>>> = Arc::default();
+    let arrived = Arc::new(Notify::new());
+    let frames: Frames = Arc::default();
     {
-        let (pending, alive, events, arrived) = (pending.clone(), alive.clone(), events.clone(), arrived.clone());
+        let (pending, alive, events, arrived, frames) = (pending.clone(), alive.clone(), events.clone(), arrived.clone(), frames.clone());
         tokio::spawn(async move {
-            while let Some(Ok(msg)) = stream.next().await {
-                let Ok(text) = msg.to_text() else { continue };
-                let Ok(v) = serde_json::from_str::<Value>(text) else { continue };
+            while let Some(text) = rx.recv().await {
+                let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
                 if let Some(id) = v["id"].as_u64() {
                     if let Some(tx) = pending.lock().unwrap().remove(&id) {
                         let r = match v.get("error") {
@@ -205,6 +334,26 @@ async fn connect(port: u16, path: &str, pid: u32, name: String) -> Result<Arc<Co
                         let _ = tx.send(r);
                     }
                 } else if let Some(method) = v["method"].as_str() {
+                    let parent = v["sessionId"].as_str().unwrap_or("");
+                    match method {
+                        "Target.attachedToTarget" if v["params"]["targetInfo"]["type"] == "iframe" => {
+                            let f = Frame {
+                                session: v["params"]["sessionId"].as_str().unwrap_or("").to_string(),
+                                id: v["params"]["targetInfo"]["targetId"].as_str().unwrap_or("").to_string(),
+                            };
+                            let mut all = frames.lock().unwrap();
+                            let list = all.entry(parent.to_string()).or_default();
+                            list.retain(|x| x.id != f.id);
+                            list.push(f);
+                        }
+                        "Target.detachedFromTarget" => {
+                            let gone = v["params"]["sessionId"].as_str().unwrap_or("");
+                            for l in frames.lock().unwrap().values_mut() {
+                                l.retain(|x| x.session != gone);
+                            }
+                        }
+                        _ => {}
+                    }
                     let mut evs = events.lock().unwrap();
                     if evs.len() == KEEP {
                         evs.pop_front();
@@ -221,10 +370,7 @@ async fn connect(port: u16, path: &str, pid: u32, name: String) -> Result<Arc<Co
             arrived.notify_waiters();
         });
     }
-    let c = Arc::new(Conn { tx, pending, next: AtomicU64::new(1), alive, events, arrived, pid, name, sessions: Mutex::default() });
-    // Tabs opened from a page (target=_blank, window.open) are new targets: say so as they come
-    let _ = c.call(None, "Target.setDiscoverTargets", json!({ "discover": true })).await;
-    Ok(c)
+    Arc::new(Conn { tx, pending, next: AtomicU64::new(1), alive, events, arrived, pid, name, sessions: Mutex::default(), frames, theirs })
 }
 
 /// The port and path a running browser left in its DevToolsActivePort file
@@ -332,10 +478,14 @@ pub async fn tab_in(hwnd: isize) -> Option<(Arc<Conn>, Tab)> {
     if hwnd == 0 {
         return None;
     }
-    let c = current().await?;
-    if crate::winmgr::pid_of(hwnd) != c.pid {
-        return None;
-    }
+    let pid = crate::winmgr::pid_of(hwnd);
+    let c = match current().await.filter(|c| c.pid == pid) {
+        Some(c) => c,
+        None => match crate::browser_ext::conn_for(pid) {
+            Some(c) => c,
+            None => APPS.lock().unwrap().iter().find(|c| c.alive() && c.pid == pid).cloned()?,
+        },
+    };
     let title = crate::winmgr::title_of(hwnd);
     let pages = c.pages().await.ok()?;
     let pick = pages
@@ -356,9 +506,32 @@ pub async fn window_of(c: &Conn, id: &str) -> Option<isize> {
     wins.iter().find(|w| !title.is_empty() && w.title.starts_with(&title)).or(wins.first()).map(|w| w.handle)
 }
 
+/// Where frame `id`'s viewport starts in its tab's viewport (CSS pixels): the content box of its iframe element
+pub async fn frame_origin(c: &Conn, tab: &Tab, id: &str) -> Option<(f64, f64)> {
+    let owner = c.call(Some(&tab.session), "DOM.getFrameOwner", json!({ "frameId": id })).await.ok()?;
+    let node = owner["backendNodeId"].as_u64()?;
+    let b = c.call(Some(&tab.session), "DOM.getBoxModel", json!({ "backendNodeId": node })).await.ok()?;
+    let q = b["model"]["content"].as_array()?;
+    Some((q.first()?.as_f64()?, q.get(1)?.as_f64()?))
+}
+
+/// Open `url` in a new tab of the person's own browser (through Asctrl's extension), in front
+pub async fn open_in_theirs(url: &str) -> Result<(Arc<Conn>, String), String> {
+    let c = crate::browser_ext::any().ok_or(crate::browser_ext::MISSING)?;
+    let r = c.call(None, "Target.createTarget", json!({ "url": url })).await?;
+    let id = r["targetId"].as_str().ok_or("the browser opened no tab")?.to_string();
+    let _ = c.call(None, "Target.activateTarget", json!({ "targetId": id })).await;
+    Ok((c, id))
+}
+
 /// Run `expr` (JavaScript) in the tab and give back its value; a promise is waited for
 pub async fn eval(c: &Conn, tab: &Tab, expr: &str) -> Result<Value, String> {
-    let r = c.call(Some(&tab.session), "Runtime.evaluate", json!({ "expression": expr, "returnByValue": true, "awaitPromise": true })).await?;
+    eval_in(c, &tab.session, expr).await
+}
+
+/// `eval` in a session: a tab's, or a frame's
+pub async fn eval_in(c: &Conn, session: &str, expr: &str) -> Result<Value, String> {
+    let r = c.call(Some(session), "Runtime.evaluate", json!({ "expression": expr, "returnByValue": true, "awaitPromise": true })).await?;
     if let Some(e) = r.get("exceptionDetails") {
         let msg = e["exception"]["description"].as_str().or(e["text"].as_str()).unwrap_or("the page's script failed");
         return Err(msg.lines().next().unwrap_or("").to_string());

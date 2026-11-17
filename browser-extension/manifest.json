@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Asctrl",
+  "version": "0.1.0",
+  "description": "Lets Asctrl, running on this computer, work web pages in this browser without the mouse.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm0deD0yzzRcDRAgPyUOgNCgxRmTWdDhEejRFHvAkQlupYnGXgqz/L1IbwrXQvdsRew01ePfREITH211+1ayxIKAhWlv7Y/4pniMzQJ3mnRnXVXW8p+a0DPpV/b9k3L+oD5mT1qwc7cPzlUSBb9NPR4Rc9wsPaLq8IF2P3GWhqaTMTfbm+mIzSGrxw0zllf2j4XRuyiZjA+PsDMKGJjbAA23fpuJw7RHz1b+kQNwBEatpYEhb35ulG2ZdPGmeMjO0otpXmyXmR0+FtCHd3H8VxXCYMLILmour+NwyNeTMsz9s1gVyGf2AZOJ7yqxadnavBzcCHMnvZD7VoWxY2llQEwIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": ["debugger", "tabs", "nativeMessaging"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Asctrl" }
+}

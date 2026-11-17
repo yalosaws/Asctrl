@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Cross-Site Frame Test</title></head>
+<body style="font: 15px system-ui; margin: 24px">
+<h1>Cross-Site Frame Test</h1>
+<p>The form below comes from another site (localhost instead of 127.0.0.1), so the browser runs it in a process of its own.</p>
+<div style="height: 120px"></div>
+<iframe id="pay" title="Payment" width="460" height="180" style="border: 2px solid #88a; padding: 6px"></iframe>
+<script>
+  // Same server, the other name for it: another site
+  const other = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
+  document.getElementById("pay").src = `http://${other}:${location.port}/frame.html`;
+</script>
+</body>
+</html>
