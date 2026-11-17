@@ -17,6 +17,7 @@ type Status =
   | { state: "ready"; code: string }
   | { state: "admin"; techName: string; timeoutSec: number }
   | { state: "reboot"; techName: string; timeoutSec: number }
+  | { state: "act"; techName: string; timeoutSec: number; what: string; level: "irreversible" | "external" }
   | { state: "connected"; techName: string; code: string };
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -114,7 +115,7 @@ function showPanel(p: HTMLElement, on: boolean, interactive = false) {
 let menuTimer: number | undefined;
 function openMenu() {
   window.clearTimeout(menuTimer);
-  if (state === "admin" || state === "reboot") return;
+  if (state === "admin" || state === "reboot" || state === "act") return;
   resetQuit();
   showPanel(menu, true, true);
 }
@@ -156,19 +157,26 @@ $("btn-end").addEventListener("click", () => {
 
 // ---------------- Questions (admin access, restart) ----------------
 
-type Ask = "admin" | "reboot";
+type Ask = "admin" | "reboot" | "act";
 const ASK_TEXT: Record<Ask, [string, string]> = {
   admin: ["needs administrator access", "If you allow it, they can also:"],
   reboot: ["needs to restart your computer", "Before you click Allow:"],
+  act: ["wants to do something that can't be taken back", "It is about to:"],
 };
 
-function showConsent(name: string, timeoutSec: number, kind: Ask) {
-  $("consent-name").textContent = name;
+function showConsent(name: string, timeoutSec: number, kind: Ask, act?: { what: string; level: string }) {
+  $("consent-name").textContent = name || "The AI";
   [$("consent-ask").textContent, $("consent-sub").textContent] = ASK_TEXT[kind];
+  if (kind === "act" && act) {
+    $("consent-ask").textContent = act.level === "external" ? "wants to send something out" : "wants to do something that can't be undone";
+    $("act-what").textContent = act.what;
+  }
   $("perm-admin").hidden = kind !== "admin";
   $("admin-note").hidden = kind !== "admin";
   $("perm-reboot").hidden = kind !== "reboot";
   $("reboot-note").hidden = kind !== "reboot";
+  $("perm-act").hidden = kind !== "act";
+  $("act-note").hidden = kind !== "act";
   showPanel(menu, false, true);
   showPanel(consent, true, true);
 
@@ -210,7 +218,7 @@ function render(s: Status) {
   state = s.state;
   document.body.dataset.state = s.state;
   setSession(s.state);
-  const asking = s.state === "admin" || s.state === "reboot";
+  const asking = s.state === "admin" || s.state === "reboot" || s.state === "act";
 
   if (asking) {
     const c = center(primary().work);
@@ -219,7 +227,7 @@ function render(s: Status) {
     orb.setMood("ask");
     orb.bump(1);
     showPanel(codeCard, false);
-    showConsent(s.techName, s.timeoutSec, s.state as Ask);
+    showConsent(s.techName, s.timeoutSec, s.state as Ask, s.state === "act" ? { what: s.what, level: s.level } : undefined);
     return;
   }
   setHome(null);

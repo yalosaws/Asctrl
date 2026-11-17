@@ -267,7 +267,7 @@ impl Ctx {
 
 const MAX_TEXT: usize = 60_000;
 
-fn fail(msg: impl Into<String>) -> Output {
+pub(crate) fn fail(msg: impl Into<String>) -> Output {
     Output { ok: false, error: Some(msg.into()), ..Default::default() }
 }
 
@@ -305,6 +305,11 @@ static ACTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Someone else has stopped using the mouse and keyboard once they have been still this long
 const PERSON_IDLE: Duration = Duration::from_millis(1000);
+
+/// Whether the person at the computer is using the mouse or keyboard right now
+fn person_busy() -> bool {
+    std::env::var("ASCTRL_NO_YIELD").as_deref() != Ok("1") && crate::presence::others_ago().is_some_and(|a| a < PERSON_IDLE)
+}
 /// Longest an action waits for them before it gives up (ASCTRL_YIELD_MAX, seconds)
 fn yield_max() -> Duration {
     Duration::from_secs_f64(std::env::var("ASCTRL_YIELD_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0f64).clamp(0.0, 600.0))
@@ -475,14 +480,52 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
 /// Boxed so batch can run tools from inside a tool. A watch argument frames the region input steps wait on.
 fn run_tool<'a>(ctx: &'a Ctx, tool: &'a str, args: &'a Value) -> BoxedRun<'a> {
     Box::pin(async move {
-        let mut out = match watch_arg(ctx, args) {
-            Err(e) => fail(e),
-            Ok(Some(area)) => WATCH.scope(area, dispatch(ctx, tool, args)).await,
-            Ok(None) => dispatch(ctx, tool, args).await,
+        // What it does to the world: the person at the computer says yes first to what can't be taken back
+        let (level, aimed, asked, refused) = crate::safety::gate(tool, args).await;
+        let mut out = match refused {
+            Some(o) => o,
+            None => match watch_arg(ctx, args) {
+                Err(e) => fail(e),
+                Ok(Some(area)) => WATCH.scope(area, dispatch(ctx, tool, args)).await,
+                Ok(None) => dispatch(ctx, tool, args).await,
+            },
         };
         note_yield(&mut out);
+        crate::safety::record(tool, args, level, &aimed, asked, &out);
         out
     })
+}
+
+/// What happened to the desktop's windows lately (the timeline): what came up, went, came to the front or was
+/// renamed, with when. `seconds`: how far back (default 60); `window`: only windows whose title or program has it.
+fn timeline(args: &Value) -> Output {
+    let secs = args.get("seconds").and_then(Value::as_f64).unwrap_or(60.0).clamp(1.0, 3600.0);
+    let Some(evs) = crate::events::recent(Duration::from_secs_f64(secs)) else {
+        return fail("The timeline is off on this computer (ASCTRL_NO_EVENTS): observe shows the windows as they are now");
+    };
+    let want = str_arg(args, "window").to_lowercase();
+    let now = std::time::Instant::now();
+    let lines: Vec<(String, Value)> = evs
+        .iter()
+        .filter(|e| !e.title.trim().is_empty() && e.kind != crate::events::Kind::Renamed || str_arg(args, "renamed") == "true")
+        .map(|e| (e, winmgr::process_name(e.pid)))
+        .filter(|(e, p)| want.is_empty() || e.title.to_lowercase().contains(&want) || p.to_lowercase().contains(&want))
+        .map(|(e, p)| {
+            let ago = now.saturating_duration_since(e.at).as_secs_f64();
+            (
+                format!("{ago:.1} s ago: {} \"{}\" ({p}, handle {})", e.kind.as_str(), uia::clip(&e.title, 80), e.hwnd),
+                serde_json::json!({ "ago": (ago * 10.0).round() / 10.0, "kind": e.kind.as_str(), "title": e.title, "program": p, "handle": e.hwnd }),
+            )
+        })
+        .collect();
+    let from = lines.len().saturating_sub(60);
+    let mut out = text(if lines.is_empty() {
+        format!("Nothing happened to the windows in the last {secs:.0} s")
+    } else {
+        format!("The windows in the last {secs:.0} s, oldest first ({} events{}):\n{}", lines.len(), if from > 0 { ", the last 60" } else { "" }, lines[from..].iter().map(|l| l.0.clone()).collect::<Vec<_>>().join("\n"))
+    });
+    out.data = Some(serde_json::json!({ "events": lines[from..].iter().map(|l| l.1.clone()).collect::<Vec<_>>() }));
+    out
 }
 
 async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
@@ -497,6 +540,7 @@ async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         "wait_for" => wait::wait_for(ctx, args).await,
         "read_grid" => grid::read_grid(ctx, args).await,
         "watch" => watch::watch(ctx, args).await,
+        "timeline" => timeline(args),
         // Acting
         // In Asctrl's own browser, text targets go through the page first (see web)
         "click" => match web::click(ctx, args).await {

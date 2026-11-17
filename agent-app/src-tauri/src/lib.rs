@@ -6,6 +6,7 @@
 mod events;
 mod admin;
 mod capture;
+mod browser_ext;
 mod cdp;
 mod files;
 mod fx;
@@ -15,6 +16,7 @@ mod link;
 mod ocr;
 mod overlay;
 mod presence;
+mod safety;
 mod screen;
 mod shell;
 mod tools;
@@ -150,6 +152,20 @@ async fn detach(app: &AppHandle, via: Via) {
     st.ctx.reset().await;
 }
 
+/// The app, for what is asked of the person from inside the tools
+static APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+
+/// Who is driving, for the action log
+pub fn controller_name() -> String {
+    APP.get().and_then(|a| a.state::<AgentState>().controller.lock().unwrap().as_ref().map(|c| c.name.clone())).unwrap_or_default()
+}
+
+/// Ask the person at the computer whether the AI may do `what` (`level`: irreversible or external), on the overlay
+pub async fn confirm_act(what: &str, level: &str) -> bool {
+    let Some(app) = APP.get() else { return false };
+    ask_user(app, json!({ "state": "act", "techName": controller_name(), "timeoutSec": CONSENT_TIMEOUT.as_secs(), "what": what, "level": level })).await
+}
+
 /// Ask the user a question; a timeout counts as a refusal
 async fn ask_user(app: &AppHandle, status: Value) -> bool {
     let st = app.state::<AgentState>();
@@ -198,6 +214,10 @@ fn quit(app: AppHandle) {
 }
 
 pub fn run() {
+    // Started by a browser as the extension's native host: only relay, no driver
+    if browser_ext::relay_if_asked() {
+        return;
+    }
     let fixed = arg("--code")
         .filter(|c| c.len() == 6 && c.bytes().all(|b| b.is_ascii_digit()))
         .or_else(|| if cfg!(debug_assertions) { std::env::var("ASCTRL_CODE").ok() } else { None });
@@ -218,6 +238,7 @@ pub fn run() {
             overlay::set_hit_regions
         ])
         .setup(|app| {
+            let _ = APP.set(app.handle().clone());
             // The timeline of the desktop's windows, before anything waits on it
             events::start();
             // Whose input is whose: the person at the computer comes first
@@ -226,6 +247,8 @@ pub fn run() {
             fx::init(app.handle().clone());
             tauri::async_runtime::spawn(link::relay_loop(app.handle().clone()));
             tauri::async_runtime::spawn(link::local_server(app.handle().clone()));
+            // The person's own browsers, through Asctrl's extension
+            tauri::async_runtime::spawn(browser_ext::serve());
             Ok(())
         })
         .build(tauri::generate_context!())

@@ -57,7 +57,7 @@ export function setSession(state: string) {
   clearTimers();
   stop();
   // A permission question pauses the session with the calling tool still running; anything else ends it
-  if (state !== "admin" && state !== "reboot") {
+  if (state !== "admin" && state !== "reboot" && state !== "act") {
     running = 0;
     waits = 0;
     orb.setWaiting(false);
