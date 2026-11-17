@@ -10,8 +10,14 @@
 //!   front, its later runs go fast. Anything unexpected in a fast run (a window, a popup, a failure) puts
 //!   the rest of the batch back to the normal pace.
 //!
-//! Each step's result comes back in `data` (`steps`: ok, text, fast), so the plan's runner can carry on
-//! from a step that failed without the rest of the batch being sent again.
+//! A step that names text fitting several controls or none is recovered here first where that needs no
+//! judgment (see `recover`): the plan's `on` rules, a moment's wait, and the candidates for the runner to
+//! choose among. A step recovered here lets the batch go on.
+//!
+//! Each step's result comes back in `data` (`steps`: ok, text, fast, and the step's own data such as
+//! `effect` or `miss`; `notes` when it was recovered), so the plan's runner can carry on from a step that failed
+//! without the rest of the batch being sent again. A batch that failed also says where things stand
+//! (`where`: the failed step's window as observe reads it), so the runner can report without looking again.
 
 use super::*;
 use std::collections::{HashMap, HashSet};
@@ -52,6 +58,25 @@ async fn settle(area: Option<capture::Area>) -> (bool, u128) {
     (calm, t.elapsed().as_millis())
 }
 
+/// Run one step the way the batch does, with its own animation on the overlay
+async fn run_step(ctx: &Ctx, tool: &str, step: &Value, id: String, fast: bool) -> Output {
+    let geo = fx_before(ctx, tool, step);
+    fx::emit(serde_json::json!({ "phase": "start", "id": id, "tool": tool, "args": step, "geo": geo }));
+    let out = STEP.scope(true, FAST.scope(fast, fx::CALL_ID.scope(id.clone(), run_tool(ctx, tool, step)))).await;
+    let after = fx_after(ctx, tool, &geo, &out);
+    let t: String = out.body().chars().take(6000).collect();
+    fx::emit(serde_json::json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "quiet": probe_missed(step, &out), "text": t, "geo": after }));
+    out
+}
+
+/// The plan's popup rules: { "text a popup shows": "what to press" }
+fn on_rules(args: &Value) -> Vec<(String, String)> {
+    args.get("on")
+        .and_then(Value::as_object)
+        .map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty()).collect())
+        .unwrap_or_default()
+}
+
 pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
     let Some(steps) = args.get("steps").and_then(Value::as_array) else { return fail("Missing steps") };
     if steps.is_empty() || steps.len() > MAX_STEPS {
@@ -69,6 +94,7 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
             return fail(format!("Step {}: \"{tool}\" can't run in a batch; allowed: {}", i + 1, BATCHABLE.join(", ")));
         }
     }
+    let on = on_rules(args);
     let area = WATCH.try_with(|w| *w).ok();
     let call = fx::call_id();
     let started = std::time::Instant::now();
@@ -81,6 +107,8 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
     // Inputs went in without the screen being let to settle
     let mut unsettled = false;
     let mut fast_count = 0usize;
+    // The step before went in fast: the screen may not show what it did yet
+    let mut prev_fast = false;
     // One reading of the window for looking ahead (locate::peek)
     let peeked = Arc::new(Mutex::new(None));
     for (i, step) in steps.iter().enumerate() {
@@ -115,12 +143,22 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
         let before = if input { Some(windows_now()) } else { None };
         // Each step animates on its own
         let id = format!("{call}.{i}");
-        let geo = fx_before(ctx, tool, step);
-        fx::emit(serde_json::json!({ "phase": "start", "id": id, "tool": tool, "args": step, "geo": geo }));
-        let out = STEP.scope(true, FAST.scope(fast, fx::CALL_ID.scope(id.clone(), run_tool(ctx, tool, step)))).await;
-        let after = fx_after(ctx, tool, &geo, &out);
-        let t: String = out.body().chars().take(6000).collect();
-        fx::emit(serde_json::json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "quiet": probe_missed(step, &out), "text": t, "geo": after }));
+        let mut out = run_step(ctx, tool, step, id.clone(), fast).await;
+        let mut notes: Vec<String> = vec![];
+        if !out.ok
+            && let Some(wish) = recover::Wish::of(step)
+        {
+            let settled = i == 0 || !prev_fast || str_arg(&steps[i - 1], "tool") == "wait_for";
+            let mut n = 0;
+            let again = |s: Value| {
+                n += 1;
+                let rid = format!("{id}.r{n}");
+                async move { run_step(ctx, tool, &s, rid, false).await }
+            };
+            let r = recover::recover(ctx, step, &wish, &on, settled, out, again).await;
+            out = r.out;
+            notes = r.notes;
+        }
         // Did it bring anything up? (A popup the watcher is on counts: it was not the step's doing, but the
         // screen is not what the next step expects until it is gone.)
         if let Some((fg0, wins0)) = before {
@@ -141,9 +179,17 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
                 *e &= quiet;
             }
         }
+        prev_fast = fast;
         let room = if READS.contains(&tool) { 6000 } else { 600 };
         let body: String = out.body().chars().take(room).collect();
-        results.push(serde_json::json!({ "ok": out.ok, "text": body, "fast": fast }));
+        let mut r = serde_json::json!({ "ok": out.ok, "text": body, "fast": fast });
+        if let Some(d) = out.data.take() {
+            r["data"] = d;
+        }
+        if !notes.is_empty() {
+            r["notes"] = serde_json::json!(notes);
+        }
+        results.push(r);
         if !out.ok {
             failed = Some(i);
             break;
@@ -166,7 +212,19 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
         .map(|(i, r)| format!("{}. {} {}: {}", i + 1, if r["ok"] == true { "✓" } else { "✗" }, str_arg(&steps[i], "tool"), r["text"].as_str().unwrap_or("")))
         .collect();
     let body = format!("{head}\n{}", lines.join("\n"));
-    let data = Some(serde_json::json!({ "steps": results, "failed": failed }));
+    let mut data = serde_json::json!({ "steps": results, "failed": failed });
+    // Where things stand, so whoever re-plans needn't look again: the failed step's window
+    if let Some(i) = failed.filter(|_| bool_arg(args, "where") != Some(false)) {
+        let mut o = serde_json::json!({ "max": 40 });
+        if let Some(w) = steps[i].get("window") {
+            o["window"] = w.clone();
+        }
+        let seen = look::observe(ctx, &o).await;
+        if seen.ok {
+            data["where"] = serde_json::json!(seen.body().lines().take(45).collect::<Vec<_>>().join("\n"));
+        }
+    }
+    let data = Some(data);
     match failed {
         None => Output { ok: true, text: Some(body), data, ..Default::default() },
         Some(_) => Output { ok: false, error: Some(body), data, ..Default::default() },

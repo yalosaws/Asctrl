@@ -118,8 +118,64 @@ export interface ToolResult {
   /** File result (download_file, base64) */
   file?: { name: string; data: string };
   error?: string;
-  /** Structured results, for a program reading the reply (a batch's steps) */
+  /** Structured results, for a program reading the reply: ActionData, BatchData, ObserveData. Programs read
+   *  these, never the wording of text or error, which is written for the AI and may change. */
   data?: unknown;
+}
+
+// ---- Structured results (ToolResult.data) ----
+
+/** A control offered when a target missed */
+export interface Candidate {
+  /** Its reference, "e12" */
+  ref: string;
+  role: string;
+  name: string;
+  /** What it is and how it stands, without where: `Button "Save" (disabled)` */
+  label: string;
+}
+
+/** Why a target could not be pointed at */
+export interface Miss {
+  /** ambiguous: several things fit equally well; absent: nothing fits (or a list has no such item); stale: the
+   *  screen is not what the AI saw; other: anything else */
+  kind: "ambiguous" | "absent" | "stale" | "other";
+  /** The controls to choose among: the equal matches, then (after a batch step's recovery) the closest ones */
+  candidates: Candidate[];
+}
+
+/** An action's reply (click, type_text, set_value, …) */
+export interface ActionData {
+  /** What the screen did; absent when it wasn't watched (fast mode) */
+  effect?: "changed" | "unchanged";
+  /** Set when the target missed */
+  miss?: Miss;
+}
+
+/** One step of a batch */
+export interface BatchStepResult {
+  ok: boolean;
+  text: string;
+  /** It went in without waiting for the screen */
+  fast: boolean;
+  data?: ActionData;
+  /** What the driver did to get the step through: "↷ …" lines of their own, "(…)" words on the step's line */
+  notes?: string[];
+}
+
+/** batch's reply */
+export interface BatchData {
+  steps: BatchStepResult[];
+  /** The step it stopped at */
+  failed: number | null;
+  /** When it failed: the failed step's window as observe reads it (unless asked where: false) */
+  where?: string;
+}
+
+/** observe's reply */
+export interface ObserveData {
+  /** Front to back */
+  windows: { handle: number; program: string; title: string; front: boolean }[];
 }
 
 export type Message =

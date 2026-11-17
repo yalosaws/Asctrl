@@ -270,6 +270,10 @@ pub(super) async fn observe(ctx: &Ctx, args: &Value) -> Output {
             }
             let mut o = text(s);
             o.image = image;
+            // The windows, front to back, for a program reading the reply
+            let wins = tokio::task::spawn_blocking(winmgr::list).await.unwrap_or_default();
+            let list: Vec<Value> = wins.iter().map(|w| serde_json::json!({ "handle": w.handle, "program": w.process, "title": w.title, "front": w.foreground })).collect();
+            o.data = Some(serde_json::json!({ "windows": list }));
             o
         }
         Ok(Err(e)) => {

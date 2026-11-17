@@ -38,16 +38,88 @@ pub struct Ask {
     pub anywhere: bool,
 }
 
-/// Why something could not be pointed at
+/// Why something could not be pointed at, as a program reading the reply tells it apart
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MissKind {
+    /// Anything else: an elevated window, a disabled control, bad arguments
+    Other,
+    /// The screen is no longer what the AI saw: a fresh screenshot goes back with the error
+    Stale,
+    /// Several things answer to the text equally well (`candidates` lists the controls among them)
+    Ambiguous,
+    /// Nothing answers to the text (or a list has no such item)
+    Absent,
+}
+
+impl MissKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MissKind::Other => "other",
+            MissKind::Stale => "stale",
+            MissKind::Ambiguous => "ambiguous",
+            MissKind::Absent => "absent",
+        }
+    }
+
+    /// Text that names something else, or nothing yet: worth waiting for or deciding between
+    pub fn unresolved(self) -> bool {
+        matches!(self, MissKind::Ambiguous | MissKind::Absent)
+    }
+}
+
+/// A control offered instead of a target that missed
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cand {
+    pub rf: u32,
+    pub role: &'static str,
+    pub name: String,
+    /// What it is and how it stands, without where: `Button "Save" (disabled)`
+    pub label: String,
+}
+
+impl Cand {
+    pub fn of(n: &Node) -> Cand {
+        let mut label = n.role.to_string();
+        if !n.name.is_empty() {
+            label += &format!(" \"{}\"", uia::clip(&n.name, 80));
+        }
+        if !n.value.is_empty() && n.value != n.name {
+            label += &format!(" = \"{}\"", uia::clip(&n.value, 40));
+        }
+        let st = n.states();
+        if !st.is_empty() {
+            label += &format!(" ({})", st.join(", "));
+        }
+        Cand { rf: n.rf, role: n.role, name: n.name.clone(), label }
+    }
+
+    pub fn json(&self) -> Value {
+        serde_json::json!({ "ref": format!("e{}", self.rf), "role": self.role, "name": self.name, "label": self.label })
+    }
+}
+
 pub struct Miss {
     pub msg: String,
-    /// The screen is no longer what the AI saw: a fresh screenshot goes back with the error
-    pub stale: bool,
+    pub kind: MissKind,
+    /// The equally good matches, when there were several among the controls
+    pub candidates: Vec<Cand>,
+}
+
+impl Miss {
+    pub fn new(kind: MissKind, msg: impl Into<String>) -> Miss {
+        Miss { msg: msg.into(), kind, candidates: vec![] }
+    }
+
+    pub fn stale(&self) -> bool {
+        self.kind == MissKind::Stale
+    }
 }
 
 impl From<String> for Miss {
     fn from(msg: String) -> Self {
-        Miss { msg, stale: false }
+        // A list without the item asked for is, to whoever wrote the step, the same as text that shows nowhere
+        let kind = if msg.contains(" has no item \"") { MissKind::Absent } else { MissKind::Other };
+        Miss::new(kind, msg)
     }
 }
 
@@ -429,7 +501,7 @@ fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
                         (0, _) => None,
                         (1, None | Some(1)) => Some(pool[0]),
                         (n, Some(k)) if k <= n => Some(pool[k - 1]),
-                        (n, Some(k)) => return Err(format!("\"{q}\" is on screen only {n} time(s), so there is no match {k}").into()),
+                        (n, Some(k)) => return Err(Miss::new(MissKind::Absent, format!("\"{q}\" is on screen only {n} time(s), so there is no match {k}"))),
                         (n, None) => {
                             let lines: Vec<String> = pool.iter().take(8).enumerate().map(|(i, h)| format!("{}. {} in \"{}\"", i + 1, f.at(center(h.rect).0, center(h.rect).1), uia::clip(&h.line, 60))).collect();
                             return Err(format!("\"{q}\" is on screen in {n} places. Pass nth, or click the one you mean by x and y:\n{}", lines.join("\n")).into());
@@ -471,7 +543,7 @@ fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
             if !problem.is_empty() {
                 msg += &format!(" ({problem})");
             }
-            return Err(msg.into());
+            return Err(Miss::new(MissKind::Absent, msg));
         }
         std::thread::sleep(Duration::from_millis(120));
     }
@@ -516,7 +588,7 @@ pub fn guard(seen: &[winmgr::Slot], now: &[winmgr::Slot], x: i32, y: i32, title:
 fn by_point(ask: &Ask, x: i32, y: i32) -> Result<Located, Miss> {
     let (px, py) = ask.frame.to_shot(x, y).unwrap_or((x, y));
     let (nx, ny, moved) = guard(&ask.seen, &winmgr::layout(), x, y, &winmgr::title_of)
-        .map_err(|why| Miss { msg: format!("Not done: since you last looked, {why}. Nothing was clicked or typed. Aim again on the fresh screenshot."), stale: true })?;
+        .map_err(|why| Miss::new(MissKind::Stale, format!("Not done: since you last looked, {why}. Nothing was clicked or typed. Aim again on the fresh screenshot.")))?;
     let hwnd = winmgr::top_window_at(nx, ny).unwrap_or(0);
     let note = if moved { " (the window had moved since the screenshot; the point moved with it)".to_string() } else { String::new() };
     Ok(Located { point: (nx, ny), hwnd, scene: (hwnd != 0).then_some(hwnd), live: None, desc: format!("({px},{py})"), note })

@@ -18,6 +18,7 @@ mod locate;
 mod look;
 mod pointer;
 pub mod popups;
+mod recover;
 mod report;
 mod system;
 mod values;
@@ -53,20 +54,25 @@ impl Output {
     }
 }
 
+/// The kind of miss a reply carries (see `locate::MissKind`), if it is one
+pub fn miss_kind(data: Option<&Value>) -> Option<&str> {
+    data?.get("miss")?.get("kind")?.as_str()
+}
+
 /// A probe (run trying a step as written before deciding another way) that missed: not a failure worth
 /// flashing on the overlay, since the step goes on another way
 pub fn probe_missed(args: &Value, out: &Output) -> bool {
-    const MISS: [&str; 4] = ["equally well", "Nothing in ", "has no item", " is on screen in "];
+    let unresolved = |d: Option<&Value>| matches!(miss_kind(d), Some("ambiguous" | "absent"));
     if out.ok {
         return false;
     }
     // A batch that stopped at such a probe: the plan's runner carries on from that step
     let failed = out.data.as_ref().and_then(|d| Some((d.get("failed")?.as_u64()? as usize, d.get("steps")?.as_array()?)));
     if let (Some(steps), Some((i, results))) = (args.get("steps").and_then(Value::as_array), failed) {
-        let text = results.get(i).and_then(|r| r.get("text")).and_then(Value::as_str).unwrap_or("");
-        return steps.get(i).is_some_and(|s| bool_arg(s, "probe") == Some(true)) && MISS.iter().any(|m| text.contains(m));
+        let probe = steps.get(i).is_some_and(|s| bool_arg(s, "probe") == Some(true));
+        return probe && unresolved(results.get(i).and_then(|r| r.get("data")));
     }
-    bool_arg(args, "probe") == Some(true) && MISS.iter().any(|m| out.body().contains(m))
+    bool_arg(args, "probe") == Some(true) && unresolved(out.data.as_ref())
 }
 
 #[derive(Serialize)]
@@ -515,13 +521,21 @@ mod tests {
 
     #[test]
     fn a_batch_stopped_by_a_missed_probe_is_no_failure_to_flash() {
-        let miss = "Nothing in \"Bench\" shows \"send\"";
-        let out = |text: &str| Output { ok: false, data: Some(serde_json::json!({ "failed": 1, "steps": [{ "ok": true, "text": "" }, { "ok": false, "text": text }] })), ..Default::default() };
+        let step = |kind: Option<&str>| match kind {
+            Some(k) => serde_json::json!({ "ok": false, "text": "", "data": { "miss": { "kind": k, "candidates": [] } } }),
+            None => serde_json::json!({ "ok": false, "text": "Access denied" }),
+        };
+        let out = |kind: Option<&str>| Output { ok: false, data: Some(serde_json::json!({ "failed": 1, "steps": [{ "ok": true, "text": "" }, step(kind)] })), ..Default::default() };
         let args = |probe: bool| serde_json::json!({ "steps": [{ "tool": "keys" }, { "tool": "click", "target": "send", "probe": probe }] });
-        assert!(probe_missed(&args(true), &out(miss)));
+        assert!(probe_missed(&args(true), &out(Some("absent"))));
+        assert!(probe_missed(&args(true), &out(Some("ambiguous"))));
         // Not a probe, or a probe that failed some other way: a real failure
-        assert!(!probe_missed(&args(false), &out(miss)));
-        assert!(!probe_missed(&args(true), &out("Access denied")));
+        assert!(!probe_missed(&args(false), &out(Some("absent"))));
+        assert!(!probe_missed(&args(true), &out(Some("stale"))));
+        assert!(!probe_missed(&args(true), &out(None)));
+        // A single call
+        let one = Output { ok: false, data: Some(report::miss_data(locate::MissKind::Absent, &[])), ..Default::default() };
+        assert!(probe_missed(&serde_json::json!({ "target": "send", "probe": true }), &one));
     }
 
     #[test]

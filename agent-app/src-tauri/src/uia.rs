@@ -140,7 +140,7 @@ impl Node {
         (self.has(flag::VALUE) && !self.has(flag::READONLY)) || matches!(self.role, "Edit" | "Document")
     }
 
-    fn state_words(&self) -> Vec<&'static str> {
+    pub fn states(&self) -> Vec<&'static str> {
         state_words(self.flags)
     }
 
@@ -163,7 +163,7 @@ impl Node {
         if !self.value.is_empty() && self.value != self.name {
             s += &format!(" = \"{}\"", clip(&self.value, long));
         }
-        let st = self.state_words();
+        let st = self.states();
         if !st.is_empty() {
             s += &format!(" ({})", st.join(", "));
         }

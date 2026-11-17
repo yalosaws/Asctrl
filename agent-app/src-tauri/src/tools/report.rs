@@ -64,6 +64,22 @@ pub fn describe_change(f: &Frame, c: Option<&screen::Change>, delivered: bool) -
     }
 }
 
+/// What the screen did, for a program reading the reply: "changed", "unchanged", or None when it wasn't
+/// watched (fast mode, or an action that doesn't touch the screen). Says the same as `describe_change`.
+pub fn effect(c: Option<&screen::Change>) -> Option<&'static str> {
+    let c = c?;
+    match (c.changed, c.rect.is_some() || c.new_front.is_some()) {
+        (true, true) => Some("changed"),
+        (true, false) => None,
+        (false, _) => Some("unchanged"),
+    }
+}
+
+/// The structured part of an action's reply
+fn did_data(did: &Did) -> Option<Value> {
+    effect(did.change.as_ref()).map(|e| serde_json::json!({ "effect": e }))
+}
+
 /// Most lines of control changes in a reply; observe shows everything
 const MAX_CHANGES: usize = 40;
 /// A window whose controls take longer than this to read is not re-read after every action
@@ -105,9 +121,14 @@ pub async fn conclude(ctx: &Ctx, args: &Value, did: Did, shot_default: bool) -> 
     };
     let f = ctx.frame();
     let mut body = did.done.clone() + &describe_change(&f, did.change.as_ref(), did.delivered);
+    let data = did_data(&did);
+    let with = |mut o: Output| {
+        o.data = data.clone();
+        o
+    };
     // Inside a batch every step says what it did in a line; the batch reports once at the end
     if STEP.try_with(|s| *s).unwrap_or(false) || after == After::None {
-        return text(body);
+        return with(text(body));
     }
     let came_up = did.change.as_ref().and_then(|c| c.front);
     let hwnd = came_up.or(did.hwnd).filter(|h| winmgr::exists(*h)).unwrap_or_else(winmgr::foreground);
@@ -155,7 +176,15 @@ pub async fn refuse_stale(ctx: &Ctx, msg: String) -> Output {
     }
 }
 
+/// The structured part of a failed lookup's reply: `{miss: {kind, candidates}}`
+pub fn miss_data(kind: locate::MissKind, candidates: &[locate::Cand]) -> Value {
+    serde_json::json!({ "miss": { "kind": kind.as_str(), "candidates": candidates.iter().map(locate::Cand::json).collect::<Vec<_>>() } })
+}
+
 /// Turn a failed lookup into a reply
 pub async fn missed(ctx: &Ctx, miss: locate::Miss) -> Output {
-    if miss.stale { refuse_stale(ctx, miss.msg).await } else { fail(miss.msg) }
+    let data = Some(miss_data(miss.kind, &miss.candidates));
+    let mut o = if miss.stale() { refuse_stale(ctx, miss.msg).await } else { fail(miss.msg) };
+    o.data = data;
+    o
 }

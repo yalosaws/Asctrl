@@ -3,10 +3,14 @@
 // A plan is a list of steps named by what they act on ("Compose", "To"), not by reference, so it can be written
 // without looking first. The whole plan is checked before anything runs. Its steps then go to the driver in as
 // few calls as possible (a batch per stretch of steps), where each is tried as written: the driver matches text
-// locally, for free, and paces itself (see the driver's batch). Only when a step's text matches several
-// controls or none does the runner take over that one step: a rule the plan gave for a popup, then a decision
-// model (Drex) choosing among a handful of candidates, and only a confident, harmless answer is acted on.
-// Anything else stops the plan and hands back to the AI with what it needs to re-plan.
+// locally, for free, and paces itself (see the driver's batch). When a step's text matches several controls or
+// none, the driver first does what needs no judgment, on the spot (a rule the plan gave for a popup, a moment's
+// wait), and hands back the candidates; only then does the runner take over that one step, with a decision model
+// (Drex) choosing among them, and only a confident, harmless answer is acted on. Anything else stops the plan
+// and hands back to the AI with what it needs to re-plan.
+//
+// Everything the runner learns from the driver comes as structured data (a step's effect on the screen, what
+// kind of miss it was and the candidates, the windows): nothing is read back out of the replies' wording.
 //
 // While a plan runs, the driver also dismisses popups that turn up (the plan's `on` rules, or a button that
 // only dismisses), in between steps.
@@ -20,7 +24,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { TechClient } from "./tech-client.ts";
-import type { ToolName, ToolResult } from "../shared/protocol.ts";
+import type { ActionData, BatchData, BatchStepResult, Candidate, ObserveData, ToolName, ToolResult } from "../shared/protocol.ts";
 
 export type Step = Record<string, unknown>;
 /** A grid drawn on screen (a game board, a calendar): cells are named "board[row,col]", from 1 */
@@ -183,65 +187,24 @@ interface Item {
   k: number;
 }
 
-/** What an action's reply says it did to the screen: changed it, changed nothing, or (fast, no reading) unknown */
-function effectOf(t: string): "changed" | "unchanged" | "" {
-  if (/Screen changed around|is now in front/.test(t)) return "changed";
-  if (/Nothing visibly changed|No visible change/.test(t)) return "unchanged";
-  return "";
-}
-const effectText = (e: string) => (e === "changed" ? " → the screen changed" : e === "unchanged" ? " → nothing changed on screen" : "");
+type Effect = NonNullable<ActionData["effect"]> | "";
+/** What an action did to the screen, as the driver says in its data: changed it, changed nothing, or (fast, no
+ *  reading) unknown */
+const effectOf = (data: unknown): Effect => (data as ActionData | undefined)?.effect ?? "";
+const effectText = (e: Effect) => (e === "changed" ? " → the screen changed" : e === "unchanged" ? " → nothing changed on screen" : "");
 
-const CLICKISH = /^(Button|SplitButton|Link|MenuItem|TabItem|ListItem|TreeItem|DataItem|CheckBox|RadioButton|Hyperlink)$/;
-const FIELDISH = /^(Edit|ComboBox|Document|Spinner|CheckBox|RadioButton|Slider)$/;
 /** Acting on these is never left to the decision model's own judgment */
 const DESTRUCTIVE = /delete|remove|erase|discard|send|submit|purchase|buy|pay|replace|overwrite|format|uninstall|sign out|log out|删除|移除|清空|丢弃|发送|提交|购买|支付|付款|替换|覆盖|格式化|卸载|退出登录/i;
 
-interface Cand { ref: string; role: string; name: string; label: string }
+type Cand = Candidate;
 /** What a control is, without what it holds or its state: stays the same as it is used */
 const ident = (c: Cand) => `${c.role} "${c.name}"`;
 
-/** Lines like `[e12] Button "Save" (disabled) = "x" @(1,2)` from observe or a miss message */
-function parseControls(text: string): Cand[] {
-  const out: Cand[] = [];
-  for (const m of text.matchAll(/\[(e\d+)\] (\w+)(?: "((?:[^"\\]|\\.)*)")?([^@\n]*)/g)) {
-    const [, ref, role, name = "", rest] = m;
-    const label = `${role}${name ? ` "${name.slice(0, 80)}"` : ""}${rest.trimEnd().slice(0, 60)}`.replace(/[,:]/g, " ").replace(/\s+/g, " ").trim();
-    out.push({ ref, role, name, label });
-  }
-  return out;
-}
+/** A target that missed, as the driver's data says: what kind of miss, and the controls to choose among */
+const missOf = (data: unknown) => (data as ActionData | undefined)?.miss;
+const unresolved = (m: ReturnType<typeof missOf>) => m?.kind === "ambiguous" || m?.kind === "absent";
 
-const norm = (s: string) => s.toLowerCase().replace(/[\s​-‏‪-‮]+/g, " ").trim();
-function grams(s: string) {
-  const t = norm(s);
-  const g = new Set<string>();
-  for (const w of t.split(/[^\p{L}\p{N}]+/u)) if (w.length > 1) g.add(w);
-  for (let i = 0; i + 1 < t.length; i++) g.add(t.slice(i, i + 2));
-  return g;
-}
-/** The candidates worth asking about: the closest by name, then controls of the right kind, at most 40 */
-function shortlist(all: Cand[], want: string, kind: "click" | "field"): Cand[] {
-  const fits = (c: Cand) => (kind === "click" ? CLICKISH : FIELDISH).test(c.role);
-  const w = grams(want);
-  const words = norm(want).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  const scored = all
-    .filter((c) => c.name || fits(c))
-    .map((c) => {
-      let s = 0;
-      for (const g of grams(`${c.name}`)) if (w.has(g)) s += g.length;
-      // Whole words count for more than letters inside other words ("To" in "To recipients", not in "Toggle"),
-      // and a name that starts with them most
-      const name = norm(c.name);
-      const own = new Set(name.split(/[^\p{L}\p{N}]+/u));
-      for (const x of words) if (own.has(x)) s += 4;
-      if (words.length && name.startsWith(words.join(" "))) s += 6;
-      return { c, s: s + (fits(c) ? 0.5 : 0) };
-    });
-  const named = scored.filter((x) => x.s >= 1).sort((a, b) => b.s - a.s).slice(0, 8).map((x) => x.c);
-  const seen = new Set(named.map((c) => c.ref));
-  const kindOnly = all.filter((c) => fits(c) && c.name && !seen.has(c.ref)).slice(0, 40 - named.length);
-  return [...named, ...kindOnly];
-}
+const norm = (s: string) => s.toLowerCase().replace(/[\s\u200b-\u200f\u202a-\u202e]+/g, " ").trim();
 
 // ---------- Drex
 
@@ -342,16 +305,14 @@ interface Job {
   history: string[];
   /** Inputs the driver put in without waiting for the screen */
   fast: number;
+  /** Where things stood when a batch failed, and the call count then: still true while nothing else was called */
+  where?: { text: string; at: number };
 }
 
 /** Most steps sent to the driver in one call */
 const SEGMENT = 500;
 
-interface BatchStep {
-  ok: boolean;
-  text: string;
-  fast: boolean;
-}
+type BatchStep = BatchStepResult;
 
 export class Runner {
   private jobs: Job[] = [];
@@ -361,6 +322,8 @@ export class Runner {
   private unreported?: Job;
   private drex = new Drex();
   private client: TechClient;
+  /** Calls made to the driver, to tell whether a reading of the screen is still the latest */
+  private calls = 0;
 
   constructor(client: TechClient) {
     this.client = client;
@@ -491,32 +454,32 @@ export class Runner {
         for (let j = i; j < items.length && items[j].s.check === undefined && seg.length < SEGMENT; j++) seg.push(items[j]);
         const prepared: Prepared[] = [];
         for (const x of seg) prepared.push(await this.prepare(job, x.s));
-        const steps = prepared.map((x, m) => ({ tool: x.tool, ...x.args, ...(many ? { k: seg[m].k } : {}) }));
+        const steps = prepared.map((x, m) => ({ tool: x.tool, ...x.args, ...this.recoverArg(x, seg[m].s), ...(many ? { k: seg[m].k } : {}) }));
         const pace = p.fast === true ? "fast" : p.fast === false ? "normal" : "auto";
         // A watch holds its batch for as long as it watches
         const watching = prepared.reduce((t, x) => t + (x.tool === "watch" ? Number(x.args.timeoutSec ?? 60) * 1000 : 0), 0);
-        const r = await this.call("batch", { steps, pace, after: "none" }, 120_000 + watching);
-        const data = r.data as { steps?: BatchStep[]; failed?: number | null } | undefined;
+        const r = await this.call("batch", { steps, pace, after: "none", on: p.on ?? {} }, 120_000 + watching);
+        const data = r.data as Partial<BatchData> | undefined;
         if (!data?.steps) throw new Error(firstLines(r.error ?? r.text ?? "the driver gave no step results (is it up to date?)", 6));
         data.steps.forEach((res, m) => {
           if (res.fast) job.fast++;
           if (!res.ok) return;
           const x = prepared[m];
           const what = x.alias ? `${x.what} → ${x.alias} (remembered)` : x.what;
+          // What the driver did on the way: a popup pressed away is a line of its own, a wait a word on the step's
+          const [asides, aside] = notes(res);
+          for (const n of asides) said(seg[m], n);
           // What a read step read is the point of it
-          said(seg[m], x.tool === "read_grid" || x.tool === "read_text" || x.tool === "observe" || x.tool === "watch" ? `✓ ${what}:\n${res.text}` : `✓ ${what}`);
-          this.noteDone(job, what, res.text);
+          said(seg[m], x.tool === "read_grid" || x.tool === "read_text" || x.tool === "observe" || x.tool === "watch" ? `✓ ${what}${aside}:\n${res.text}` : `✓ ${what}${aside}`);
+          this.noteDone(job, what, effectOf(res.data));
         });
         if (data.failed == null) {
           i += seg.length;
           continue;
         }
         const m = data.failed;
-        // Settled before it: a wait came just before, or an input that waited for the screen
-        const prev = m > 0 ? seg[m - 1] : i > 0 ? items[i - 1] : undefined;
-        const prevFast = m > 0 ? data.steps[m - 1]?.fast : false;
-        const settled = !prev || prev.s.expect !== undefined || prev.s.await !== undefined || prev.s.check !== undefined || prev.s.tool === "wait_for" || !prevFast;
-        if (!(await this.recover(job, seg[m], prepared[m], data.steps[m].text, settled, said))) {
+        if (data.where) job.where = { text: data.where, at: this.calls };
+        if (!(await this.recover(job, seg[m], prepared[m], data.steps[m], said))) {
           if (seg[m].row > 0) job.lines.push(`✗ in row ${seg[m].row + 1} of ${rows.length} ${JSON.stringify(rows[seg[m].row]).slice(0, 80)}`);
           return await this.fail(job, undefined, (seg[m].s.window as string | number | undefined) ?? p.window);
         }
@@ -549,13 +512,31 @@ export class Runner {
     if (n) job.lines.push(`(${n === 1 ? "the decision model's choice in this plan was" : `the decision model's ${n} choices in this plan were`} not remembered, since the plan failed)`);
     job.status = "failed";
     this.unreported = job;
-    // A short look at where things stand, so the AI can re-plan without a separate look
+    // A short look at where things stand, so the AI can re-plan without a separate look: the one the driver took
+    // when the batch failed, if nothing has been done since
+    if (job.where && job.where.at === this.calls) {
+      job.tail = `Where things stand:\n${job.where.text}`;
+      return;
+    }
     const o = await this.call("observe", { silent: true, ...this.win(window), max: 40 }).catch(() => undefined);
     if (o?.text) job.tail = `Where things stand:\n${o.text.split("\n").slice(0, 45).join("\n")}`;
   }
 
   private call(tool: ToolName, args: Record<string, unknown>, timeoutMs = 120_000): Promise<ToolResult> {
+    this.calls++;
     return this.client.call(tool, args, timeoutMs);
+  }
+
+  /** What a step asks of the driver when its text target misses: kind of control, and whether it may wait */
+  private recoverArg(x: Prepared, s: Step) {
+    return x.args.probe && typeof x.args.target === "string" ? { recover: { kind: x.kind, late: s.timeoutSec === undefined } } : {};
+  }
+
+  /** One step, run as the batch runs it, so a miss comes back recovered as far as the driver can take it */
+  private async step(job: Job, tool: ToolName, args: Record<string, unknown>, recover: object): Promise<BatchStep> {
+    const r = await this.call("batch", { steps: [{ tool, ...args, ...recover }], pace: "normal", after: "none", on: job.plan.on ?? {}, where: false });
+    const s = (r.data as BatchData | undefined)?.steps?.[0];
+    return s ?? { ok: false, text: (r.error ?? r.text ?? "the driver gave no step result").trim(), fast: false };
   }
 
   private win(window: string | number | undefined) {
@@ -568,15 +549,15 @@ export class Runner {
     const k = String(window ?? "");
     const known = job.scopes.get(k);
     if (known) return known;
-    // The windows, front to back, as observe lists them: [handle] program "title"
-    const lw = (await this.call("observe", { silent: true, max: 1 }).catch(() => undefined))?.text ?? "";
-    const wins = [...lw.matchAll(/\[(\d+)\] (\S+) "(.*?)"(?= \[| \(|\.|$)/gm)].map((m) => ({ h: Number(m[1]), program: m[2], title: m[3] }));
+    // The windows, front to back
+    const o = await this.call("observe", { silent: true, max: 1 }).catch(() => undefined);
+    const wins = (o?.data as ObserveData | undefined)?.windows ?? [];
     const w =
       typeof window === "number"
-        ? wins.find((x) => x.h === window)
+        ? wins.find((x) => x.handle === window)
         : typeof window === "string"
           ? wins.find((x) => `${x.program} ${x.title}`.toLowerCase().includes(window.toLowerCase()))
-          : wins[0];
+          : (wins.find((x) => x.front) ?? wins[0]);
     const scope = w ? `${w.program.toLowerCase()}|${w.title.replace(/\d+/g, "#").replace(/\s+/g, " ").trim()}` : "?";
     job.scopes.set(k, scope);
     return scope;
@@ -596,51 +577,33 @@ export class Runner {
     return { ...x, args: { ...x.args, target: name }, alias, asWritten: x.args };
   }
 
-  /** A step whose target the driver couldn't tell: the plan's popup rules, then the decision model */
-  private async recover(job: Job, it: Item, x: Prepared, err: string, settled: boolean, said: (it: Item, line: string) => void): Promise<boolean> {
+  /** A step whose target the driver couldn't tell, after the driver did what needed no judgment (the plan's popup
+   *  rules, a moment's wait): the decision model chooses among the candidates the driver handed back */
+  private async recover(job: Job, it: Item, x: Prepared, res: BatchStep, said: (it: Item, line: string) => void): Promise<boolean> {
     const window = (it.s.window as string | number | undefined) ?? job.plan.window;
     const w = this.win(window);
-    const ok = (line: string, r: ToolResult, what = x.what) => {
+    const ok = (line: string, r: { text?: string; data?: unknown }, what = x.what) => {
       said(it, line);
-      this.noteDone(job, what, r.text ?? "");
+      this.noteDone(job, what, effectOf(r.data));
       return true;
     };
+    for (const n of res.notes ?? []) if (!n.startsWith("(")) said(it, n);
     let { tool, args } = x;
     // A remembered wording that no longer fits: the plan's own words, as written
     if (x.asWritten) {
       args = x.asWritten;
-      const r = await this.call(tool, { ...args, probe: true });
-      if (r.ok) return ok(`✓ ${x.what}`, r);
-      err = (r.error ?? r.text ?? "").trim();
+      res = await this.step(job, tool, { ...args, probe: true }, this.recoverArg({ ...x, args }, it.s));
+      for (const n of res.notes ?? []) if (!n.startsWith("(")) said(it, n);
+      if (res.ok) return ok(`✓ ${x.what}${notes(res)[1]}`, res);
     }
     const { what, kind } = x;
     const target = args.target as string | undefined;
-    const missed = target && /equally well|Nothing in .* shows|has no item|is on screen in \d+ places/.test(err);
-
-    // A popup in the way that the plan said how to handle
-    for (const [text, press] of Object.entries(job.plan.on ?? {})) {
-      const seen = await this.call("observe", { silent: true, ...w, query: text, max: 3 });
-      if (!seen.ok || !/\[e\d+\]/.test(seen.text ?? "")) continue;
-      const c = await this.call("click", { ...w, target: press, after: "none" });
-      if (!c.ok) continue;
-      said(it, `↷ "${text}" was in the way: pressed "${press}"`);
-      const r = await this.call(tool, args);
-      if (r.ok) return ok(`✓ ${what}`, r);
-      err = (r.error ?? r.text ?? "").trim();
-    }
-    if (!missed) {
-      said(it, `✗ ${what}: ${firstLines(err, 6)}`);
+    let miss = missOf(res.data);
+    if (!target || !unresolved(miss)) {
+      said(it, `✗ ${what}: ${firstLines(res.text, 6)}`);
       return false;
     }
-
-    const why = /equally well|in \d+ places/.test(err) ? "several match" : "no exact match";
-    // Wait first, judge after: nothing showing that name right after an action (or a fast input, which doesn't
-    // wait for the screen) may only mean it hasn't come up yet. Asked now, the decision model would pick among
-    // what is there and take "not there yet" for "called something else".
-    if (why === "no exact match" && !settled && it.s.timeoutSec === undefined) {
-      const r1 = await this.call(tool, { ...args, timeoutSec: 0.8, probe: true });
-      if (r1.ok) return ok(`✓ ${what} (showed up after a moment)`, r1);
-    }
+    const why = miss!.kind === "ambiguous" ? "several match" : "no exact match";
     // The first try didn't wait: what the plan named may still be on its way (a dialog opening). Before giving
     // up, give it the usual moment to show up.
     const late = async () => {
@@ -648,20 +611,25 @@ export class Runner {
       const r3 = await this.call(tool, { ...args, timeoutSec: 1.5 });
       return r3.ok && ok(`✓ ${what} (showed up late)`, r3);
     };
+    // Try the step again (after a wait or an Escape): through, or a fresh miss with fresh candidates
+    const again = async (timeoutSec: number, line: string) => {
+      const r = await this.step(job, tool, { ...args, timeoutSec, probe: true }, { recover: { kind, late: false } });
+      if (r.ok) return ok(`✓ ${what}${line}`, r);
+      const m = missOf(r.data);
+      if (unresolved(m)) miss = m;
+      return false;
+    };
     const scope = await this.scope(job, window);
     const recall = async (k: string) => job.pending.get(k) ?? (await this.drex.recall(k));
     // Who decides: up to twice, since the decision model may say the screen isn't ready yet or a popup is in the
     // way, and once that is dealt with it looks again
     for (let round = 0; round < 2; round++) {
-      // The equal matches the driver named first (the words may fit them only by chance: "To" in "Toggle"), then
-      // the closest controls of the right kind in the window, as it is now
-      const o = await this.call("observe", { silent: true, ...w, max: 1000 });
-      const named = round === 0 && why === "several match" ? parseControls(err) : [];
-      const seen = new Set(named.map((c) => c.ref));
-      const cands = [...named, ...shortlist(parseControls(o.text ?? ""), target!, kind).filter((c) => !seen.has(c.ref))].slice(0, 40);
+      // As the driver handed them back: the equal matches first (the words may fit them only by chance: "To" in
+      // "Toggle"), then the closest controls of the right kind in the window, as it is now
+      const cands = miss!.candidates;
       if (!cands.length) {
         if (await late()) return true;
-        said(it, `✗ ${what}: ${firstLines(err, 4)}`);
+        said(it, `✗ ${what}: ${firstLines(res.text, 4)}`);
         return false;
       }
       const key = `${scope}|${kind}|${norm(target!)}|${cands.map(ident).sort().join("¦")}`;
@@ -716,16 +684,14 @@ export class Runner {
             said(it, `↷ ${what}: the decision model says something is in the way (${d.a.confidence.toFixed(2)}); pressed Escape`);
             await this.call("press_keys", { keys: "escape", ...w, after: "none" });
           }
-          const again = await this.call(tool, { ...args, timeoutSec: 0.3, probe: true });
-          if (again.ok) return ok(`✓ ${what}`, again);
+          if (await again(0.3, "")) return true;
           continue;
         }
         const pick = cands.find((c) => c.ref === d.a.choice);
         if ((!pick || !sure) && round === 0) {
           // Unsure the first time: the screen may still be on its way somewhere. Let it settle, look again, ask again.
           await this.call("wait_for", { stable: true, timeoutSec: 1.5, ...w, after: "none", silent: true });
-          const again = await this.call(tool, { ...args, timeoutSec: 0.2, probe: true });
-          if (again.ok) return ok(`✓ ${what} (showed up after a moment)`, again);
+          if (await again(0.2, " (showed up after a moment)")) return true;
           continue;
         }
         if (!pick || !sure) {
@@ -751,7 +717,7 @@ export class Runner {
       }
       // A click the model chose that visibly did nothing was most likely the wrong control: say so rather than go on
       // (a field is checked by reading it back, so this is for clicks)
-      if (byModel && kind === "click" && effectOf(r2.text ?? "") === "unchanged") {
+      if (byModel && kind === "click" && effectOf(r2.data) === "unchanged") {
         said(it, `✗ ${what} → ${label} (${how}): clicked, but nothing changed on screen, so it was likely the wrong control. Candidates:\n${list}`);
         return false;
       }
@@ -805,10 +771,17 @@ export class Runner {
   }
 
   /** A step that went through, and what it did to the screen, for the decision model's view of the plan */
-  private noteDone(job: Job, what: string, text: string) {
-    job.history.push(`${what}${effectText(effectOf(text))}`);
+  private noteDone(job: Job, what: string, effect: Effect) {
+    job.history.push(`${what}${effectText(effect)}`);
     if (job.history.length > 12) job.history.splice(0, job.history.length - 12);
   }
+}
+
+/** A step's notes from the driver: lines of their own (a popup pressed away), and a word for the step's line */
+function notes(res: BatchStep): [string[], string] {
+  const all = res.notes ?? [];
+  const aside = all.filter((n) => n.startsWith("("));
+  return [all.filter((n) => !n.startsWith("(")), aside.length ? ` ${aside.join(" ")}` : ""];
 }
 
 const firstLines = (s: string, n: number) => s.split("\n").slice(0, n).join("\n").slice(0, 900);

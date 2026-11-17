@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { TechClient } from "../src/console/tech-client.ts";
 import { Runner, type Plan } from "../src/console/run.ts";
+import type { ObserveData } from "../src/shared/protocol.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
 const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
@@ -21,20 +22,29 @@ const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass
 const tech = new TechClient("ws://127.0.0.1:1", "RunTest");
 const runner = new Runner(tech);
 let failures = 0;
+/** Calls the runner has made to the driver: each is a round trip, over the internet when driving a remote computer */
+const calls = () => (runner as unknown as { calls: number }).calls;
+/** The handle of the window whose title matches */
+async function windowNamed(title: RegExp) {
+  const wins = ((await tech.call("observe", { max: 1 })).data as ObserveData | undefined)?.windows ?? [];
+  const w = wins.find((x) => title.test(x.title));
+  if (!w) throw new Error(`no window titled ${title}`);
+  return w.handle;
+}
 
 async function check(label: string, plan: Plan, want: (text: string) => boolean) {
   const t = performance.now();
+  const c0 = calls();
   const r = await runner.run(plan, true);
   const ok = want(r.text);
   if (!ok) failures++;
-  console.log(`\n${ok ? "✓" : "✗"} ${label} — ${Math.round(performance.now() - t)} ms\n${r.text.split("\n").slice(0, 14).map((l) => "    " + l).join("\n")}`);
+  console.log(`\n${ok ? "✓" : "✗"} ${label} — ${Math.round(performance.now() - t)} ms, ${calls() - c0} driver call(s)\n${r.text.split("\n").slice(0, 14).map((l) => "    " + l).join("\n")}`);
 }
 
 try {
   await tech.connectLocalDriver({ launch: false, waitMs: 30_000 });
   await tech.call("wait_for", { appears: "Asctrl Bench", timeoutSec: 15 });
-  const lw = (await tech.call("observe", { max: 1 })).text ?? "";
-  const B = Number(lw.match(/\[(\d+)\][^\n]*"Asctrl Bench"/)![1]);
+  const B = await windowNamed(/^Asctrl Bench$/);
 
   await check("bench form by labels, all local", { window: B, steps: [{ fill: { Name: "Alice", Agree: true } }, { click: "Submit" }, { expect: "Submitted: Alice" }] }, (t) => t.includes("✓ done") && !t.includes("decision model"));
   await check("no exact match → decision model", { window: B, goal: "send the form with the name Bob", steps: [{ fill: { "person's name": "Bob" } }, { click: "send the form" }, { expect: "Submitted: Bob" }] }, (t) => t.includes("✓ done") && t.includes("decision model"));
@@ -95,7 +105,7 @@ try {
   // Queued: three plans sent at once, as an AI would while thinking; the second waits for what the first brings up
   await tech.call("open_app", { target: "calc", after: "none" });
   await tech.call("wait_for", { appears: "计算器|Calculator", timeoutSec: 10 });
-  const C = Number(((await tech.call("observe", { max: 1 })).text ?? "").match(/\[(\d+)\][^\n]*"(计算器|Calculator)"/)![1]);
+  const C = await windowNamed(/^(计算器|Calculator)$/);
   const t0 = performance.now();
   const q1 = await runner.run({ window: C, steps: [{ keys: "escape" }, { click: "一" }, { click: "二" }, { click: "×" }, { click: "七" }, { click: "等于" }, { expect: "84" }], goal: "compute 12 × 7" }, false);
   const q2 = await runner.run({ window: C, when: "84", steps: [{ click: "除以" }, { click: "四" }, { click: "等于" }, { expect: "21" }] }, false);

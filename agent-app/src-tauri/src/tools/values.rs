@@ -153,7 +153,9 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Output {
                     lines.push((true, s));
                 }
                 // The screen is not what the AI saw: stop here rather than fill the rest blind
-                Err(m) if m.stale => return Err(m),
+                Err(m) if m.stale() => return Err(m),
+                // One control that wasn't found: said as a miss, so a plan's runner can decide what was meant
+                Err(m) if !many && m.kind.unresolved() => return Err(m),
                 Err(m) => {
                     failed += 1;
                     lines.push((false, m.msg));
