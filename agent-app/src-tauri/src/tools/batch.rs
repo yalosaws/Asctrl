@@ -69,6 +69,28 @@ async fn run_step(ctx: &Ctx, tool: &str, step: &Value, id: String, fast: bool) -
     out
 }
 
+/// Windows that came up, went away or came to the front, as `{ms, kind, handle, program, title}` (ms from `t0`);
+/// a title changing is left out, and at most the last 30
+fn window_events(evs: &[crate::events::Event], t0: std::time::Instant) -> Value {
+    use crate::events::Kind;
+    let keep: Vec<&crate::events::Event> = evs.iter().filter(|e| e.kind != Kind::Renamed && !e.title.trim().is_empty()).collect();
+    let from = keep.len().saturating_sub(30);
+    Value::Array(
+        keep[from..]
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "ms": e.at.saturating_duration_since(t0).as_millis() as u64,
+                    "kind": e.kind.as_str(),
+                    "handle": e.hwnd,
+                    "program": winmgr::process_name(e.pid),
+                    "title": e.title,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// The plan's popup rules: { "text a popup shows": "what to press" }
 fn on_rules(args: &Value) -> Vec<(String, String)> {
     args.get("on")
@@ -95,6 +117,7 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
         }
     }
     let on = on_rules(args);
+    let seq0 = crate::events::seq();
     // The plan starts with this batch: as plan_mark would, without a call of its own
     if let Some(m) = args.get("mark").filter(|m| m.is_object()) {
         popups::plan_mark(m);
@@ -217,6 +240,10 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
         .collect();
     let body = format!("{head}\n{}", lines.join("\n"));
     let mut data = serde_json::json!({ "steps": results, "failed": failed });
+    // What happened to the windows meanwhile, from the timeline
+    if let Some(evs) = crate::events::since(seq0) {
+        data["windows"] = tokio::task::spawn_blocking(move || window_events(&evs, started)).await.unwrap_or_default();
+    }
     // The plan ends with this batch, if it went through (one that stopped is carried on by the runner)
     if failed.is_none()
         && let Some(plan) = args.get("end").and_then(Value::as_str)

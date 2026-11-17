@@ -76,14 +76,40 @@ pub fn read_numbers(area: Area) -> Result<Vec<Line>, String> {
     read_with(area, number_engine()?)
 }
 
-fn read_with(area: Area, engine: OcrEngine) -> Result<Vec<Line>, String> {
+/// How large to hand `area` to the engine: (enlargement, width, height)
+fn sizing(area: Area) -> (f64, i32, i32) {
     let max = OcrEngine::MaxImageDimension().unwrap_or(10000) as i32;
     // Small regions are enlarged: the engine reads text best at 20+ pixels tall
     let up: f64 = if (area.width as i64 * area.height as i64) < 900 * 700 { 2.0 } else { 1.0 };
     let k = up.min(max as f64 / area.width.max(area.height) as f64);
-    let (w, h) = (((area.width as f64 * k) as i32).max(1), ((area.height as f64 * k) as i32).max(1));
+    (k, ((area.width as f64 * k) as i32).max(1), ((area.height as f64 * k) as i32).max(1))
+}
+
+fn read_with(area: Area, engine: OcrEngine) -> Result<Vec<Line>, String> {
+    let (k, w, h) = sizing(area);
     let px = capture::pixels(area, w, h, true)?;
     recognize(&engine, &px, w, h, k, (area.left, area.top))
+}
+
+/// Read `area` of the window `hwnd`: off the screen as usual, or, where another program's window lies over it,
+/// off the window's own picture (Windows Graphics Capture), so what is read is this window's text and not what
+/// covers it. Positions are screen pixels either way.
+pub fn read_in(hwnd: isize, area: Area) -> Result<Vec<Line>, String> {
+    if hwnd != 0 && crate::winmgr::covered(hwnd, area) {
+        let engine = engine()?;
+        if let Ok(p) = crate::wgc::capture(hwnd) {
+            let (l, t) = (area.left.max(p.area.left), area.top.max(p.area.top));
+            let (r, b) = ((area.left + area.width).min(p.area.left + p.area.width), (area.top + area.height).min(p.area.top + p.area.height));
+            if r - l >= 4 && b - t >= 4 {
+                let a = Area { left: l, top: t, width: r - l, height: b - t };
+                let (k, w, h) = sizing(a);
+                if let Ok(px) = p.cut(a, w, h) {
+                    return recognize(&engine, &px, w, h, k, (a.left, a.top));
+                }
+            }
+        }
+    }
+    read(area)
 }
 
 /// Read every line of text in an image (top-down BGRA rows, `w` x `h`), in that image's own pixels

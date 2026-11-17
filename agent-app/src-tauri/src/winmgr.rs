@@ -196,6 +196,16 @@ pub struct Slot {
     pub rect: Rect,
 }
 
+/// Whether another program's window lies over part of `area` (screen pixels) of `handle`'s window, so a capture
+/// of the screen there would show it rather than this one. True too when the window is not on screen at all.
+pub fn covered(handle: isize, area: crate::capture::Area) -> bool {
+    let slots = layout();
+    let Some(i) = slots.iter().position(|s| s.handle == handle) else { return true };
+    let pid = slots[i].pid;
+    let (al, at, ar, ab) = (area.left, area.top, area.left + area.width, area.top + area.height);
+    slots[..i].iter().any(|s| s.pid != pid && s.rect.0 < ar && s.rect.2 > al && s.rect.1 < ab && s.rect.3 > at)
+}
+
 /// Every window that can be under the mouse, front to back: visible, not cloaked, not minimized, not ours,
 /// and not click-through. Unlike `list`, untitled windows count (menus, popups, the taskbar, the desktop).
 pub fn layout() -> Vec<Slot> {

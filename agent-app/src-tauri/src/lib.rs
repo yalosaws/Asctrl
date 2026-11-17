@@ -3,6 +3,7 @@
 //! 6-digit code. Whatever the AI does is shown on screen by the overlay.
 //! The wire protocol matches ../../src/shared/protocol.ts.
 
+mod events;
 mod admin;
 mod capture;
 mod files;
@@ -17,6 +18,7 @@ mod shell;
 mod tools;
 mod uia;
 mod winmgr;
+mod wgc;
 
 use serde_json::{Value, json};
 use std::sync::Mutex;
@@ -214,6 +216,8 @@ pub fn run() {
             overlay::set_hit_regions
         ])
         .setup(|app| {
+            // The timeline of the desktop's windows, before anything waits on it
+            events::start();
             overlay::setup(app.handle());
             fx::init(app.handle().clone());
             tauri::async_runtime::spawn(link::relay_loop(app.handle().clone()));

@@ -92,7 +92,7 @@ fn showing(hwnd: isize, texts: &[String], f: &Frame, use_ocr: bool, problem: &mu
     if r - l < 16 || b - t < 16 {
         return None;
     }
-    match ocr::read(capture::Area { left: l, top: t, width: r - l, height: b - t }) {
+    match ocr::read_in(hwnd, capture::Area { left: l, top: t, width: r - l, height: b - t }) {
         Ok(lines) => texts.iter().find_map(|q| {
             ocr::find(&lines, q).first().map(|h| {
                 let (a, b, c, d) = h.rect;
@@ -150,6 +150,8 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
         let mut overruled_since: Option<std::time::Instant> = None;
         loop {
             polls += 1;
+            // Whatever happens to the windows from here on wakes the next look early
+            let seen = crate::events::seq();
             let mut overruled = false;
             // Some((details, the window it is in, whether to list that window's controls))
             let found: Option<(String, Option<isize>, bool)> = if !window.is_empty() {
@@ -193,7 +195,13 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
                 }
                 return Err(format!("Timed out after {s:.1} s: {what} {}.{fg}{note}", if gone { "is still there" } else { "did not appear" }));
             }
-            std::thread::sleep(Duration::from_millis(100));
+            // Until a window comes, goes or changes, or 100 ms (all there is without the timeline); never more
+            // often than every 25 ms, should something keep firing
+            let t = std::time::Instant::now();
+            crate::events::wait(seen, Duration::from_millis(100));
+            if let Some(rest) = Duration::from_millis(25).checked_sub(t.elapsed()) {
+                std::thread::sleep(rest);
+            }
         }
     })
     .await;

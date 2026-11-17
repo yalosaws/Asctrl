@@ -174,6 +174,20 @@ export interface BatchData {
   where?: string;
   /** The plan ended with it (asked with end): what the popup watcher did during the plan, one line each */
   ended?: string;
+  /** Titled windows that came up, went away or came to the front while it ran (the last 30), from the driver's
+   *  timeline; absent when the timeline is off */
+  windows?: WindowEvent[];
+}
+
+/** Something that happened to a window, as the driver's timeline saw it */
+export interface WindowEvent {
+  /** Since the batch started */
+  ms: number;
+  kind: "shown" | "hidden" | "destroyed" | "front" | "minimized" | "restored";
+  handle: number;
+  program: string;
+  /** Its title then (a window that went away: the last one it had) */
+  title: string;
 }
 
 /** request_admin's reply when the person agreed: the driver is about to restart elevated */

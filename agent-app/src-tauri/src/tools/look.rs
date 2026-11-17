@@ -158,7 +158,7 @@ pub(super) fn win_line(f: &Frame, w: &winmgr::Win) -> String {
 /// Text read off a window's pixels that its controls don't already say
 fn pixel_text(scene: &Scene, f: &Frame, all: bool) -> Result<Vec<String>, String> {
     let Some(area) = winmgr::rect_of(scene.hwnd).and_then(clip_to_screen) else { return Ok(vec![]) };
-    let lines = ocr::read(area)?;
+    let lines = ocr::read_in(scene.hwnd, area)?;
     let said: Vec<String> = if all { vec![] } else { scene.nodes.iter().flat_map(|n| [uia::norm(&n.name), uia::norm(&n.value)]).filter(|s| !s.is_empty()).collect() };
     Ok(lines
         .iter()
@@ -317,7 +317,7 @@ async fn find(ctx: &Ctx, args: &Value) -> Output {
         if role.is_empty() && (force_ocr == Some(true) || (force_ocr.is_none() && (hits.is_empty() || scene.thin())))
             && let Some(area) = winmgr::rect_of(hwnd).and_then(clip_to_screen)
         {
-            let lines = ocr::read(area)?;
+            let lines = ocr::read_in(hwnd, area)?;
             let found = ocr::find(&lines, &q);
             if !found.is_empty() {
                 let shown: Vec<String> = found

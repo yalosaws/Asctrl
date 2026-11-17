@@ -15,6 +15,10 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const POLL: Duration = Duration::from_millis(60);
+/// With the timeline: a look this often anyway, for what it didn't tell
+const IDLE: Duration = Duration::from_millis(250);
+/// A window that just came up is given this long to put its buttons in before it is judged (once)
+const GRACE: Duration = Duration::from_millis(40);
 
 /// Buttons that do nothing but make a popup go away
 const DISMISS: [&str; 24] = [
@@ -78,8 +82,22 @@ pub fn start(args: &Value) {
     *WATCH.lock().unwrap() = Some(Watch { plan, on, keep: lower(args.get("keep").unwrap_or(&Value::Null)), known, log: vec![] });
     let mine = GEN.fetch_add(1, Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
+        let mut last = crate::events::seq();
         while GEN.load(Ordering::SeqCst) == mine && WATCH.lock().unwrap().is_some() {
-            tokio::time::sleep(POLL).await;
+            if crate::events::live() {
+                let before = last;
+                crate::events::wait_async(before, IDLE).await;
+                last = crate::events::seq();
+                if last != before {
+                    // Woken: only a window coming up is worth a look
+                    if !crate::events::since(before).is_none_or(|v| v.iter().any(|e| e.kind.arrival())) {
+                        continue;
+                    }
+                    tokio::time::sleep(GRACE).await;
+                }
+            } else {
+                tokio::time::sleep(POLL).await;
+            }
             let Ok(Some(found)) = tokio::task::spawn_blocking(look).await else { continue };
             BUSY.store(true, Ordering::SeqCst);
             // Its turn among the plan's actions: after the step in progress, before the next

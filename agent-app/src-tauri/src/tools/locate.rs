@@ -490,7 +490,7 @@ fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
         if ask.role.is_empty()
             && let Some(area) = window_area(hwnd)
         {
-            match ocr::read(area) {
+            match ocr::read_in(hwnd, area) {
                 Ok(lines) => {
                     ocr_lines = lines.len();
                     let hits = ocr::find(&lines, q);
@@ -509,9 +509,12 @@ fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
                     };
                     if let Some(h) = chosen {
                         let point = center(h.rect);
+                        // The window it was read in (off its own picture when something covers it), or that
+                        // program's menu or popup over it; never another program's window in front
+                        let top = winmgr::top_window_at(point.0, point.1).filter(|t| winmgr::pid_of(*t) == winmgr::pid_of(hwnd));
                         return Ok(Located {
                             point,
-                            hwnd: winmgr::top_window_at(point.0, point.1).unwrap_or(hwnd),
+                            hwnd: top.unwrap_or(hwnd),
                             scene: Some(hwnd),
                             live: None,
                             desc: format!("the text \"{q}\" {}", f.at(point.0, point.1)),
@@ -597,7 +600,8 @@ fn by_point(ask: &Ask, x: i32, y: i32) -> Result<Located, Miss> {
 /// Make sure a real click on a located control reaches it: when a window of another program covers the
 /// spot, the control's own window is brought forward first. A plain point is clicked as it is.
 pub fn uncover(loc: &Located) -> Result<(), String> {
-    if loc.live.is_none() {
+    // A point on the screenshot is clicked where it is: it was checked against what the AI saw
+    if loc.live.is_none() && loc.scene.is_none() {
         return Ok(());
     }
     let (x, y) = loc.point;
