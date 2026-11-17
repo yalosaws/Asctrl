@@ -18,13 +18,19 @@ It is built around three ideas:
                                 │            │  WebSocket  ┌───────┐│  report · shell · files   │
                                 │            │ ◀─────────▶ │ Relay │◀──── driver on the remote  │
                                 └────────────┘   by code   └───────┘│  overlay shows every step │
-                                                                    └──────────────────────────┘
+                                                        ▲           └──────────────────────────┘
+                                                        │ by code
+┌─────────────────────┐  https  ┌─────────────────────┐ │
+│ claude.ai, Claude   │ ◀─────▶ │ MCP server, HTTP    │─┘
+│ Code, API, agents   │  /mcp   │ (next to the relay) │
+└─────────────────────┘         └─────────────────────┘
 ```
 
 - The **driver** (`agent-app/`, Tauri: Rust backend + web overlay) runs on the computer being used. It does all the work natively: screen capture, UI Automation, OCR, input, the shell and files. It has no window: an orb of light on a transparent always-on-top overlay shows what the AI is doing (where it clicks, what it runs), and a gradient border runs round the screen while a session is active.
 - The **MCP server** (`src/console/mcp-server.ts`) exposes the tools. It reaches a driver one of two ways:
   - **Local link** — straight to the driver on the same machine over a loopback WebSocket. No relay, no code, no trip over the internet. The driver writes its port and a random token to `%LOCALAPPDATA%\Asctrl\local.json` (readable only by the user); a connection must present the token, and connections from web pages are refused. `connect` with no arguments uses it and starts the driver if it is not running.
   - **Relay** (`src/relay/server.ts`) — both sides connect out to a relay and are paired by the 6-digit code shown next to the orb, so the computer can be anywhere, behind any router. `connect` with a code uses it.
+- The **HTTP connector** (`src/console/mcp-http.ts`) serves the same tools over the web, for clients that can't start a local program: claude.ai on the web, desktop and phone, the Claude API, agents on other machines. It runs beside the relay and always goes through it (see [As a connector](#as-a-connector-remote-mcp-over-http)).
 - One controller drives at a time: there is one mouse and one keyboard.
 
 | Path | Description |
@@ -61,7 +67,7 @@ To drive a **remote** computer, run the driver there, read the 6-digit code next
 
 ## As a connector (remote MCP over HTTP)
 
-`src/console/mcp-http.ts` serves the same tools over Streamable HTTP, so Asctrl can be added as a connector in claude.ai (web, desktop and mobile), Claude Code, the Claude API, ChatGPT, Cursor and other MCP clients. It runs on a server next to the relay; every MCP session gets its own relay connection, and computers are reached by their 6-digit code (there is no "this computer" on a server). `upload_file` and `download_file` are left out there, since "this side" would be the server's own disk.
+`src/console/mcp-http.ts` serves the same tools over Streamable HTTP, so Asctrl can be added as a connector in claude.ai (web, desktop and mobile), Claude Code, the Claude API and other MCP clients. It runs on a server next to the relay; every MCP session gets its own relay connection, and computers are reached by their 6-digit code (there is no "this computer" on a server). `upload_file` and `download_file` are left out there, since "this side" would be the server's own disk.
 
 Sign-in has two ways in, both resting on an access key you hand out:
 
@@ -90,13 +96,24 @@ asctrl.example.com {
 }
 ```
 
-Then add `https://asctrl.example.com/mcp` as a custom connector (claude.ai: Settings → Connectors → Add custom connector), or:
+`npm run keys -- list` shows keys and their live OAuth tokens; `npm run keys -- revoke alice` cuts one off. Sessions idle for `SESSION_IDLE_MIN` (120) are closed; each key keeps at most `SESSIONS_PER_KEY` (20). Set `NACE_API_KEY` for the decision model `run` uses when text matches several controls or none. The orb is served as `/favicon.ico` and as https icons in the server's info, for connector lists.
 
-```bash
-claude mcp add --transport http asctrl https://asctrl.example.com/mcp
-```
+### Adding it to a client
 
-`npm run keys -- list` shows keys and their live OAuth tokens; `npm run keys -- revoke alice` cuts one off. Sessions idle for `SESSION_IDLE_MIN` (120) are closed; each key keeps at most `SESSIONS_PER_KEY` (20). `npm run test:http` checks both sign-in ways against a local relay and a fake computer.
+The address always ends in `/mcp`; the bare domain answers 404 to MCP requests.
+
+- **claude.ai** (then also the desktop and mobile apps): Settings → Connectors → Add custom connector, URL `https://asctrl.example.com/mcp`. Keep what it detects: Authentication *Sign in now*, OAuth client *Register automatically* (not *Claude's published identity*: client ID metadata documents are not supported), no request headers. Connect opens the Asctrl sign-in page; paste the key and Allow. On Team and Enterprise plans an owner may have to add it first.
+- **Claude Code**: name it apart from the project's own stdio `asctrl`, which drives this computer directly and is the better choice there:
+
+  ```bash
+  claude mcp add --transport http asctrl-cloud https://asctrl.example.com/mcp --header "Authorization: Bearer asc_…"
+  ```
+
+  Or leave out `--header` and sign in from `/mcp`.
+- **Claude API**: the URL in `mcp_servers`, with the key as `authorization_token`.
+- **Other agents**: the URL with an `Authorization: Bearer` header, or their OAuth sign-in.
+
+Then give the computer's 6-digit code: *Connect with code 123456 and …*. One controller drives a computer at a time, so a local session attached to it refuses the connector until it disconnects.
 
 ## Tools
 
@@ -211,9 +228,19 @@ cd agent-app && npm run dev
 
 **Limitations**: without admin rights, windows running as administrator can't be read or controlled; the UAC prompt and the lock screen can't be clicked with any rights. Windows only.
 
-## Hosted relay
+## Hosted services
 
-The relay is deployed at `ws://124.222.182.40:8787` (systemd service `asctrl-relay`, code in `~/asctrl-relay`). The console's `.mcp.json` points at it; it requires a token, read from `ASCTRL_RELAY_TOKEN` (falling back to a gitignored `.env` at the repo root, then the Windows user environment). To update it, copy `src/relay/server.ts` and `src/shared/protocol.ts` to the matching paths under `~/asctrl-relay/src/` and `sudo systemctl restart asctrl-relay`. The relay needs no update for this version: it forwards calls unchanged.
+Both run on `124.222.182.40` (`ssh yalosaws`), as user `ubuntu`.
+
+**Relay** — `ws://124.222.182.40:8787`, systemd service `asctrl-relay`, code in `~/asctrl-relay`. The console's `.mcp.json` and release builds of the driver point at it; it requires a token, read from `ASCTRL_RELAY_TOKEN` (falling back to a gitignored `.env` at the repo root, then the Windows user environment). To update it, copy `src/relay/server.ts` and `src/shared/protocol.ts` to the matching paths under `~/asctrl-relay/src/` and `sudo systemctl restart asctrl-relay`; drivers reconnect by themselves. Last updated 2026-11-17.
+
+**HTTP connector** — `https://asctrl.yalosaws.com/mcp`, systemd service `asctrl-mcp` on `127.0.0.1:8788`, code in `~/asctrl-mcp` (`package.json`, `package-lock.json`, `src/console/`, `src/shared/`, and the PNG and ICO files of `agent-app/src-tauri/icons/`). Its settings (`PUBLIC_URL`, `RELAY_URL`, `RELAY_TOKEN`, `NACE_API_KEY`, `ASCTRL_DATA_DIR`) are in `/etc/asctrl-mcp.env`, readable by root only; keys and tokens in `~/asctrl-mcp/data/auth.json`. TLS comes from the server's Caddy (`~/workspace/ops/config/Caddyfile`, the `asctrl.yalosaws.com` block; reload with `~/workspace/ops/bin/caddy reload --config` that file). To update, copy the changed files to the same paths under `~/asctrl-mcp/`, run `npm ci --omit=dev` there if the dependencies changed, and `sudo systemctl restart asctrl-mcp`. Keys:
+
+```bash
+ssh yalosaws "cd ~/asctrl-mcp && ASCTRL_DATA_DIR=~/asctrl-mcp/data node src/console/mcp-http.ts keys list"
+```
+
+The server's Node is 22; it runs the TypeScript sources as they are.
 
 To run your own:
 
@@ -241,6 +268,12 @@ End-to-end, against the release build (starts a local relay and the driver; exer
 npm test
 ```
 
+The HTTP connector, with no driver needed (a local relay and a fake computer): both sign-in ways, the OAuth flow step by step, sessions kept to their key, revoking, the icons, and the stdio server keeping its local tools:
+
+```bash
+npm run test:http
+```
+
 Speed and reliability on a real desktop (moves the mouse and types for about 20 seconds; leave the computer alone):
 
 ```bash
@@ -265,7 +298,8 @@ node test/run.ts
 
 What has been shown, on one Windows 11 machine (2560x1440 at 150 %, one display):
 
-- Unit tests 29 / 29, end-to-end 59 / 59, plan tests 17 / 17, benchmark 14 / 14 tasks in 11.2 s.
+- Unit tests 29 / 29, end-to-end 59 / 59, plan tests 17 / 17, HTTP connector 32 / 32, benchmark 14 / 14 tasks in 11.2 s.
+- The HTTP connector added in claude.ai (signed in with OAuth), then used from the desktop app to connect to a real computer through the hosted relay and read its screen.
 - Per call: pressing a control directly 140–215 ms, a real mouse click about 160 ms, switching windows about 300 ms, `observe` about 35 ms, a screenshot about 50 ms.
 - An AI (Claude, through these tools) solved Extreme sudokus on sudoku.com: the page opened and waited for, the board read with `read` in under 50 ms (a banner over it reported, not misread), and 53–58 cells filled in about 6 s with the pace chosen per step. Gmail compose-and-discard runs as a plan.
 
@@ -297,6 +331,7 @@ Software like this is, structurally, remote-control software; the difference is 
 - A running session is visible at all times (gradient border around the screen, the orb showing each action) and can be ended from the orb (click it for the menu)
 - Quitting the driver disconnects. Left Alt + right Alt held together quits it at once, even if the overlay is stuck
 - The relay can require a `RELAY_TOKEN`
+- The HTTP connector needs an access key, sent as a Bearer token or pasted once on its OAuth sign-in page (which names the app asking and where it will be signed in, and is rate limited). Only hashes of keys and tokens are stored; revoking a key ends its OAuth tokens too. A session can be used only with the key that opened it. It never offers `upload_file` / `download_file`, which would reach the server's own disk
 
 **Still to do before wide use:**
 
@@ -305,3 +340,4 @@ Software like this is, structurally, remote-control software; the difference is 
 - [ ] Optional confirmation at the computer for dangerous commands
 - [ ] Write an action log to disk
 - [ ] Code signing, to reduce SmartScreen / antivirus blocking
+- [ ] Client ID metadata documents (CIMD) on the connector's OAuth server, so busy clients stop registering a new client per sign-in
