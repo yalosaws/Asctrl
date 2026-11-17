@@ -186,9 +186,7 @@ pub fn click(x: i32, y: i32, button: &str, count: u32, modifiers: &str) -> Resul
     let mods = parse_keys(modifiers)?;
     check_target(Some((x, y)))?;
     keep_clicks_apart(x, y, button);
-    move_to(x, y)?;
-    // Long enough for the program to see the pointer arrive (hover state) before the press
-    std::thread::sleep(Duration::from_millis(15));
+    aim(x, y)?;
     if !mods.is_empty() {
         send(&keys_down(&mods))?;
     }
@@ -205,6 +203,32 @@ pub fn click(x: i32, y: i32, button: &str, count: u32, modifiers: &str) -> Resul
     }
     *LAST_CLICK.lock().unwrap() = Some((std::time::Instant::now(), x, y, button.to_string()));
     r
+}
+
+/// Put the pointer on (x, y) for a press, and make sure it is still there when the press goes: the person at the
+/// computer may take the mouse in the moment between the move and the press, and a press then lands wherever
+/// they put it. When that happens it waits for them to let go (up to 3 s), aims again, and gives up rather than
+/// press elsewhere. Only while someone has used the mouse or keyboard lately: a game that keeps re-centring the
+/// pointer is left alone.
+fn aim(x: i32, y: i32) -> Result<(), String> {
+    let lately = || crate::presence::others_ago().is_some_and(|d| d < Duration::from_secs(2));
+    for attempt in 0..2 {
+        move_to(x, y)?;
+        let placed = cursor_pos().unwrap_or((x, y));
+        // Long enough for the program to see the pointer arrive (hover state) before the press
+        std::thread::sleep(Duration::from_millis(15));
+        let moved = cursor_pos().is_ok_and(|p| (p.0 - placed.0).abs() > 1 || (p.1 - placed.1).abs() > 1);
+        if !(moved && lately()) {
+            return Ok(());
+        }
+        if attempt == 0 {
+            let t = std::time::Instant::now();
+            while crate::presence::others_ago().is_some_and(|d| d < Duration::from_millis(600)) && t.elapsed() < Duration::from_secs(3) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    Err("Not done: the person at the computer moved the mouse just as the press was about to happen, so nothing was pressed (they come first). Try again in a moment.".into())
 }
 
 pub fn mouse_move(x: i32, y: i32) -> Result<(), String> {
