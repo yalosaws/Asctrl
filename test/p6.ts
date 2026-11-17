@@ -6,6 +6,7 @@
 // 2. Meanwhile a click in Asctrl's browser (through the page) goes ahead at once.
 // 3. Someone who never stops: after ASCTRL_YIELD_MAX (4 s here) the click gives up, and nothing was clicked.
 // 4. Two programs at once, one in the browser and one in the bench window, take less time than one after another.
+// 5. A button UI Automation can press goes ahead in the background while the person moves the mouse.
 
 import { spawn } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
@@ -19,6 +20,10 @@ const root = path.resolve(import.meta.dirname, "..");
 const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
 const localFile = path.join(tmpdir(), `asctrl-p6-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
+// Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
+process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
+// Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
+process.env.ASCTRL_CONFIRM ??= "off";
 const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_YIELD_MAX: "4" } });
 const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
 const tech = new TechClient("ws://127.0.0.1:1", "P6Test");
@@ -98,6 +103,20 @@ try {
   const [a, b] = await Promise.all([tech.call("exec", { ...inPage, waitSec: 60 }), tech.call("exec", { ...inBench, waitSec: 60 })]);
   const both = performance.now() - t;
   say(prog(a)?.state === "done" && prog(b)?.state === "done" && both < (tPage + tBench) * 0.85, `two programs at once took ${Math.round(both)} ms, one after another ${Math.round(tPage)} + ${Math.round(tBench)} ms`);
+
+  // 5. While the person uses the mouse, a button of an ordinary window that UI Automation can press is pressed
+  //    in the background, without waiting for them, and the window in front stays theirs
+  await tech.call("set_value", { window: B, target: "Name", value: "beside", after: "none" });
+  await tech.call("focus_window", { window: W, after: "none" });
+  ({ stopped } = await person(3));
+  await sleep(300);
+  t = performance.now();
+  const c5 = await tech.call("click", { window: B, target: "Submit", after: "none" });
+  const ms5 = Math.round(performance.now() - t);
+  const front5 = ((await tech.call("observe", { max: 1 })).data as ObserveData).windows.find((x) => x.front)?.handle;
+  await stopped;
+  const shown5 = (await tech.call("observe", { window: B, query: "Submitted:" })).text ?? "";
+  say(c5.ok && ms5 < 1500 && /in the background/.test(c5.text ?? "") && /Submitted: beside/.test(shown5) && front5 === W, `a UI Automation press went ahead in the background while the person moved the mouse (${ms5} ms), and their window stayed in front: ${first(c5.text ?? c5.error)} | front ${front5} (theirs ${W}) | ${/Submitted[^\n|]*/.exec(shown5)?.[0]}`);
 } catch (e) {
   console.error(e);
   failures++;

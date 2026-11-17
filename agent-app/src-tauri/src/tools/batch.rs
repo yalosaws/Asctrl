@@ -23,9 +23,9 @@ use super::*;
 use std::collections::{HashMap, HashSet};
 
 /// Tools a batch may run as steps: looking and acting, nothing that changes files or the system
-const BATCHABLE: [&str; 16] = [
+const BATCHABLE: [&str; 17] = [
     "watch", "click", "type_text", "press_keys", "scroll", "drag", "mouse", "set_value", "element_action", "focus_window", "open_app", "wait_for",
-    "clipboard", "read_text", "observe", "read_grid",
+    "clipboard", "read_text", "observe", "read_grid", "timeline",
 ];
 /// Steps that put input in, the ones the pace applies to
 const INPUTS: [&str; 8] = ["click", "type_text", "press_keys", "scroll", "drag", "mouse", "set_value", "element_action"];
@@ -71,7 +71,7 @@ pub(super) async fn run_step(ctx: &Ctx, tool: &str, step: &Value, id: String, fa
 
 /// Windows that came up, went away or came to the front, as `{ms, kind, handle, program, title}` (ms from `t0`);
 /// a title changing is left out, and at most the last 30
-fn window_events(evs: &[crate::events::Event], t0: std::time::Instant) -> Value {
+pub(super) fn window_events(evs: &[crate::events::Event], t0: std::time::Instant) -> Value {
     use crate::events::Kind;
     let keep: Vec<&crate::events::Event> = evs.iter().filter(|e| e.kind != Kind::Renamed && !e.title.trim().is_empty()).collect();
     let from = keep.len().saturating_sub(30);
@@ -133,6 +133,9 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
     let mut careful = pace == Pace::Normal;
     // Inputs went in without the screen being let to settle
     let mut unsettled = false;
+    // Fast steps went into a page through the browser: it settles by its own changes, not by the screen
+    // (which may not even show it, when the browser is covered)
+    let mut page_unsettled: Option<Value> = None;
     let mut fast_count = 0usize;
     // The step before went in fast: the screen may not show what it did yet
     let mut prev_fast = false;
@@ -150,7 +153,10 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
                 Pace::Normal => false,
                 Pace::Auto => !careful && k.is_some_and(|k| learned.get(&k) == Some(&true)),
             };
-        // A step that waits or reads sees the screen at rest
+        // A step that waits or reads sees the screen (or the page) at rest
+        if !fast && let Some(s) = page_unsettled.take() {
+            web::settle_after_fast(&s).await;
+        }
         if !fast && unsettled {
             settle(area).await;
             unsettled = false;
@@ -193,7 +199,11 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
             let quiet = out.ok && fg == fg0 && wins.is_subset(&wins0) && !popups::busy();
             if fast {
                 fast_count += 1;
-                unsettled = true;
+                if out.data.as_ref().and_then(|d| d.get("channel")).and_then(Value::as_str) == Some("page") {
+                    page_unsettled = Some(step.clone());
+                } else {
+                    unsettled = true;
+                }
                 if !quiet {
                     careful = true;
                     if let Some(k) = k {
@@ -223,6 +233,12 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
         }
     }
     let mut tail = String::new();
+    if let Some(s) = page_unsettled.take()
+        && let Some((calm, ms)) = web::settle_after_fast(&s).await
+        && !unsettled
+    {
+        tail = if calm { format!("; the page settled {ms} ms after the last step") } else { format!("; the page was still changing {ms} ms after the last step") };
+    }
     if unsettled {
         let (calm, ms) = settle(area).await;
         tail = if calm { format!("; screen settled {ms} ms after the last step") } else { format!("; screen still changing {ms} ms after the last step") };

@@ -12,6 +12,7 @@ use crate::ocr;
 use crate::uia::{Node, Scene, flag};
 use std::time::Instant;
 
+#[derive(Clone)]
 pub enum Target {
     Ref(u32),
     Text(String),
@@ -20,6 +21,7 @@ pub enum Target {
 }
 
 /// A request to find something, with everything needed to answer it off the async thread
+#[derive(Clone)]
 pub struct Ask {
     pub target: Target,
     /// Only controls of this kind (button, edit, link, checkbox, …)

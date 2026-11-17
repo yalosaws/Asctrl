@@ -87,15 +87,19 @@ fn err(what: &str) -> impl Fn(windows::core::Error) -> String + '_ {
     move |e| format!("window capture: {what}: {}", e.message())
 }
 
-/// Capture `hwnd` as it draws itself. Blocking (about one frame).
-pub fn capture(hwnd: isize) -> Result<Picture, String> {
-    if crate::winmgr::is_minimized(hwnd) {
-        return Err("window capture: the window is minimized".into());
-    }
-    let (l, t, _, _) = crate::winmgr::rect_of(hwnd).ok_or("window capture: no such window")?;
+/// The Direct3D device the captures share: making one costs about 200 ms, so it is made once and kept. The
+/// immediate context is not thread-safe, so a capture holds the lock throughout.
+struct Gpu {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    d3d: IDirect3DDevice,
+}
+// Used only under the lock below; a D3D11 device may be used from any thread
+unsafe impl Send for Gpu {}
+static GPU: std::sync::Mutex<Option<Gpu>> = std::sync::Mutex::new(None);
+
+unsafe fn new_gpu() -> Result<Gpu, String> {
     unsafe {
-        // WinRT needs COM on this thread; harmless when it is already there
-        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         let mut device = None;
         let mut context = None;
         D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context))
@@ -103,10 +107,37 @@ pub fn capture(hwnd: isize) -> Result<Picture, String> {
         let (device, context): (ID3D11Device, ID3D11DeviceContext) = (device.ok_or("window capture: no Direct3D device")?, context.ok_or("window capture: no Direct3D context")?);
         let dxgi: IDXGIDevice = device.cast().map_err(err("no DXGI device"))?;
         let d3d: IDirect3DDevice = CreateDirect3D11DeviceFromDXGIDevice(&dxgi).map_err(err("no WinRT device"))?.cast().map_err(err("no WinRT device"))?;
+        Ok(Gpu { device, context, d3d })
+    }
+}
+
+/// Capture `hwnd` as it draws itself. Blocking (about one frame).
+pub fn capture(hwnd: isize) -> Result<Picture, String> {
+    if crate::winmgr::is_minimized(hwnd) {
+        return Err("window capture: the window is minimized".into());
+    }
+    let mut gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    // WinRT needs COM on this thread; harmless when it is already there
+    let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
+    if gpu.is_none() {
+        *gpu = Some(unsafe { new_gpu()? });
+    }
+    let r = unsafe { capture_with(hwnd, gpu.as_ref().unwrap()) };
+    // The device can be lost (driver update, GPU reset): make a new one next time
+    if r.is_err() && unsafe { gpu.as_ref().unwrap().device.GetDeviceRemovedReason() }.is_err() {
+        *gpu = None;
+    }
+    r
+}
+
+unsafe fn capture_with(hwnd: isize, gpu: &Gpu) -> Result<Picture, String> {
+    let (l, t, _, _) = crate::winmgr::rect_of(hwnd).ok_or("window capture: no such window")?;
+    let (device, context, d3d) = (&gpu.device, &gpu.context, &gpu.d3d);
+    unsafe {
         let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(err("not available"))?;
         let item: GraphicsCaptureItem = interop.CreateForWindow(HWND(hwnd as *mut _)).map_err(err("the window can't be captured"))?;
         let size = item.Size().map_err(err("no size"))?;
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&d3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size).map_err(err("no frame pool"))?;
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(d3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size).map_err(err("no frame pool"))?;
         let session = pool.CreateCaptureSession(&item).map_err(err("no session"))?;
         // Neither the pointer nor (where Windows allows) the yellow border that marks a capture
         let _ = session.SetIsCursorCaptureEnabled(false);

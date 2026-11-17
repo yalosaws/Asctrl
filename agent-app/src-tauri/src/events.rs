@@ -133,6 +133,15 @@ pub fn since(seq: u64) -> Option<Vec<Event>> {
     TIMELINE.lock().unwrap().since(seq)
 }
 
+/// The events of the last `within`, oldest first; None when events are off
+pub fn recent(within: Duration) -> Option<Vec<Event>> {
+    if !live() {
+        return None;
+    }
+    let from = Instant::now().checked_sub(within);
+    Some(TIMELINE.lock().unwrap().events.iter().filter(|e| from.is_none_or(|f| e.at >= f)).cloned().collect())
+}
+
 /// Block until there is an event after `seq`, or `max` has passed. Without events, simply sleeps `max`, which
 /// is what a poll did.
 pub fn wait(seq: u64, max: Duration) {

@@ -532,6 +532,35 @@ pub fn rect_of(handle: isize) -> Option<Rect> {
     }
 }
 
+/// Where a browser window shows its page, on the screen: the largest visible child window of class `class`
+/// (Chrome_RenderWidgetHostHWND), in physical pixels
+pub fn page_rect(handle: isize, class: &str) -> Option<Rect> {
+    struct Find<'a> {
+        class: &'a str,
+        best: Option<RECT>,
+    }
+    unsafe extern "system" fn each(h: HWND, lp: LPARAM) -> BOOL {
+        let f = unsafe { &mut *(lp.0 as *mut Find) };
+        let mut buf = [0u16; 64];
+        let n = unsafe { GetClassNameW(h, &mut buf) } as usize;
+        if String::from_utf16_lossy(&buf[..n]) == f.class && unsafe { IsWindowVisible(h) }.as_bool() {
+            let mut r = RECT::default();
+            if unsafe { GetWindowRect(h, &mut r) }.is_ok() {
+                let area = |r: &RECT| (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
+                if f.best.as_ref().is_none_or(|b| area(&r) > area(b)) {
+                    f.best = Some(r);
+                }
+            }
+        }
+        BOOL(1)
+    }
+    let mut f = Find { class, best: None };
+    unsafe {
+        let _ = EnumChildWindows(Some(hwnd(handle)), Some(each), LPARAM(&mut f as *mut Find as isize));
+    }
+    f.best.map(|r| (r.left, r.top, r.right, r.bottom))
+}
+
 pub fn is_minimized(handle: isize) -> bool {
     unsafe { IsIconic(hwnd(handle)) }.as_bool()
 }

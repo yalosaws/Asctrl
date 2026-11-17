@@ -109,6 +109,14 @@ pub(super) async fn screenshot(ctx: &Ctx, args: &Value) -> Output {
             return fail(e);
         }
     }
+    // Set-of-Marks: each control the window has, boxed and numbered with its reference
+    if bool_arg(args, "marks") == Some(true) {
+        let h = window.unwrap_or_else(winmgr::foreground);
+        return match marked(ctx, h, max_width).await {
+            Ok(o) => o,
+            Err(e) => fail(e),
+        };
+    }
     match capture_view(ctx).await {
         Ok((image, note)) => {
             let others = if scope == Scope::Screen { describe_displays(&displays) } else { String::new() };
@@ -116,6 +124,100 @@ pub(super) async fn screenshot(ctx: &Ctx, args: &Value) -> Output {
         }
         Err(e) => fail(e),
     }
+}
+
+/// Digits 0-9, 3 wide and 5 high, a row a byte (bit 2 is the left column)
+const DIGITS: [[u8; 5]; 10] = [
+    [7, 5, 5, 5, 7],
+    [2, 6, 2, 2, 7],
+    [7, 1, 7, 4, 7],
+    [7, 1, 7, 1, 7],
+    [5, 5, 7, 1, 1],
+    [7, 4, 7, 1, 7],
+    [7, 4, 7, 5, 7],
+    [7, 1, 1, 1, 1],
+    [7, 5, 7, 5, 7],
+    [7, 5, 7, 1, 7],
+];
+
+/// Paint the rectangle (x0, y0)-(x1, y1) of a BGRA picture `w` wide
+fn fill(px: &mut [u8], w: i32, h: i32, (x0, y0, x1, y1): (i32, i32, i32, i32), bgr: [u8; 3]) {
+    for y in y0.max(0)..y1.min(h) {
+        for x in x0.max(0)..x1.min(w) {
+            let i = ((y * w + x) * 4) as usize;
+            px[i..i + 3].copy_from_slice(&bgr);
+        }
+    }
+}
+
+/// A box around each control and its number at its corner, on a picture of `area` scaled by `scale`
+fn draw_marks(px: &mut [u8], w: i32, h: i32, area: capture::Area, scale: f64, marks: &[(u32, (i32, i32, i32, i32))]) {
+    const LINE: [u8; 3] = [255, 0, 200];
+    const TAG: [u8; 3] = [0, 230, 255];
+    const INK: [u8; 3] = [0, 0, 0];
+    let k = 2;
+    for (rf, (l, t, r, b)) in marks {
+        let at = |x: i32, y: i32| (((x - area.left) as f64 * scale) as i32, ((y - area.top) as f64 * scale) as i32);
+        let ((x0, y0), (x1, y1)) = (at(*l, *t), at(*r, *b));
+        for (a, b2, c, d) in [(x0, y0, x1, y0 + 2), (x0, y1 - 2, x1, y1), (x0, y0, x0 + 2, y1), (x1 - 2, y0, x1, y1)] {
+            fill(px, w, h, (a, b2, c, d), LINE);
+        }
+        let digits: Vec<usize> = rf.to_string().bytes().map(|c| (c - b'0') as usize).collect();
+        let tw = digits.len() as i32 * 4 * k + k;
+        let (tx, ty) = (x0, (y0 - 5 * k - 2 * k).max(0));
+        fill(px, w, h, (tx, ty, tx + tw, ty + 7 * k), TAG);
+        for (i, d) in digits.iter().enumerate() {
+            for (row, bits) in DIGITS[*d].iter().enumerate() {
+                for col in 0..3 {
+                    if bits & (4 >> col) != 0 {
+                        let (x, y) = (tx + k + i as i32 * 4 * k + col * k, ty + k + row as i32 * k);
+                        fill(px, w, h, (x, y, x + k, y + k), INK);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A screenshot of window `h` with its controls boxed and numbered by their references (e12 is "12"), so a
+/// look at the picture names what to act on
+async fn marked(ctx: &Ctx, h: isize, max_width: i32) -> Result<Output, String> {
+    let r = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let area = winmgr::rect_of(h).and_then(|(l, t, r, b)| clip_to_screen((l, t, r, b))).ok_or("the window is not on the screen")?;
+        let scene = uia::snapshot(h, false)?;
+        let marks: Vec<(u32, (i32, i32, i32, i32), String)> = scene
+            .nodes
+            .iter()
+            .filter(|n| uia::interactive_role(n.role) && !n.has(uia::flag::DISABLED))
+            .filter(|n| {
+                let (l, t, r, b) = n.rect;
+                r > l && b > t && l >= area.left && t >= area.top && r <= area.left + area.width && b <= area.top + area.height
+            })
+            .take(150)
+            .map(|n| (n.rf, n.rect, format!("{} \"{}\"", n.role, uia::clip(&n.name, 50))))
+            .collect();
+        let (scale, w, hh) = capture::scaled(area, max_width);
+        let mut px = capture::pixels(area, w, hh, true)?;
+        draw_marks(&mut px, w, hh, area, scale, &marks.iter().map(|(rf, r, _)| (*rf, *r)).collect::<Vec<_>>());
+        Ok((area, scale, w, hh, capture::jpeg(&px, w, hh)?, marks, winmgr::layout()))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let (area, scale, w, hh, jpeg, marks, layout) = r;
+    let frame = Frame { left: area.left, top: area.top, scale, width: w, height: hh, own: None };
+    *ctx.frame.lock().unwrap() = Some(frame);
+    ctx.saw(layout);
+    let list: Vec<String> = marks.iter().map(|(rf, _, d)| format!("{rf}: e{rf} {d}")).collect();
+    Ok(Output {
+        ok: true,
+        image: Some(Image { data: base64::engine::general_purpose::STANDARD.encode(&jpeg), mime_type: "image/jpeg".into() }),
+        text: Some(format!(
+            "Screenshot of \"{}\", {w}x{hh}, its controls boxed and numbered: the number is the reference (12 is e12), for any action's target. x and y refer to this image.\n{}",
+            uia::clip(&winmgr::title_of(h), 50),
+            list.join("\n")
+        )),
+        ..Default::default()
+    })
 }
 
 /// A picture of window `h` as it draws itself (Windows Graphics Capture), when other programs' windows cover

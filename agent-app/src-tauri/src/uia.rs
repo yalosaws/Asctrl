@@ -89,7 +89,7 @@ fn type_name(t: UIA_CONTROLTYPE_ID) -> &'static str {
 }
 
 /// Controls a person operates, shown even when they have no name
-fn interactive_role(role: &str) -> bool {
+pub fn interactive_role(role: &str) -> bool {
     matches!(
         role,
         "Button" | "CheckBox" | "ComboBox" | "Edit" | "Link" | "ListItem" | "MenuItem" | "RadioButton" | "Slider" | "Spinner" | "TabItem" | "TreeItem" | "SplitButton" | "DataItem"
@@ -765,6 +765,16 @@ pub struct Live {
     /// The window whose scene it was read in
     pub hwnd: isize,
     pub label: String,
+}
+
+/// The window a reference's control was read in, without asking the control
+pub fn hwnd_of(rf: u32) -> Option<isize> {
+    with_reg(|reg| reg.entries.get(&rf).map(|e| e.hwnd))
+}
+
+/// How a reference's control was named when it was read (`Button "Save" [e12]`), without asking the control
+pub fn label_of(rf: u32) -> Option<String> {
+    with_reg(|reg| reg.entries.get(&rf).map(|e| e.label.clone())).filter(|l| !l.is_empty())
 }
 
 /// The control behind a reference. Fails with a clear message when it no longer exists.

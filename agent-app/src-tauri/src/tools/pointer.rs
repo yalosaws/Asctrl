@@ -8,8 +8,9 @@ use super::*;
 use crate::fx::Fx;
 use serde_json::json;
 
-fn zone(hwnd: isize) -> Value {
-    json!(winmgr::rect_of(hwnd).map(fx::rect_json))
+/// The frame for an action in `hwnd` (the window), and that it is the whole window
+fn zone(hwnd: isize) -> (Value, bool) {
+    (json!(winmgr::rect_of(hwnd).map(fx::rect_json)), true)
 }
 
 /// Where the last scrolled area stood after its scroll: (its rect, horizontal, percent). The next scroll of the
@@ -81,13 +82,43 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
         return fail(format!("mode: \"{mode}\" is not one of auto, mouse, direct"));
     }
     let (pace, call) = (Pace::current(), fx::call_id());
+    // A press that needs neither the mouse nor the focus: asked for (mode direct), or while the person at the
+    // computer is using them (they come first). Pressed through UI Automation where the window is, without
+    // bringing it forward; one at a time in that window, not in the queue for the mouse and keyboard.
+    let plain = matches!(button.as_str(), "" | "left") && count == 1 && mods.trim().is_empty();
+    if plain && (mode == "direct" || (matches!(mode.as_str(), "" | "auto") && person_busy())) {
+        // Which window, if it can be pressed so (the control can't leave this thread: it is found again below)
+        let a2 = ask.clone();
+        let win = tokio::task::spawn_blocking(move || locate::resolve(&a2).ok().filter(|loc| loc.live.as_ref().is_some_and(|l| !l.is_web() && l.enabled())).map(|loc| loc.scene.unwrap_or(loc.hwnd)))
+            .await
+            .ok()
+            .flatten();
+        if let Some(w) = win {
+            let _lane = super::web::lane(&format!("window:{w}")).await;
+            let (a3, c2) = (ask.clone(), call.clone());
+            let r = tokio::task::spawn_blocking(move || -> Result<Did, Miss> {
+                let loc = locate::resolve(&a3)?;
+                let l = loc.live.as_ref().ok_or_else(|| Miss::from(format!("{} can't be pressed without the mouse", loc.desc)))?;
+                let before = pace.before(None);
+                let (framed, whole) = zone(loc.hwnd);
+                let anim = Fx::start(&c2, "a", "click", json!({ "count": 1 }), json!({ "at": fx::pt_json(loc.point), "zone": framed, "zoneIsWindow": whole }));
+                let s = l.press();
+                anim.step(0, s.is_ok());
+                anim.end(s.is_ok());
+                let s = s.map_err(Miss::from)?;
+                let change = pace.after_direct(before);
+                Ok(Did { done: format!("{s} (directly, in the background: the mouse, keyboard and window in front were left to the person){}", loc.note), change, hwnd: loc.scene, fresh: false, delivered: true })
+            })
+            .await;
+            return finish(ctx, args, r).await;
+        }
+    }
     let turn = match acting().await {
         Ok(t) => t,
         Err(o) => return o,
     };
     let r = tokio::task::spawn_blocking(move || -> Result<Did, Miss> {
         let loc = locate::resolve(&ask)?;
-        let plain = matches!(button.as_str(), "" | "left") && count == 1 && mods.trim().is_empty();
         let forced = mode == "direct";
         if forced && loc.live.is_none() {
             return Err("mode \"direct\" presses a control without the mouse: pass its reference or name as target".to_string().into());
@@ -102,8 +133,8 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
         }
         let direct = loc.live.as_ref().is_some_and(|l| forced || (mode != "mouse" && plain && !l.is_web()));
         let before = pace.before(Some(loc.point));
-        let framed = zone(loc.hwnd);
-        let anim = Fx::start(&call, "a", "click", json!({ "count": count }), json!({ "at": fx::pt_json(loc.point), "zone": framed, "zoneIsWindow": true }));
+        let (framed, whole) = zone(loc.hwnd);
+        let anim = Fx::start(&call, "a", "click", json!({ "count": count }), json!({ "at": fx::pt_json(loc.point), "zone": framed, "zoneIsWindow": whole }));
         let mut done: Option<String> = None;
         let mut delivered = false;
         if direct && let Some(l) = &loc.live {
@@ -240,8 +271,8 @@ pub(super) async fn drag(ctx: &Ctx, args: &Value) -> Output {
         let b = locate::resolve(&to)?;
         locate::uncover(&a)?;
         let before = pace.before(Some(a.point));
-        let framed = zone(a.hwnd);
-        let anim = Fx::start(&call, "a", "drag", json!({}), json!({ "from": fx::pt_json(a.point), "to": fx::pt_json(b.point), "zone": framed, "zoneIsWindow": true }));
+        let (framed, whole) = zone(a.hwnd);
+        let anim = Fx::start(&call, "a", "drag", json!({}), json!({ "from": fx::pt_json(a.point), "to": fx::pt_json(b.point), "zone": framed, "zoneIsWindow": whole }));
         let r = input::drag(a.point.0, a.point.1, b.point.0, b.point.1, &button, ms);
         anim.end(r.is_ok());
         // A drag often moves or resizes the very window it was framed in (a title bar, a splitter)
