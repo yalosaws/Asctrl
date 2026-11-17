@@ -69,7 +69,7 @@ struct AgentState {
     kick_local: Notify,
     /// Latest status, replayed to the UI when it first loads
     status: Mutex<Value>,
-    ctx: tools::Ctx,
+    ctx: std::sync::Arc<tools::Ctx>,
 }
 
 fn arg(name: &str) -> Option<String> {
@@ -200,7 +200,7 @@ pub fn run() {
     let fixed = arg("--code")
         .filter(|c| c.len() == 6 && c.bytes().all(|b| b.is_ascii_digit()))
         .or_else(|| if cfg!(debug_assertions) { std::env::var("ASCTRL_CODE").ok() } else { None });
-    let state = AgentState { fixed_code: fixed.is_some(), ..Default::default() };
+    let state = AgentState { fixed_code: fixed.is_some(), ctx: tools::Ctx::shared(), ..Default::default() };
     *state.code.lock().unwrap() = fixed.unwrap_or_else(random_code);
     *state.status.lock().unwrap() = json!({ "state": "connecting" });
 

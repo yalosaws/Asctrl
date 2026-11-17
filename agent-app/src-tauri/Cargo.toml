@@ -23,6 +23,7 @@ base64 = "0.22"
 rand = "0.9"
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 jpeg-encoder = "0.7.1"
+rquickjs = "0.14"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

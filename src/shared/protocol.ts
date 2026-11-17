@@ -21,6 +21,9 @@ export type ToolName =
   | "set_value"
   | "element_action"
   | "batch"
+  /** A program: runs on the computer, comes back when it ends or needs the AI (see ProgramData) */
+  | "exec"
+  | "resume"
   /** A plan (run) starts or ends: tells the overlay, does nothing else */
   | "plan_mark"
   // Programs, windows, clipboard
@@ -223,3 +226,22 @@ export function parse(raw: unknown): Message | null {
 }
 
 export const DEFAULT_RELAY_URL = "ws://localhost:8787";
+
+/** Where a program (exec / resume) stands: `data.program` of their replies */
+export interface ProgramData {
+  program: {
+    id: number;
+    state: "running" | "stuck" | "asking" | "done" | "failed" | "stopped";
+    /** The program's line of the action running, stuck or asking, or of its error */
+    line: number | null;
+    actions: number;
+    result: unknown;
+    error: string | null;
+    /** Stuck: the action that failed, and its reply */
+    call: { tool: string; args: Record<string, unknown> } | null;
+    failure: { ok: boolean; text: string | null; error: string | null; data: unknown } | null;
+    /** Asking: what it asks */
+    question: { question: unknown; details: unknown } | null;
+    log: string[];
+  };
+}

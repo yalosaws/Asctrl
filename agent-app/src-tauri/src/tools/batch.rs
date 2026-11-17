@@ -59,7 +59,7 @@ async fn settle(area: Option<capture::Area>) -> (bool, u128) {
 }
 
 /// Run one step the way the batch does, with its own animation on the overlay
-async fn run_step(ctx: &Ctx, tool: &str, step: &Value, id: String, fast: bool) -> Output {
+pub(super) async fn run_step(ctx: &Ctx, tool: &str, step: &Value, id: String, fast: bool) -> Output {
     let geo = fx_before(ctx, tool, step);
     fx::emit(serde_json::json!({ "phase": "start", "id": id, "tool": tool, "args": step, "geo": geo }));
     let out = STEP.scope(true, FAST.scope(fast, fx::CALL_ID.scope(id.clone(), run_tool(ctx, tool, step)))).await;

@@ -53,6 +53,8 @@ ${hosted ? CONNECT_HOSTED : CONNECT_LOCAL}
 3. When a plan fails, its report says where things stand (the window's controls, with references): re-plan from there. Look (observe, or screenshot for layout, images and programs that draw their own UI) only when the next plan needs something you can't guess, such as what a page lists.
 4. Single actions (click, type_text, set_value, …) are for one-off corrections. They take target, a reference ("e12") or the text the thing shows, or x and y on the latest screenshot, and their reply says what changed, so you rarely need to look again.
 
+Work that loops over rows or branches on what the screen shows is a program (exec): JavaScript the computer runs itself, which comes back only when it ends, asks, or an action fails (it then waits at that line for resume).
+
 For a screen drawn as a grid (a game board, a calendar), declare it in run's grids and name cells "board[r,c]"; {read: "board"} reads every cell. Never guess coordinates: use a target, or x and y you can see on the latest screenshot.`;
 
 type Icon = { src: string; mimeType: string; sizes: string[] };
@@ -517,6 +519,50 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
       const r = await runner.progress(waitSec ?? 0);
       return say(r.text, !r.ok);
     },
+  );
+
+  server.registerTool(
+    "exec",
+    {
+      description:
+        "Run a program on the computer: JavaScript (async; top-level await and return work) that the computer runs itself, step after step, " +
+        "with loops, ifs and variables, so a long or branching task needs no round trip per step. It has no files, network or processes of its own: " +
+        "only these calls, each a tool run as you would run it (replies are { ok, text, error, data }): " +
+        "click(target, opts) · press(target) · type(target, text, opts) (target null: where the focus is) · fill({ label: value, … }) · keys(\"ctrl+s\") · " +
+        "open(appOrUrl, opts) (opts.browser: \"asctrl\" for Asctrl's own browser) · waitFor(text, opts) · waitGone(text) · expect(text, opts) (stops there if it doesn't show in 5 s) · " +
+        "shows(text) → true/false · read(window) → text · look(window) → observe's reply · tool(name, args) for any other tool · attempt(name, args) (returns a failure instead of stopping) · " +
+        "ask(question, details) → your answer · sleep(ms) · log(…) · args (what you pass). opts are the tool's own arguments (window, nth, role, timeoutSec, …). " +
+        "When an action fails, the program does not end: it stops at that line (stuck) and this call returns with the failure; fix what is needed with single actions, " +
+        "then resume it (retry, skip, instead, abort). Returns when the program ends, gets stuck, asks, or waitSec passes (then resume waits again).",
+      inputSchema: {
+        script: z.string().describe("The program's JavaScript"),
+        args: z.unknown().optional().describe("Given to the program as args (rows to go through, values to fill in)"),
+        waitSec: z.number().min(0).max(300).optional().describe("Wait up to this long before answering; default 30"),
+        timeoutSec: z.number().min(1).max(3600).optional().describe("Longest the program may run in all; default 600"),
+      },
+    },
+    (a) => forward("exec", a),
+  );
+
+  server.registerTool(
+    "resume",
+    {
+      description:
+        "Answer a program that is stuck or asking, or wait for a running one again. Stuck on an action: retry (after you fixed things), skip (value: what the program gets back instead), " +
+        "instead { tool, args } (do this action in its place), or abort (the program gets an error it may catch). Asking: answer. stop: true ends it. Nothing: wait and report where it stands.",
+      inputSchema: {
+        id: z.union([z.number(), z.string()]).describe("The program's id, from exec"),
+        retry: z.boolean().optional(),
+        skip: z.boolean().optional(),
+        value: z.unknown().optional().describe("With skip: what the action returns to the program"),
+        instead: z.object({ tool: z.string(), args: z.record(z.string(), z.unknown()).optional() }).optional(),
+        abort: z.union([z.boolean(), z.string()]).optional().describe("true, or the error message the program gets"),
+        answer: z.unknown().optional().describe("The answer to its question"),
+        stop: z.boolean().optional(),
+        waitSec: z.number().min(0).max(300).optional().describe("Wait up to this long before answering; default 30"),
+      },
+    },
+    (a) => forward("resume", a),
   );
 
   // ---------- Programs, windows, clipboard ----------

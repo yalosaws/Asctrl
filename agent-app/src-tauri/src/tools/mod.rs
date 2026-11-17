@@ -18,6 +18,7 @@ mod locate;
 mod look;
 mod pointer;
 pub mod popups;
+mod program;
 mod recover;
 mod report;
 mod system;
@@ -187,6 +188,10 @@ pub struct Ctx {
     jobs: Mutex<crate::jobs::Jobs>,
     /// Window the last open_app brought up, for the overlay to land on
     opened: Mutex<Option<isize>>,
+    /// Programs sent with exec (see program)
+    programs: Mutex<program::Programs>,
+    /// This context itself, for work that outlives the call that started it (a program)
+    me: std::sync::Weak<Ctx>,
 }
 
 impl Default for Ctx {
@@ -199,14 +204,22 @@ impl Default for Ctx {
             shell_pid: Mutex::new(None),
             jobs: Default::default(),
             opened: Mutex::new(None),
+            programs: Default::default(),
+            me: std::sync::Weak::new(),
         }
     }
 }
 
 impl Ctx {
-    /// Called when the controller disconnects: ends the PowerShell session and all background jobs, and
-    /// forgets what the last controller saw
+    /// The context, shared: what the agent keeps for the whole session
+    pub fn shared() -> Arc<Ctx> {
+        Arc::new_cyclic(|me| Ctx { me: me.clone(), ..Default::default() })
+    }
+
+    /// Called when the controller disconnects: ends the PowerShell session, all background jobs and programs,
+    /// and forgets what the last controller saw
     pub async fn reset(&self) {
+        program::stop_all(self);
         self.reset_shell().await;
         *self.frame.lock().unwrap() = None;
         *self.view.lock().unwrap() = View { scope: Scope::Screen, max_width: 1600 };
@@ -449,6 +462,8 @@ async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         },
         "element_action" => values::element_action(ctx, args).await,
         "batch" => batch::batch(ctx, args).await,
+        "exec" => program::exec(ctx, args).await,
+        "resume" => program::resume(ctx, args).await,
         // Programs, windows, clipboard
         "open_app" => apps::open_app(ctx, args).await,
         "focus_window" => apps::focus_window(ctx, args).await,

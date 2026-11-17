@@ -42,6 +42,7 @@ It is built around three ideas:
 | `agent-app/src-tauri/src/wgc.rs` | Capturing one window as it draws itself (Windows Graphics Capture), for reading a window others cover |
 | `agent-app/src-tauri/src/cdp.rs` | Asctrl's own browser (Chrome, else Edge, with a profile of its own) and the Chrome DevTools Protocol connection to it |
 | `agent-app/src-tauri/src/tools/web.rs` | The page channel: in that browser, text targets found in the page and acted on through the browser; waits on the page's own events |
+| `agent-app/src-tauri/src/tools/program.rs` | Programs (exec / resume): QuickJS on a thread of its own, its calls run as tools; stuck, asking and resuming |
 | `agent-app/src-tauri/src/link.rs` | The local link and the relay link; running tool calls |
 | `agent-app/src/` | The overlay UI |
 | `src/console/` | MCP server (`mcp-server.ts`, stdio; `mcp-http.ts`, HTTP connector with `auth.ts`) and the controller library (`TechClient`) |
@@ -127,6 +128,7 @@ Then give the computer's 6-digit code: *Connect with code 123456 and …*. One c
 |---|---|---|
 | Connection | `connect` / `disconnect` | No arguments: this computer, directly. `code`: a remote one. `waitSec` keeps retrying until the driver is back (after elevation or a restart) |
 | Plans | `run` / `progress` | The main way in: a plan written by the text it acts on, checked whole, run in one go by the driver and queued so the AI writes the next one while it runs (see [Plans](#plans)); `progress` reports how they went |
+| | `exec` / `resume` | A program: JavaScript the computer runs itself (loops over rows, ifs on what shows, variables), with the tools as its only calls and nothing else of the computer's. It comes back when it ends, asks (`ask`), or an action fails: then it waits at that line, and `resume` retries, skips, does another action instead, aborts, answers or stops it |
 | Looking | `observe` | A window as text: its controls as a tree with references, state, value and position; open menus and popups included; text read off the pixels where the controls say little. Lists every other window with its handle. `query`: where something is instead, best match first, on the pixels too. `image: true` adds a screenshot |
 | | `screenshot` | The whole screen, one display, or one window (sharper, cheaper); `x0, y0, x1, y1`: part of the latest one again at full resolution. `x`, `y` of later actions refer to the latest screenshot |
 | | `read_text` | One control's full text, a window's text in reading order, or a region read off the pixels |
@@ -298,6 +300,12 @@ The page channel in Asctrl's own browser (opens it and Calculator for about 20 s
 node test/p3.ts
 ```
 
+Programs (exec / resume; opens the bench window and Asctrl's browser for about 20 seconds):
+
+```bash
+node test/p4.ts
+```
+
 Speed and reliability on a real desktop (moves the mouse and types for about 20 seconds; leave the computer alone):
 
 ```bash
@@ -322,7 +330,7 @@ node test/run.ts
 
 What has been shown, on one Windows 11 machine (2560x1440 at 150 %, one display):
 
-- Unit tests 39 / 39, end-to-end 59 / 59, plan tests 17 / 17, HTTP connector 32 / 32, benchmark 14 / 14 tasks in 11.2 s.
+- Unit tests 44 / 44, end-to-end 59 / 59, plan tests 17 / 17, HTTP connector 32 / 32, benchmark 14 / 14 tasks in 11.2 s.
 - The HTTP connector added in claude.ai (signed in with OAuth), then used from the desktop app to connect to a real computer through the hosted relay and read its screen.
 - Per call: pressing a control directly 140–215 ms, a real mouse click about 160 ms, switching windows about 300 ms, `observe` about 35 ms, a screenshot about 50 ms.
 - An AI (Claude, through these tools) solved Extreme sudokus on sudoku.com: the page opened and waited for, the board read with `read` in under 50 ms (a banner over it reported, not misread), and 53–58 cells filled in about 6 s with the pace chosen per step. Gmail compose-and-discard runs as a plan.
