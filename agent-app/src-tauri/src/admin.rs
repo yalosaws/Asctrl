@@ -1,6 +1,6 @@
 //! The two things that always ask the person at the computer first: running as administrator, and restarting.
 
-use crate::link::{relay_url, reply_text, still_paired};
+use crate::link::{relay_url, reply, reply_text, still_paired};
 use crate::{AgentState, CONSENT_TIMEOUT, ask_user, is_elevated};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -39,7 +39,8 @@ pub async fn request_admin(app: AppHandle, tx: mpsc::UnboundedSender<String>, id
     if !ok {
         return reply_text(&tx, &id, false, "The user clicked \"No\" in the Windows confirmation; still running without admin rights");
     }
-    reply_text(&tx, &id, true, "The user agreed; the app is restarting as administrator with the same code.");
+    let msg = "The user agreed; the app is restarting as administrator with the same code.";
+    reply(&tx, &id, crate::tools::Output { ok: true, text: Some(msg.into()), data: Some(json!({ "restarting": true })), ..Default::default() });
     tokio::time::sleep(Duration::from_millis(500)).await;
     app.exit(0);
 }

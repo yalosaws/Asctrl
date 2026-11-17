@@ -142,6 +142,8 @@ export interface Miss {
   kind: "ambiguous" | "absent" | "stale" | "other";
   /** The controls to choose among: the equal matches, then (after a batch step's recovery) the closest ones */
   candidates: Candidate[];
+  /** After a batch step's recovery: the window they are in */
+  window?: { handle: number; program: string; title: string };
 }
 
 /** An action's reply (click, type_text, set_value, …) */
@@ -170,6 +172,13 @@ export interface BatchData {
   failed: number | null;
   /** When it failed: the failed step's window as observe reads it (unless asked where: false) */
   where?: string;
+  /** The plan ended with it (asked with end): what the popup watcher did during the plan, one line each */
+  ended?: string;
+}
+
+/** request_admin's reply when the person agreed: the driver is about to restart elevated */
+export interface AdminData {
+  restarting: true;
 }
 
 /** observe's reply */

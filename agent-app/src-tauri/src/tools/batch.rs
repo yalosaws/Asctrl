@@ -95,6 +95,10 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
         }
     }
     let on = on_rules(args);
+    // The plan starts with this batch: as plan_mark would, without a call of its own
+    if let Some(m) = args.get("mark").filter(|m| m.is_object()) {
+        popups::plan_mark(m);
+    }
     let area = WATCH.try_with(|w| *w).ok();
     let call = fx::call_id();
     let started = std::time::Instant::now();
@@ -213,6 +217,12 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
         .collect();
     let body = format!("{head}\n{}", lines.join("\n"));
     let mut data = serde_json::json!({ "steps": results, "failed": failed });
+    // The plan ends with this batch, if it went through (one that stopped is carried on by the runner)
+    if failed.is_none()
+        && let Some(plan) = args.get("end").and_then(Value::as_str)
+    {
+        data["ended"] = serde_json::json!(popups::plan_mark(&serde_json::json!({ "plan": plan, "end": true })));
+    }
     // Where things stand, so whoever re-plans needn't look again: the failed step's window
     if let Some(i) = failed.filter(|_| bool_arg(args, "where") != Some(false)) {
         let mut o = serde_json::json!({ "max": 40 });

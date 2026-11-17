@@ -107,16 +107,7 @@ fn dispatch(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: &Value) {
         // A plan (run) starts or ends: to the overlay it is one piece of work, so the pauses between its steps
         // (a decision being made) are not taken for the AI thinking
         "plan_mark" => {
-            let plan = args.get("plan").and_then(Value::as_str).unwrap_or("plan").to_string();
-            let end = args.get("end").and_then(Value::as_bool).unwrap_or(false);
-            let _ = app.emit("fx", json!({ "phase": if end { "end" } else { "start" }, "id": format!("plan-{plan}"), "tool": "plan", "ok": true, "args": {}, "geo": {} }));
-            // While it runs, popups that turn up are dismissed in between its steps; at its end, what was done
-            let said = if end {
-                tools::popups::stop(&plan)
-            } else {
-                tools::popups::start(&args);
-                String::new()
-            };
+            let said = tools::popups::plan_mark(&args);
             reply_text(&tx, &id, true, &said);
         }
         _ => {

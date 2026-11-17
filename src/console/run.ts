@@ -244,6 +244,15 @@ class Drex {
     } catch {}
   }
 
+  /** Whether a wording of this kind was remembered in any program: if not, which program a window belongs to
+   *  needn't be asked */
+  async knows(kind: string, wording: string) {
+    await this.load();
+    const end = `|${kind}|${wording}`;
+    for (const k of this.cache.keys()) if (k.startsWith("alias|") && k.endsWith(end)) return true;
+    return false;
+  }
+
   /** Remembered choice for the same question over the same candidates (by label, since references change) */
   async recall(key: string) {
     await this.load();
@@ -307,6 +316,9 @@ interface Job {
   fast: number;
   /** Where things stood when a batch failed, and the call count then: still true while nothing else was called */
   where?: { text: string; at: number };
+  /** The plan has been marked as running (by plan_mark, or with its first batch), and as over */
+  marked: boolean;
+  ended: boolean;
 }
 
 /** Most steps sent to the driver in one call */
@@ -345,7 +357,7 @@ export class Runner {
         text: `Not queued: an earlier plan failed, and this one was likely written assuming it would work. Re-plan from here.\n\n${this.report(j)}${cancelled.length ? `\n(also cancelled: ${cancelled.map((c) => c.id).join(", ")})` : ""}`,
       };
     }
-    const job: Job = { id: `r${++this.n}`, plan, status: "queued", lines: [], ms: 0, drex: { calls: 0, tokens: 0, ms: 0 }, reported: false, done: Promise.resolve(), pending: new Map(), scopes: new Map(), history: [], fast: 0 };
+    const job: Job = { id: `r${++this.n}`, plan, status: "queued", lines: [], ms: 0, drex: { calls: 0, tokens: 0, ms: 0 }, reported: false, done: Promise.resolve(), pending: new Map(), scopes: new Map(), history: [], fast: 0, marked: false, ended: false };
     this.jobs.push(job);
     job.done = this.chain = this.chain.then(() => this.exec(job));
     const earlier = this.finished(job);
@@ -412,10 +424,17 @@ export class Runner {
     job.status = "running";
     const t0 = performance.now();
     const p = job.plan;
-    // To the overlay the whole plan is one piece of work; to the driver, the time to watch for popups
-    await this.call("plan_mark", { plan: job.id, on: p.on ?? {}, keep: keepTexts(p.steps) }).catch(() => undefined);
+    // To the overlay the whole plan is one piece of work; to the driver, the time to watch for popups. It goes
+    // with the plan's first batch, unless something comes before that
+    const mark = { plan: job.id, on: p.on ?? {}, keep: keepTexts(p.steps) };
+    const markNow = async () => {
+      if (job.marked) return;
+      job.marked = true;
+      await this.call("plan_mark", mark).catch(() => undefined);
+    };
     try {
       if (p.when) {
+        await markNow();
         const r = await this.call("wait_for", { text: p.when, timeoutSec: p.whenSec ?? 5, ...this.win(p.window), after: "none" });
         if (!r.ok) return await this.fail(job, `✗ not started: "${p.when}" did not show up`, p.window);
       }
@@ -444,6 +463,7 @@ export class Runner {
         if (many && firstRowEnd < 0 && items[i].row > 0) firstRowEnd = job.lines.length;
         const it = items[i];
         if (it.s.check !== undefined) {
+          await markNow();
           const window = (it.s.window as string | number | undefined) ?? p.window;
           if (!(await this.checkStep(job, it, String(it.s.check), window, (it.s.timeoutSec as number | undefined) ?? 5, said))) return await this.fail(job, undefined, window);
           i++;
@@ -458,8 +478,16 @@ export class Runner {
         const pace = p.fast === true ? "fast" : p.fast === false ? "normal" : "auto";
         // A watch holds its batch for as long as it watches
         const watching = prepared.reduce((t, x) => t + (x.tool === "watch" ? Number(x.args.timeoutSec ?? 60) * 1000 : 0), 0);
-        const r = await this.call("batch", { steps, pace, after: "none", on: p.on ?? {} }, 120_000 + watching);
+        // The plan starts with its first batch, and ends with the batch that runs its last steps
+        const first = !job.marked;
+        const last = i + seg.length === items.length;
+        job.marked = true;
+        const r = await this.call("batch", { steps, pace, after: "none", on: p.on ?? {}, ...(first ? { mark } : {}), ...(last ? { end: job.id } : {}) }, 120_000 + watching);
         const data = r.data as Partial<BatchData> | undefined;
+        if (typeof data?.ended === "string") {
+          job.ended = true;
+          if (data.ended) job.lines.push(...data.ended.split("\n").filter(Boolean));
+        }
         if (!data?.steps) throw new Error(firstLines(r.error ?? r.text ?? "the driver gave no step results (is it up to date?)", 6));
         data.steps.forEach((res, m) => {
           if (res.fast) job.fast++;
@@ -498,8 +526,10 @@ export class Runner {
       job.status = "failed";
       this.unreported = job;
     } finally {
-      const end = await this.call("plan_mark", { plan: job.id, end: true }).catch(() => undefined);
-      if (end?.text) job.lines.push(...end.text.split("\n").filter(Boolean));
+      if (job.marked && !job.ended) {
+        const end = await this.call("plan_mark", { plan: job.id, end: true }).catch(() => undefined);
+        if (end?.text) job.lines.push(...end.text.split("\n").filter(Boolean));
+      }
       job.ms = performance.now() - t0;
       if (job.status === "failed") for (const j of this.jobs) if (j.status === "queued") j.status = "cancelled";
     }
@@ -545,10 +575,15 @@ export class Runner {
 
   /** The program a window belongs to (its program and title, numbers left out), so what is learnt in one
    *  program is never used in another */
-  private async scope(job: Job, window: string | number | undefined): Promise<string> {
+  private async scope(job: Job, window: string | number | undefined, seen?: { program: string; title: string }): Promise<string> {
     const k = String(window ?? "");
     const known = job.scopes.get(k);
     if (known) return known;
+    if (seen) {
+      const scope = scopeOf(seen.program, seen.title);
+      job.scopes.set(k, scope);
+      return scope;
+    }
     // The windows, front to back
     const o = await this.call("observe", { silent: true, max: 1 }).catch(() => undefined);
     const wins = (o?.data as ObserveData | undefined)?.windows ?? [];
@@ -558,7 +593,7 @@ export class Runner {
         : typeof window === "string"
           ? wins.find((x) => `${x.program} ${x.title}`.toLowerCase().includes(window.toLowerCase()))
           : (wins.find((x) => x.front) ?? wins[0]);
-    const scope = w ? `${w.program.toLowerCase()}|${w.title.replace(/\d+/g, "#").replace(/\s+/g, " ").trim()}` : "?";
+    const scope = w ? scopeOf(w.program, w.title) : "?";
     job.scopes.set(k, scope);
     return scope;
   }
@@ -569,6 +604,9 @@ export class Runner {
     const x = translate(s, this.win(window), job.plan.grids ?? {});
     const target = x.args.target;
     if (typeof target !== "string") return x;
+    // Nothing like it remembered anywhere: no need to know which program this is
+    const end = `|${x.kind}|${norm(target)}`;
+    if (![...job.pending.keys()].some((k) => k.startsWith("alias|") && k.endsWith(end)) && !(await this.drex.knows(x.kind, norm(target)))) return x;
     const scope = await this.scope(job, window);
     const k = `alias|${scope}|${x.kind}|${norm(target)}`;
     const alias = job.pending.get(k) ?? (await this.drex.recall(k));
@@ -619,7 +657,7 @@ export class Runner {
       if (unresolved(m)) miss = m;
       return false;
     };
-    const scope = await this.scope(job, window);
+    const scope = await this.scope(job, window, miss!.window);
     const recall = async (k: string) => job.pending.get(k) ?? (await this.drex.recall(k));
     // Who decides: up to twice, since the decision model may say the screen isn't ready yet or a popup is in the
     // way, and once that is dealt with it looks again
@@ -776,6 +814,9 @@ export class Runner {
     if (job.history.length > 12) job.history.splice(0, job.history.length - 12);
   }
 }
+
+/** The program a window belongs to (its program and title, numbers left out): the scope of what is remembered */
+const scopeOf = (program: string, title: string) => `${program.toLowerCase()}|${title.replace(/\d+/g, "#").replace(/\s+/g, " ").trim()}`;
 
 /** A step's notes from the driver: lines of their own (a popup pressed away), and a word for the step's line */
 function notes(res: BatchStep): [string[], string] {

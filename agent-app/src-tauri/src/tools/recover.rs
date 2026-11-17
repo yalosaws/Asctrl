@@ -225,8 +225,12 @@ where
     let (hwnd, wk) = (window_of(step), wish.kind);
     let more = tokio::task::spawn_blocking(move || uia::snapshot(hwnd, false).map(|s| shortlist(&s.nodes, &want, wk, &skip)).unwrap_or_default()).await.unwrap_or_default();
     let all: Vec<Value> = named.into_iter().chain(more.iter().map(Cand::json)).take(MAX_CANDS).collect();
+    let win = tokio::task::spawn_blocking(move || winmgr::info(hwnd)).await.ok().flatten();
     let mut data = out.data.take().unwrap_or_else(|| serde_json::json!({}));
     data["miss"] = serde_json::json!({ "kind": kind.as_str(), "candidates": all });
+    if let Some(w) = win {
+        data["miss"]["window"] = serde_json::json!({ "handle": w.handle, "program": w.process, "title": w.title });
+    }
     out.data = Some(data);
     Outcome { out, notes }
 }

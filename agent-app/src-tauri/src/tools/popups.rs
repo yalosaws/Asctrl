@@ -50,6 +50,22 @@ fn lower(v: &Value) -> Vec<String> {
     v.as_array().map(|a| a.iter().filter_map(Value::as_str).map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect()).unwrap_or_default()
 }
 
+/// A plan (run) starts or ends. To the overlay it is one piece of work, so the pauses between its steps (a
+/// decision being made) are not taken for the AI thinking; while it runs, popups that turn up are dismissed in
+/// between its steps. `args`: { plan, on, keep } to start, { plan, end: true } to end. At its end: what the
+/// watcher did, one line each.
+pub fn plan_mark(args: &Value) -> String {
+    let plan = args.get("plan").and_then(Value::as_str).unwrap_or("plan").to_string();
+    let end = args.get("end").and_then(Value::as_bool).unwrap_or(false);
+    fx::emit(serde_json::json!({ "phase": if end { "end" } else { "start" }, "id": format!("plan-{plan}"), "tool": "plan", "ok": true, "args": {}, "geo": {} }));
+    if end {
+        stop(&plan)
+    } else {
+        start(args);
+        String::new()
+    }
+}
+
 /// A plan starts: watch for popups until `stop`. `args`: { plan, on: {text: press}, keep: [text] }
 pub fn start(args: &Value) {
     let on = args

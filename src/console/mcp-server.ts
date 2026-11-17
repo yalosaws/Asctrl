@@ -11,7 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { TechClient } from "./tech-client.ts";
 import { Runner, STEP_TOOLS } from "./run.ts";
-import { DEFAULT_RELAY_URL, type ToolName, type ToolResult } from "../shared/protocol.ts";
+import { DEFAULT_RELAY_URL, type AdminData, type ToolName, type ToolResult } from "../shared/protocol.ts";
 
 /**
  * The relay token normally arrives via RELAY_TOKEN (expanded from ASCTRL_RELAY_TOKEN in .mcp.json).
@@ -615,9 +615,14 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: Server
       const code = link.lastCode;
       const wasLocal = client.local;
       const oldPid = client.localPid;
-      const r = await forward("request_admin", {});
-      const text = r.content.find((c) => c.type === "text")?.text ?? "";
-      if (r.isError || !/restarting as administrator/.test(text) || (!code && !wasLocal)) return r;
+      let res: ToolResult;
+      try {
+        res = await client.call("request_admin", {});
+      } catch (e) {
+        return errorReply(e);
+      }
+      const r = toContent(res);
+      if (!res.ok || !(res.data as AdminData | undefined)?.restarting || (!code && !wasLocal)) return r;
       // Give the old process time to exit, so the reconnect reaches the new elevated one
       await new Promise((res) => setTimeout(res, 2000));
       const c = wasLocal ? await connectLocal(90, oldPid) : await connectWait(code, 90);
