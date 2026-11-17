@@ -103,6 +103,35 @@ fn owner_of(h: HWND) -> Option<isize> {
     unsafe { GetWindow(h, GW_OWNER) }.ok().filter(|o| !o.is_invalid()).map(|o| o.0 as isize)
 }
 
+/// The program's main window that `handle` belongs to: its top owner, or else (a dialog shown without an owner)
+/// the largest visible window of the same program under its middle. Itself when there is none. The overlay keeps
+/// the orb in one place while the work goes into a program's dialogs and back.
+pub fn app_of(handle: isize) -> isize {
+    let mut h = handle;
+    for _ in 0..8 {
+        match owner_of(hwnd(h)) {
+            Some(o) if rect_of(o).is_some() => h = o,
+            _ => break,
+        }
+    }
+    if h != handle {
+        return h;
+    }
+    let Some(me) = rect_of(handle) else { return handle };
+    let (cx, cy) = ((me.0 + me.2) / 2, (me.1 + me.3) / 2);
+    let area = |r: &Rect| (r.2 - r.0) as i64 * (r.3 - r.1) as i64;
+    let pid = pid_of(handle);
+    top_level()
+        .into_iter()
+        .map(|w| w.0 as isize)
+        .filter(|&w| w != handle && pid_of(w) == pid)
+        .filter_map(|w| rect_of(w).map(|r| (w, r)))
+        .filter(|(_, r)| r.0 <= cx && cx <= r.2 && r.1 <= cy && cy <= r.3 && area(r) > area(&me))
+        .max_by_key(|(_, r)| area(r))
+        .map(|(w, _)| w)
+        .unwrap_or(handle)
+}
+
 fn win_of(h: HWND, fg: HWND) -> Win {
     let handle = h.0 as isize;
     let pid = pid_of(handle);

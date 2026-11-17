@@ -15,7 +15,9 @@ fn zone(hwnd: isize) -> (Value, bool) {
 
 /// Where the last scrolled area stood after its scroll: (its rect, horizontal, percent). The next scroll of the
 /// same area starts its thumb there, since reading the position before scrolling would hold the scroll up.
-static LAST_SCROLL: std::sync::Mutex<Option<((i32, i32, i32, i32), bool, f64)>> = std::sync::Mutex::new(None);
+/// A scrolled area's rect, whether it scrolls sideways, and where it stood (percent)
+type ScrollSpot = (winmgr::Rect, bool, f64);
+static LAST_SCROLL: std::sync::Mutex<Option<ScrollSpot>> = std::sync::Mutex::new(None);
 
 /// The scroll bar on the overlay, worked out on its own thread while the scroll goes ahead: which area scrolls
 /// at `point` (UI Automation, which can take a while in a browser), sent as a step; then, once the scroll is
@@ -101,7 +103,7 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
                 let l = loc.live.as_ref().ok_or_else(|| Miss::from(format!("{} can't be pressed without the mouse", loc.desc)))?;
                 let before = pace.before(None);
                 let (framed, whole) = zone(loc.hwnd);
-                let anim = Fx::start(&c2, "a", "click", json!({ "count": 1 }), json!({ "at": fx::pt_json(loc.point), "zone": framed, "zoneIsWindow": whole, "win": framed }));
+                let anim = Fx::start(&c2, "a", "click", json!({ "count": 1 }), json!({ "at": fx::pt_json(loc.point), "zone": framed, "zoneIsWindow": whole, "win": framed, "app": fx::app_json(loc.hwnd) }));
                 let theirs = winmgr::foreground();
                 let s = l.press_quietly();
                 // Should the press still have brought its window forward, the person's window goes back in front
@@ -138,7 +140,7 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
         let direct = loc.live.as_ref().is_some_and(|l| forced || (mode != "mouse" && plain && !l.is_web()));
         let before = pace.before(Some(loc.point));
         let (framed, whole) = zone(loc.hwnd);
-        let anim = Fx::start(&call, "a", "click", json!({ "count": count }), json!({ "at": fx::pt_json(loc.point), "zone": framed, "zoneIsWindow": whole, "win": framed }));
+        let anim = Fx::start(&call, "a", "click", json!({ "count": count }), json!({ "at": fx::pt_json(loc.point), "zone": framed, "zoneIsWindow": whole, "win": framed, "app": fx::app_json(loc.hwnd) }));
         let mut done: Option<String> = None;
         let mut delivered = false;
         if direct && let Some(l) = &loc.live {
@@ -276,7 +278,7 @@ pub(super) async fn drag(ctx: &Ctx, args: &Value) -> Output {
         locate::uncover(&a)?;
         let before = pace.before(Some(a.point));
         let (framed, whole) = zone(a.hwnd);
-        let anim = Fx::start(&call, "a", "drag", json!({}), json!({ "from": fx::pt_json(a.point), "to": fx::pt_json(b.point), "zone": framed, "zoneIsWindow": whole, "win": framed }));
+        let anim = Fx::start(&call, "a", "drag", json!({}), json!({ "from": fx::pt_json(a.point), "to": fx::pt_json(b.point), "zone": framed, "zoneIsWindow": whole, "win": framed, "app": fx::app_json(a.hwnd) }));
         let r = input::drag(a.point.0, a.point.1, b.point.0, b.point.1, &button, ms);
         anim.end(r.is_ok());
         // A drag often moves or resizes the very window it was framed in (a title bar, a splitter)

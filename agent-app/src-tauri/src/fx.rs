@@ -50,6 +50,11 @@ pub fn rect_json(r: (i32, i32, i32, i32)) -> Value {
     json!([r.0, r.1, r.2 - r.0, r.3 - r.1])
 }
 
+/// The rect of the program's main window `hwnd` belongs to (winmgr::app_of), for the overlay's `app`
+pub fn app_json(hwnd: isize) -> Value {
+    json!(crate::winmgr::rect_of(crate::winmgr::app_of(hwnd)).map(rect_json))
+}
+
 pub fn pt_json(p: (i32, i32)) -> Value {
     json!([p.0, p.1])
 }
@@ -147,7 +152,7 @@ pub fn zone_follows_window(call: &str, hwnd: isize, zone: Value) {
 pub fn click(call: &str, part: &str, at: (i32, i32), count: u32, ok: bool) {
     let win = crate::winmgr::top_window_at(at.0, at.1);
     let zone = json!(win.and_then(crate::winmgr::rect_of).map(rect_json));
-    let fx = Fx::start(call, part, "click", json!({ "count": count }), json!({ "at": pt_json(at), "zone": zone, "zoneIsWindow": true, "win": zone }));
+    let fx = Fx::start(call, part, "click", json!({ "count": count }), json!({ "at": pt_json(at), "zone": zone, "zoneIsWindow": true, "win": zone, "app": win.map(app_json) }));
     fx.step(0, ok);
     fx.end(ok);
     if let Some(w) = win {

@@ -3,7 +3,8 @@
 
 import { fxEnd, fxPlan, fxStart, fxStep, type FxEvent } from "./fx";
 import { bodyState } from "./body";
-import { initGeo, pt, rect, type OverlayInfo } from "./geo";
+import { home, initGeo, pt, rect, type OverlayInfo } from "./geo";
+import { orb } from "./orb";
 import { probe } from "./probe";
 import { sleep } from "./motion";
 
@@ -16,10 +17,16 @@ export interface Line {
 export async function replay(info: OverlayInfo | null, lines: Line[], tail: number, ready: () => void) {
   initGeo(info);
   ready();
-  // Let the orb settle where it lives before the work starts
-  await sleep(1500);
+  // A session's orb rests at home between pieces of work: start there, as the recorded work did (once the
+  // session's own entrance is over)
+  await sleep(1200);
+  orb.place(home());
+  await sleep(300);
   probe.marks.length = 0;
   probe.t0 = performance.now();
+  // Where the orb rests in a session with no work going on: its trips there and back are not hops
+  const h = home();
+  probe.mark({ k: "home", x: h.x, y: h.y });
   let last = "";
   let sampling = true;
   const sample = () => {
@@ -38,7 +45,7 @@ export async function replay(info: OverlayInfo | null, lines: Line[], tail: numb
     if (wait > 0) await sleep(wait);
     const g = e.geo ?? {};
     const at = pt(g.at) ?? (Array.isArray(g.targets) ? pt(g.targets[0]) : null);
-    probe.mark({ k: "fx", phase: e.phase, tool: e.tool, id: e.id, at, zone: rect(g.zone) ?? rect(g.rect), win: rect(g.win), gone: e.tool === "zone", ok: e.ok });
+    probe.mark({ k: "fx", phase: e.phase, tool: e.tool, id: e.id, at, zone: rect(g.zone) ?? rect(g.rect), win: rect(g.win), app: rect(g.app), gone: e.tool === "zone", ok: e.ok, act: typeof e.args?.action === "string" ? e.args.action : undefined });
     if (e.phase === "plan") fxPlan(e);
     else if (e.phase === "start") fxStart(e);
     else if (e.phase === "step") fxStep(e);

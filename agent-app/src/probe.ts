@@ -10,7 +10,8 @@ export type Mark =
   | { k: "press"; id: number; x: number; y: number }
   | { k: "frame+"; id: number; r: R; hug: boolean }
   | { k: "frame-"; id: number }
-  | { k: "fx"; phase: string; tool: string; id: string; at?: Pt | null; zone?: R | null; win?: R | null; gone?: boolean; ok?: boolean }
+  | { k: "fx"; phase: string; tool: string; id: string; at?: Pt | null; zone?: R | null; win?: R | null; app?: R | null; gone?: boolean; ok?: boolean; act?: string }
+  | { k: "home"; x: number; y: number }
   | { k: "body"; x: number; y: number; w: number; h: number; mode: string; out: boolean };
 
 export const probe = {

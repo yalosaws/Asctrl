@@ -475,7 +475,7 @@ fn page_fx(p: &Page, k: &Pick) -> Option<crate::fx::Fx> {
         return None;
     }
     let win = winmgr::rect_of(p.hwnd).map(fx::rect_json);
-    Some(crate::fx::Fx::start(&call, "page", "click", json!({ "count": 1 }), json!({ "at": fx::pt_json(at), "zone": win, "zoneIsWindow": true, "win": win })))
+    Some(crate::fx::Fx::start(&call, "page", "click", json!({ "count": 1 }), json!({ "at": fx::pt_json(at), "zone": win, "zoneIsWindow": true, "win": win, "app": win })))
 }
 
 /// An action on `k` that is already done (typed into, set): drawn the same way, all at once

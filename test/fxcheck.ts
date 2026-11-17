@@ -106,35 +106,51 @@ const overlaps = (a: R, b: R) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y
 const pct = (xs: number[], q: number) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor(q * xs.length))] : 0);
 
 function measure(marks: Mark[]) {
-  const fx = marks.filter((m) => m.k === "fx") as (Mark & { phase: string; tool: string; id: string; at?: { x: number; y: number } | null; zone?: R | null; win?: R | null; gone?: boolean })[];
+  const fx = marks.filter((m) => m.k === "fx") as (Mark & { phase: string; tool: string; id: string; at?: { x: number; y: number } | null; zone?: R | null; win?: R | null; app?: R | null; gone?: boolean })[];
   const drawnActs = fx.filter((m) => m.phase === "start" && m.at && ["click", "element_action", "drag", "mouse_move", "mouse_down"].includes(m.tool));
   const works = fx.filter((m) => m.phase === "start" && !["observe", "read_text", "screenshot", "exec", "resume", "plan", "wait_for"].includes(m.tool));
   const t0 = works.length ? works[0].t : 0;
   const tEnd = fx.length ? fx[fx.length - 1].t : 0;
 
-  // The windows the body worked in, in order: a window is its rect (the driver's `win`, else the frame given; a
-  // frame inside another one is the same window). The body may move each time this changes.
+  // The windows the body worked in, in order. With the driver's `win` (the window) and `app` (its program's main
+  // window) a window is its exact rect; older logs only give the frame, and a frame inside another one counts as
+  // the same window. The orb may move when the program changes, the frame when the window does.
   const holds = (a: R, b: R) => b.x >= a.x - 6 && b.y >= a.y - 6 && b.x + b.w <= a.x + a.w + 6 && b.y + b.h <= a.y + a.h + 6;
+  const same = (a: R, b: R) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.w - b.w) + Math.abs(a.h - b.h) < 8;
   const wins: R[] = [];
-  const winOf = (r: R) => {
-    let i = wins.findIndex((w) => holds(w, r) || holds(r, w));
+  const idOf = (r: R, exact: boolean) => {
+    let i = wins.findIndex((w) => (exact ? same(w, r) : holds(w, r) || holds(r, w)));
     if (i < 0) i = wins.push(r) - 1;
-    else if (holds(r, wins[i])) wins[i] = r;
+    else if (!exact && holds(r, wins[i])) wins[i] = r;
     return i;
   };
   let switches = 0;
-  let cur = -1;
+  let frameSwitches = 0;
+  let curApp = -1;
+  let curWin = -1;
   for (const m of fx) {
-    const r = (m.phase === "start" && ["click", "element_action", "drag", "focus_window"].includes(m.tool)) || (m.phase === "end" && m.tool === "open_app") ? (m.win ?? m.zone) : null;
-    if (!r) continue;
-    const w = winOf(r);
-    if (w !== cur) switches++, (cur = w);
+    // A window closed or minimized: the frame closes in on it and the ball is left where it was
+    // (or maximized, restored, moved: the frame follows the window, and the ball is left where the frame ends)
+    if (m.phase === "start" && m.tool === "focus_window" && !["", "focus"].includes((m as { act?: string }).act ?? "")) {
+      switches++, frameSwitches++, (curApp = curWin = -1);
+      continue;
+    }
+    const acts = (m.phase === "start" && ["click", "element_action", "drag", "focus_window"].includes(m.tool)) || (m.phase === "end" && m.tool === "open_app");
+    const w = acts ? (m.win ?? m.zone) : null;
+    if (!w) continue;
+    const exact = !!m.win;
+    const a = idOf(m.app ?? w, exact);
+    const f = idOf(w, exact);
+    if (a !== curApp) switches++, (curApp = a);
+    if (f !== curWin) frameSwitches++, (curWin = f);
   }
 
   // The orb's moves while it works: from rest to rest, more than 8 px apart, between the first action and 1.5 s
   // after the last (its flight home after that is not a hop)
   const body = marks.filter((m) => m.k === "body") as (Mark & { x: number; y: number; w: number; h: number; out: boolean })[];
   let hops = 0;
+  let away = 0;
+  const home = (marks.find((m) => m.k === "home") as { x: number; y: number } | undefined) ?? null;
   let travel = 0;
   let rest: { x: number; y: number } | null = null;
   const hopAt: number[] = [];
@@ -142,11 +158,14 @@ function measure(marks: Mark[]) {
     const b = body[i];
     const nextT = body[i + 1]?.t ?? b.t + 1000;
     if (i > 0 && b.t >= t0 && b.t <= tEnd + 1500) travel += Math.hypot(b.x - body[i - 1].x, b.y - body[i - 1].y);
-    // At rest: unchanged for 120 ms, and a ball (a body that is a frame round a window is not "the orb")
-    if (nextT - b.t >= 120 && b.w < 60 && b.h < 60) {
+    // At rest: unchanged for 300 ms (a spring easing in the last pixel moves less than one per frame), and a ball (a body that is a frame round a window is not "the orb")
+    if (nextT - b.t >= 300 && b.w < 60 && b.h < 60) {
       if (rest && Math.hypot(b.x - rest.x, b.y - rest.y) > 8 && b.t >= t0 && b.t <= tEnd + 1500) {
         hops++;
         hopAt.push(b.t);
+        // Going home when the work is done, and out again, is not hopping about while working
+        const atHome = (p: { x: number; y: number }) => !!home && Math.hypot(p.x - home.x, p.y - home.y) < 12;
+        if (!atHome(rest) && !atHome(b)) away++;
       }
       rest = { x: b.x, y: b.y };
     }
@@ -166,7 +185,8 @@ function measure(marks: Mark[]) {
   for (const c of closings) {
     for (const f of frames) {
       const end = gone.get(f.id) ?? Infinity;
-      if (f.t <= c.t && end > c.t + 400 && overlaps(f.r, c.r) && Math.abs(ctr(f.r).x - ctr(c.r).x) < c.r.w / 2) leftovers++;
+      // A frame drawn for that window: round it, or round part of it (a window that only overlaps it is another one)
+      if (f.t <= c.t && end > c.t + 400 && overlaps(f.r, c.r) && holds({ x: c.r.x - 16, y: c.r.y - 16, w: c.r.w + 32, h: c.r.h + 32 }, f.r)) leftovers++;
     }
   }
   const stillUp = frames.filter((f) => !gone.has(f.id)).length;
@@ -183,6 +203,7 @@ function measure(marks: Mark[]) {
   const used = new Set<Mark>();
   const lags: number[] = [];
   const lagAt: number[] = [];
+  const undrawnAt: number[] = [];
   let undrawn = 0;
   for (const s of fx.filter((m) => m.phase === "step" && ["click", "element_action"].includes(m.tool))) {
     const st = fx.find((m) => m.id === s.id && m.phase === "start");
@@ -190,6 +211,7 @@ function measure(marks: Mark[]) {
     const p = presses.find((q) => !used.has(q) && q.t >= st.t && q.t <= s.t + 4000 && Math.hypot(q.x - st.at!.x, q.y - st.at!.y) < 30);
     if (!p) {
       undrawn++;
+      undrawnAt.push(s.t);
       continue;
     }
     used.add(p);
@@ -205,13 +227,13 @@ function measure(marks: Mark[]) {
     actions: drawnActs.length,
     hops,
     switches,
-    /** Moves of the orb that no change of window called for */
-    strayHops: Math.max(0, hops - switches),
+    /** Moves of the orb, not to or from its home, that no change of program called for */
+    strayHops: Math.max(0, away - Math.max(0, switches - 1)),
     travelPx: Math.round(travel),
     frames: frames.length,
     windows: wins.length,
     /** Frames drawn past one per stretch of work in a window */
-    reframes: Math.max(0, frames.length - switches),
+    reframes: Math.max(0, frames.length - frameSwitches),
     pointers: ptrs.length,
     blinks,
     lagMedian: Math.round(pct(lags, 0.5)),
@@ -223,6 +245,7 @@ function measure(marks: Mark[]) {
     hopAt,
     /** When the action drawn latest happened */
     lagWorstAt: lagAt[lags.indexOf(Math.max(...lags))] ?? null,
+    undrawnAt,
   };
 }
 
@@ -273,7 +296,7 @@ try {
     const broken = Object.entries(LIMITS).filter(([k, lim]) => (m as Record<string, unknown>)[k] as number > lim).map(([k, lim]) => `${k} ${(m as Record<string, unknown>)[k]} > ${lim}`);
     if (check && broken.length) bad++;
     if (!asJson) {
-      const { hopAt: _h, lagWorstAt: _l, ...shown } = m;
+      const { hopAt: _h, lagWorstAt: _l, undrawnAt: _u, ...shown } = m;
       console.log(`${check ? (broken.length ? "✗" : "✓") + " " : ""}${path.basename(log)}: ${Object.entries(shown).map(([k, v]) => `${k} ${v}`).join(", ")}${broken.length ? `\n   over the limit: ${broken.join("; ")}` : ""}`);
     }
   }

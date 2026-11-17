@@ -347,7 +347,6 @@ export class Pointer {
 
   /** Press down and up (the tip stays put) */
   async press() {
-    rec.mark({ k: "press", id: this.pid, x: this.x, y: this.y });
     await tween(200, (_, t) => (this.s = 1 - 0.22 * Math.sin(Math.PI * t)), (t) => t, PTR_MIN.press, () => this.rush);
   }
 

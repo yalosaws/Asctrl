@@ -67,12 +67,12 @@ function flashError() {
 /** The work is done: the pointers still out come back into the ball, and only then does the orb go home */
 async function goHomeWhenFree() {
   // While a work area is framed, or the body still has work queued, the orb stays
-  if (active > 0 || zone) return;
+  if (active > 0 || zones.size) return;
   if (busy() || pressing > 0) return void (homeTimer = window.setTimeout(goHomeWhenFree, 600));
   if (orb.isThinking && performance.now() - freeSince < STAY_THINKING_MS) return void (homeTimer = window.setTimeout(goHomeWhenFree, 600));
   await recallPointers();
   // New work came in while they were coming back: the orb stays with it
-  if (active > 0 || zone || busy() || pressing > 0) return;
+  if (active > 0 || zones.size || busy() || pressing > 0) return;
   orb.setMood("idle");
   orb.goTo(home(), "slow");
 }
@@ -182,13 +182,36 @@ const sent = new Map<string, { outcome: { p: Promise<boolean | null>; r: (v: boo
 const ZONE_PAD = 14;
 const ZONE_MIN = { w: 120, h: 64 };
 
-/** The work frame up now: round `r`, in the window `win` (its rect, when the driver said which window) */
-let zone: { r: R; ol: Outline; timer?: number; pid: number; win: R | null } | null = null;
+/** A work frame: round `r`, in the window `win`, of the program whose main window is `app` (their rects, when the
+ *  driver said which); `hot` is when an action last landed in it */
+type Zone = { r: R; ol: Outline; timer?: number; pid: number; win: R | null; app: R | null; hot: number; key: string };
 
-/** The frame goes, fading for ms */
-function endZone(z: { ol: Outline; pid: number }, ms: number) {
+/** The frames up now, one per window worked in (two programs working at once each have theirs), and the one the
+ *  last action landed in */
+const zones = new Map<string, Zone>();
+let zone: Zone | null = null;
+
+/** The program's main window the orb last waited over, kept after its frame went (a dialog of it closed) so the
+ *  next action there sends the orb nowhere new */
+let lastApp: R | null = null;
+
+const keyOf = (r: R) => `${Math.round(r.x)},${Math.round(r.y)},${Math.round(r.w)},${Math.round(r.h)}`;
+
+/** The frame goes, fading for ms, and the pointers that worked in it come back */
+function endZone(z: Zone, ms: number) {
+  window.clearTimeout(z.timer);
   void z.ol.out("fade", ms);
   probe.mark({ k: "frame-", id: z.pid });
+  if (zones.get(z.key) === z) zones.delete(z.key);
+  if (zone === z) zone = [...zones.values()].sort((x, y) => y.hot - x.hot)[0] ?? null;
+  // Other work goes on elsewhere: only this window's pointers come back (all of them do once the work is done)
+  if (zones.size) void recallCrew(z.key);
+}
+
+/** The frame p is in: the last one worked in first */
+function zoneAt(p: Pt): Zone | null {
+  if (zone && within(p, zone.r)) return zone;
+  return [...zones.values()].find((z) => within(p, z.r)) ?? null;
 }
 
 function union(a: R, b: R): R {
@@ -213,88 +236,85 @@ function zoneOf(rs: R[]): R {
 const sameRect = (a: R, b: R) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.w - b.w) + Math.abs(a.h - b.h) < 8;
 
 /**
- * Frame the area being worked on (where all the window's operable controls are). The frame is drawn once and
- * stays put while actions keep landing in it; it is only redrawn when the work moves to a different area.
- */
-function frameZone(r: R, hug = false, win: R | null = null) {
-  if (zone) window.clearTimeout(zone.timer);
-  if (zone && !sameRect(zone.r, r)) {
-    endZone(zone, 300);
-    zone = null;
-  }
-  // Around a whole window the ring overlaps its edge by 1.5 px (the ring is 2.5 wide), so rounding to device
-  // pixels can never open a gap between them; around a group of controls it has room
-  if (!zone) {
-    zone = { r, ol: new Outline(r, "", hug ? 1 : 3).popIn().trace(560), pid: probeId(), win };
-    probe.mark({ k: "frame+", id: zone.pid, r, hug });
-  } else if (win) zone.win = win;
-}
-
-/**
  * The frame for an action: the area the agent gave (the work area or the window), or one round the points.
- * One frame per window: while the actions stay in the window already framed (the driver says which, `win`), the
+ * One frame per window: while the actions stay in a window already framed (the driver says which, `win`), its
  * frame stays as it is, however each action is framed (a fill frames the window's controls, a click the whole
  * window), and only grows, smoothly, to take in a point outside it. Redrawing it for each action made the orb,
- * which waits over the frame, hop between two spots on every step (test/fxcheck.ts measures it).
+ * which waits over the frame, hop between two spots on every step (test/fxcheck.ts measures it). Two windows
+ * worked at once (two programs) each keep their own frame.
  */
 function frameFor(e: FxEvent, points: Pt[]): R | null {
   const given = rect(e.geo?.zone);
   const win = rect(e.geo?.win);
+  const app = rect(e.geo?.app) ?? win;
   const hug = !!given && e.geo?.zoneIsWindow === true;
   const want = hug ? given : given ? zoneOf([given]) : zoneOf(points.map((p) => ({ x: p.x, y: p.y, w: 0, h: 0 })));
-  const z = zone;
-  if (z && (win && z.win ? sameRect(z.win, win) : points.every((p) => within(p, z.r)) && (holds(want, z.r) || holds(z.r, want)))) {
+  // The window's own frame (with the driver's `win`); without it, the last frame when this is the same area cut
+  // another way, and else a new one in its place (one frame at a time, as drivers without `win` drew them)
+  const last = zone;
+  let z: Zone | null = win
+    ? (zones.get(keyOf(win)) ?? null)
+    : last && points.every((p) => within(p, last.r)) && (holds(want, last.r) || holds(last.r, want))
+      ? last
+      : null;
+  if (z) {
     window.clearTimeout(z.timer);
-    if (!points.every((p) => within(p, z.r))) {
+    if (!points.every((p) => within(p, z!.r))) {
       z.r = hug && z.win && sameRect(z.win, want) ? want : zoneOf([z.r, want]);
       void z.ol.moveTo(z.r, 260);
     }
-    return z.r;
+  } else {
+    if (!win && last) endZone(last, 300);
+    // Another window of the same program (its dialog, or back from it): one frame per program, the one in use
+    for (const o of [...zones.values()]) if (app && o.app && sameRect(o.app, app)) endZone(o, 300);
+    // Around a whole window the ring overlaps its edge by 1.5 px (the ring is 2.5 wide), so rounding to device
+    // pixels can never open a gap between them; around a group of controls it has room
+    z = { r: want, ol: new Outline(want, "", hug ? 1 : 3).popIn().trace(560), pid: probeId(), win, app, hot: 0, key: win ? keyOf(win) : `r:${keyOf(want)}` };
+    zones.set(z.key, z);
+    probe.mark({ k: "frame+", id: z.pid, r: want, hug });
   }
-  frameZone(want, hug, win);
-  return zone?.r ?? null;
+  if (app) z.app = app;
+  z.hot = performance.now();
+  zone = z;
+  lastApp = z.app ?? z.win ?? lastApp;
+  return z.r;
 }
 
 const within = (p: Pt, r: R) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
 /** a holds b, give or take a few pixels */
 const holds = (a: R, b: R, slack = 4) => b.x >= a.x - slack && b.y >= a.y - slack && b.x + b.w <= a.x + a.w + slack && b.y + b.h <= a.y + a.h + slack;
 
-/** Let the frame go a while after the last action in it (long enough to span the pause between steps), then send the orb home */
-function unframeLater(ms = 8000, fadeMs = 420) {
-  const z = zone;
+/** Let frame `z` go a while after the last action in it (long enough to span the pause between steps), then send
+ *  the orb home if nothing else is framed */
+function unframeLater(ms = 8000, fadeMs = 420, z: Zone | null = zone) {
   if (!z) return;
   window.clearTimeout(z.timer);
   z.timer = window.setTimeout(() => {
-    if (zone !== z) return;
+    if (zones.get(z.key) !== z) return;
     endZone(z, fadeMs);
-    zone = null;
     goHomeWhenFree();
   }, ms);
 }
 
-/** The area a click framed has gone (the popup it was in closed): let the frame go now, not after the linger.
- *  Only the frame drawn round that area, in either form frameZone may have drawn it; a later action may already
- *  have framed somewhere else. */
+/** The area a click framed has gone (the popup it was in closed, the window moved): let its frame go now, not
+ *  after the linger. Only the frame drawn round that area, in either form it may have been drawn. */
 function zoneGone(e: FxEvent) {
   const r = rect(e.geo?.zone);
-  if (!zone || !r || !(sameRect(zone.r, r) || sameRect(zone.r, zoneOf([r])))) return;
+  if (!r) return;
+  const z = [...zones.values()].find((x) => sameRect(x.r, r) || sameRect(x.r, zoneOf([r])) || (x.win !== null && sameRect(x.win, r)));
   // A popup has already faded itself out by the time its window hides (Edge's take ~170 ms), so the frame
   // has nothing left to fade with: let it go at once. A window that moved or changed size is still there:
   // the frame fades off where it stood instead of being left round where the window used to be.
-  unframeLater(0, e.geo?.moved === true ? 220 : 60);
+  if (z) unframeLater(0, e.geo?.moved === true ? 220 : 60, z);
 }
 
-/** The body is about to frame or work somewhere else (a window of its own, a scroll outside the frame):
- *  the work-area frame goes now rather than linger where nothing is happening any more */
+/** The body is about to frame or work somewhere else (a window of its own, a scroll outside the frames):
+ *  the work-area frames go now rather than linger where nothing is happening any more */
 function dropZone(unless?: Pt) {
-  if (!zone) return;
-  if (unless) {
-    const r = zone.r;
-    if (unless.x >= r.x && unless.x <= r.x + r.w && unless.y >= r.y && unless.y <= r.y + r.h) return;
+  for (const z of [...zones.values()]) {
+    if (unless && within(unless, z.r)) continue;
+    endZone(z, 220);
   }
-  window.clearTimeout(zone.timer);
-  endZone(zone, 220);
-  zone = null;
 }
 
 /** The pointer presses (count times) once its action has happened, or shakes red if it failed */
@@ -316,6 +336,7 @@ async function pressAt(p: Pointer, outcome: Promise<boolean | null>, count: numb
   }
   // The press plays on while the pointer already sets off for its next click (the press only scales it, the
   // glide only moves it): waiting for it here would add a press to every click of a busy column
+  probe.mark({ k: "press", id: p.pid, x: at.x, y: at.y });
   pressing++;
   void (async () => {
     try {
@@ -332,19 +353,34 @@ async function pressAt(p: Pointer, outcome: Promise<boolean | null>, count: numb
 /** How many pointers share the work: the app being worked on is cut into this many columns, left to right, and
  *  each column has its own pointer, in its own colour (blue, violet, pink, teal from the left) */
 const STRIPS = 4;
-/** The pointer of each column, once it has been sent out; it stays out until the work is done */
-const crew: (Pointer | null)[] = Array(STRIPS).fill(null);
-/** What each column's pointer still has to do, in order: a click in its column waits for its earlier ones */
-const crewQueue: Promise<unknown>[] = Array.from({ length: STRIPS }, () => Promise.resolve());
+/** The pointers working in one window: one per column, once sent out (it stays out until the work there is done),
+ *  what each still has to do in order (a click in its column waits for its earlier ones), and how many clicks
+ *  each has queued that it has not set off for yet */
+type Crew = { ptrs: (Pointer | null)[]; queue: Promise<unknown>[]; waiting: number[]; hue: number };
+/** A crew per framed window, so two windows worked at once each have their own pointers instead of one pointer
+ *  flying back and forth between them */
+const crews = new Map<string, Crew>();
+let crewsMade = 0;
 /** Pointers still on their way or pressing (waiting for their action to happen): the work is not done while any is */
 let pressing = 0;
-/** How many clicks each column has queued that its pointer has not set off for yet */
-const waiting: number[] = Array(STRIPS).fill(0);
 
-/** Whose column p is in: columns of the framed app, or of the screen when nothing is framed */
+/** The crew of the window p is in (of the screen when nothing is framed there) */
+function crewOf(p: Pt): Crew {
+  const key = zoneAt(p)?.key ?? "screen";
+  let c = crews.get(key);
+  if (!c) {
+    // A second window's pointers take other colours than the first's
+    c = { ptrs: Array(STRIPS).fill(null), queue: Array.from({ length: STRIPS }, () => Promise.resolve()), waiting: Array(STRIPS).fill(0), hue: (crewsMade++ * 2) % 4 };
+    crews.set(key, c);
+  }
+  return c;
+}
+
+/** Whose column p is in: columns of the framed window, or of the screen when nothing is framed */
 function stripOf(p: Pt): number {
   // The window's columns, not the frame's: they stay the same however the frame is cut or grows
-  const r = zone?.win ?? zone?.r ?? monitorAt(p).work;
+  const z = zoneAt(p);
+  const r = z?.win ?? z?.r ?? monitorAt(p).work;
   return Math.min(STRIPS - 1, Math.max(0, Math.floor(((p.x - r.x) / Math.max(1, r.w)) * STRIPS)));
 }
 
@@ -361,8 +397,8 @@ const rushFor = (late: number, behind = 0) =>
 
 /** Column i's pointer goes to p in the arrow shape: from wherever it last worked, or, the first time, out of the
  *  still ball (once the ball is in place, `ready`) as a drop that takes the arrow shape there */
-async function bring(i: number, p: Pt, rush: number, ready?: Promise<unknown>, near?: (ptr: Pointer) => void): Promise<Pointer> {
-  const ptr = crew[i];
+async function bring(c: Crew, i: number, p: Pt, rush: number, ready?: Promise<unknown>, near?: (ptr: Pointer) => void): Promise<Pointer> {
+  const ptr = c.ptrs[i];
   if (ptr) {
     ptr.rush = rush;
     const d = Math.hypot(ptr.x - p.x, ptr.y - p.y);
@@ -378,14 +414,15 @@ async function bring(i: number, p: Pt, rush: number, ready?: Promise<unknown>, n
   // happened: waiting for the whole flight drew the first click of a stretch of work half a second late
   await Promise.race([ready, sleep(rush > 1 ? 0 : 160)]);
   const o = body.pos;
-  const fresh = new Pointer(o.x - DROP_AT.x, o.y - DROP_AT.y, i);
+  const fresh = new Pointer(o.x - DROP_AT.x, o.y - DROP_AT.y, i + c.hue);
   fresh.rush = rush;
-  crew[i] = fresh;
+  c.ptrs[i] = fresh;
   body.kick("w", -160);
   body.kick("h", 120);
   const far = Math.hypot(p.x - fresh.x, p.y - fresh.y);
-  await fresh.moveTo(p, Math.min(560, Math.max(260, far * 0.75)), Math.min(40, far * 0.12));
-  await fresh.arrow(260);
+  // The drop takes the arrow shape on its way rather than after it lands: a long first trip (the orb waiting
+  // over another program's window) drew its press most of a second late
+  await Promise.all([fresh.moveTo(p, Math.min(420, Math.max(260, far * 0.6)), Math.min(40, far * 0.12)), beat(120).then(() => fresh.arrow(260))]);
   return fresh;
 }
 
@@ -396,30 +433,31 @@ function crewAt(p: Pt, work: (ptr: Pointer) => Promise<unknown> = async () => {}
   // A pointer that is behind starts its work (the press) in the last stretch of its glide, not after it: the
   // two overlap, which wins back most of a press's time on every click it is late for
   const i = stripOf(p);
+  const c = crewOf(p);
   let arrive!: (ptr: Pointer) => void;
   let fail!: (e: unknown) => void;
   const arrived = new Promise<Pointer>((res, rej) => ((arrive = res), (fail = rej)));
   pressing++;
-  waiting[i]++;
+  c.waiting[i]++;
   // One more click for this column: a pointer already gliding there hurries from now on, not only next time
-  const out = crew[i];
-  if (out) out.rush = Math.max(out.rush, rushFor(0, waiting[i]));
-  const done = crewQueue[i]
+  const out = c.ptrs[i];
+  if (out) out.rush = Math.max(out.rush, rushFor(0, c.waiting[i]));
+  const done = c.queue[i]
     .then(async () => {
-      waiting[i]--;
-      const rush = rushFor(performance.now() - t0, waiting[i]);
+      c.waiting[i]--;
+      const rush = rushFor(performance.now() - t0, c.waiting[i]);
       let working: Promise<unknown> | null = null;
-      const ptr = await bring(i, p, rush, ready, rush > 1 ? (q) => void (working = work(q)) : undefined);
+      const ptr = await bring(c, i, p, rush, ready, rush > 1 ? (q) => void (working = work(q)) : undefined);
       arrive(ptr);
       await (working ?? work(ptr));
     })
     .catch((e) => {
       fail(e);
-      crew[i]?.remove();
-      crew[i] = null;
+      c.ptrs[i]?.remove();
+      c.ptrs[i] = null;
     })
     .finally(() => pressing--);
-  crewQueue[i] = done;
+  c.queue[i] = done;
   return { arrived, done };
 }
 
@@ -438,17 +476,25 @@ async function comeBack(ptr: Pointer) {
   }
 }
 
-/** The work is done (or the link is gone): every pointer comes back into the ball, each once it has finished */
-export function recallPointers(): Promise<void> {
+/** The pointers of one window come back into the ball, each once it has finished */
+function recallCrew(key: string): Promise<void> {
+  const c = crews.get(key);
+  if (!c) return Promise.resolve();
+  crews.delete(key);
   return Promise.all(
-    crew.map((ptr, i) => {
+    c.ptrs.map((ptr, i) => {
       if (!ptr || ptr === held) return null;
-      crew[i] = null;
-      const back = crewQueue[i].then(() => beat(i * 70)).then(() => comeBack(ptr));
-      crewQueue[i] = back.catch(() => {});
+      c.ptrs[i] = null;
+      const back = c.queue[i].then(() => beat(i * 70)).then(() => comeBack(ptr));
+      c.queue[i] = back.catch(() => {});
       return back;
     }),
   ).then(() => {});
+}
+
+/** The work is done (or the link is gone): every pointer comes back into the ball, each once it has finished */
+export function recallPointers(): Promise<void> {
+  return Promise.all([...crews.keys()].map(recallCrew)).then(() => {});
 }
 
 /**
@@ -478,6 +524,7 @@ function dispatchStart(e: FxEvent) {
     e,
     aimed.map((a) => a.p),
   );
+  const framed = zone;
   const count = Math.max(1, Math.min(3, num(e.args?.count, 1)));
   const t0 = performance.now();
   // The ball takes its place over the app on the lane, as everything it does; the pointers do not wait for
@@ -488,7 +535,7 @@ function dispatchStart(e: FxEvent) {
       await fly(station({ x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.min(...aimed.map((a) => a.p.y)) }));
     } finally {
       // Whatever happened to the animation, the frame must not stay up for good
-      unframeLater();
+      unframeLater(8000, 420, framed);
     }
   });
   aimed.forEach((a) => sortie(a.p, outcome[a.i].p, count, t0, placed));
@@ -520,9 +567,22 @@ let held: Pointer | null = null;
  *  (the framed area round p), so every action in that app is sent from the same spot and the ball never moves
  *  between them. With nothing framed round p, just above p. */
 function station(p: Pt): Pt {
-  const z = zone;
-  return z && within(p, z.r) ? zoneSpot(z.win ?? z.r) : inside({ x: p.x, y: p.y - 64 });
+  const z = zoneAt(p);
+  const app = z?.app ?? z?.win ?? null;
+  // Two programs worked at once (another program's window had an action a moment ago): the orb stays where it
+  // waits and sends the pointers from there, instead of flying to each window in turn
+  const now = performance.now();
+  if (spot && [...zones.values()].some((o) => o !== z && now - o.hot < BOTH_MS && !(app && o.app && sameRect(o.app, app)))) return spot;
+  // Over the program's main window: the work going into one of its dialogs and back leaves the orb where it is
+  if (app && z) return (spot = zoneSpot(app));
+  if (z) return (spot = zoneSpot(z.r));
+  if (lastApp && within(p, lastApp)) return (spot = zoneSpot(lastApp));
+  return (spot = inside({ x: p.x, y: p.y - 64 }));
 }
+/** Where the orb last waited for pointers it sent */
+let spot: Pt | null = null;
+/** Actions in two programs this close together are one piece of work going on in both */
+const BOTH_MS = 2500;
 
 /** The spot over a framed area: centred just above its top edge; below it when there is no room above (a
  *  maximized window), and just inside its top when there is room for neither */
@@ -650,6 +710,7 @@ function dragStart(e: FxEvent) {
   const b = pt(e.geo?.to);
   if (!a || !b) return;
   frameFor(e, [a, b]);
+  const framed = zone;
   const end = endOf(e.id);
   const ms = Math.min(800, Math.max(320, Math.hypot(b.x - a.x, b.y - a.y) * 0.9));
   void job(async () => {
@@ -668,7 +729,7 @@ function dragStart(e: FxEvent) {
         await ptr.fail();
       }
     } finally {
-      unframeLater();
+      unframeLater(8000, 420, framed);
     }
   });
 }
@@ -804,7 +865,10 @@ function openAppStart(e: FxEvent) {
     await body.open(around(w), "ring", cornerOf(w));
     body.flash("ok", 700);
     await beat(650);
-    await body.ball(center(w));
+    // The frame closes into the ball at the spot it will wait at while working in this program, so its first
+    // action there does not move it again
+    lastApp = w;
+    await body.ball(zoneSpot(w));
   });
 }
 

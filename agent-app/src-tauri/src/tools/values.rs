@@ -26,7 +26,7 @@ fn anim(call: &str, part: &str, loc: &Located) -> (Fx, Value) {
         part,
         "element_action",
         json!({}),
-        json!({ "targets": [fx::pt_json(loc.point)], "zone": shown, "zoneIsWindow": whole, "win": win.map(fx::rect_json) }),
+        json!({ "targets": [fx::pt_json(loc.point)], "zone": shown, "zoneIsWindow": whole, "win": win.map(fx::rect_json), "app": fx::app_json(loc.hwnd) }),
     );
     (fx, zone)
 }
