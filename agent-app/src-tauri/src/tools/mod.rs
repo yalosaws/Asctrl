@@ -98,13 +98,16 @@ pub struct Frame {
     pub scale: f64,
     pub width: i32,
     pub height: i32,
+    /// The picture is one window as it draws itself, taken while others covered it (see `wgc`): its points
+    /// belong to that window, wherever it is and whatever is in front of it now
+    pub own: Option<isize>,
 }
 
 impl Frame {
     /// The picture a capture of `area` limited to `max_width` gives
     pub fn of(area: capture::Area, max_width: i32) -> Frame {
         let (scale, width, height) = capture::scaled(area, max_width);
-        Frame { left: area.left, top: area.top, scale, width, height }
+        Frame { left: area.left, top: area.top, scale, width, height, own: None }
     }
 
     /// Picture coordinates -> screen coordinates
@@ -496,7 +499,7 @@ mod tests {
 
     #[test]
     fn frame_maps_both_ways_and_rejects_points_off_the_picture() {
-        let f = Frame { left: 100, top: 50, scale: 0.5, width: 800, height: 450 };
+        let f = Frame { left: 100, top: 50, scale: 0.5, width: 800, height: 450, own: None };
         assert_eq!(f.to_screen(400.0, 100.0), (900, 250));
         assert_eq!(f.to_shot(900, 250), Some((400, 100)));
         assert_eq!(f.to_shot(99, 250), None);

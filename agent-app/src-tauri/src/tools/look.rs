@@ -51,7 +51,7 @@ pub(super) async fn capture_view(ctx: &Ctx) -> Result<(Image, String), String> {
     .await
     .map_err(|e| e.to_string())?;
     let (shot, image) = shoot(area, view.max_width).await?;
-    let frame = Frame { left: area.left, top: area.top, scale: shot.scale, width: shot.width, height: shot.height };
+    let frame = Frame { left: area.left, top: area.top, scale: shot.scale, width: shot.width, height: shot.height, own: None };
     // Positions the AI was given so far are on the picture before this one (or the one a plain screenshot
     // would have been): when this one is framed differently, they point somewhere else now
     let reframed = if ctx.frame() != frame { " It is framed differently from before: @(x,y) positions in earlier replies no longer apply." } else { "" };
@@ -84,7 +84,16 @@ pub(super) async fn screenshot(ctx: &Ctx, args: &Value) -> Output {
         None => ctx.view().max_width,
     };
     *ctx.view.lock().unwrap() = View { scope, max_width };
-    // A picture of a window shows that window: bring it forward when something covers it
+    // A window that others cover is taken as it draws itself, where it is: nothing on the screen moves
+    if let Some(h) = window
+        && let Some(r) = own_picture(ctx, h, max_width).await
+    {
+        return match r {
+            Ok((image, note)) => Output { ok: true, image: Some(image), text: Some(note), ..Default::default() },
+            Err(e) => fail(e),
+        };
+    }
+    // Otherwise a picture of a window shows that window: bring it forward when something covers it
     if let Some(h) = window
         && winmgr::foreground() != h
     {
@@ -107,6 +116,39 @@ pub(super) async fn screenshot(ctx: &Ctx, args: &Value) -> Output {
         }
         Err(e) => fail(e),
     }
+}
+
+/// A picture of window `h` as it draws itself (Windows Graphics Capture), when other programs' windows cover
+/// part of it. None when nothing covers it, or it is minimized, or it can't be taken that way: then it is
+/// brought forward and taken off the screen as usual.
+async fn own_picture(ctx: &Ctx, h: isize, max_width: i32) -> Option<Result<(Image, String), String>> {
+    let got = tokio::task::spawn_blocking(move || {
+        if winmgr::is_minimized(h) {
+            return None;
+        }
+        let (l, t, r, b) = winmgr::rect_of(h)?;
+        if !winmgr::covered(h, capture::Area { left: l, top: t, width: r - l, height: b - t }) {
+            return None;
+        }
+        let p = crate::wgc::capture(h).ok()?;
+        let (scale, w, hh) = capture::scaled(p.area, max_width);
+        let px = p.shrink(w, hh);
+        Some(capture::jpeg(&px, w, hh).map(|jpeg| (p.area, scale, w, hh, jpeg, winmgr::layout())))
+    })
+    .await
+    .ok()??;
+    Some(got.map(|(area, scale, w, hh, jpeg, layout)| {
+        let frame = Frame { left: area.left, top: area.top, scale, width: w, height: hh, own: Some(h) };
+        let reframed = if ctx.frame() != frame { " It is framed differently from before: @(x,y) positions in earlier replies no longer apply." } else { "" };
+        *ctx.frame.lock().unwrap() = Some(frame);
+        ctx.saw(layout);
+        let image = Image { data: base64::engine::general_purpose::STANDARD.encode(&jpeg), mime_type: "image/jpeg".into() };
+        let note = format!(
+            "Screenshot of \"{}\", {w}x{hh}; x and y refer to this image. Other windows cover it, so this is the window as it draws itself, left where it is; a click on it brings it forward first.{reframed}",
+            uia::clip(&winmgr::title_of(h), 50)
+        );
+        (image, note)
+    }))
 }
 
 async fn zoom(ctx: &Ctx, args: &Value) -> Output {

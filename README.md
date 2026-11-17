@@ -284,6 +284,12 @@ The window timeline and covered windows (opens the bench window and Calculator f
 node test/p2.ts
 ```
 
+How long single actions take and how much of it is waiting for the screen afterwards (opens the bench window for about 15 seconds):
+
+```bash
+node test/settle.ts
+```
+
 Speed and reliability on a real desktop (moves the mouse and types for about 20 seconds; leave the computer alone):
 
 ```bash
@@ -323,7 +329,7 @@ What has not been shown:
 
 Known limits:
 
-- Screenshots use GDI, so a screenshot shows what is on top. Text is still read off a window that another program's window covers (Windows Graphics Capture, for targets, `observe` and `wait_for`), and a click on it brings that window forward first; a screenshot of such a window brings it forward too.
+- Screenshots of the screen use GDI, so they show what is on top. A window that another program's window covers is still read and pictured as it draws itself (Windows Graphics Capture: text targets, `observe`, `wait_for`, and `screenshot` with `window`), without moving anything; a click on it, by text or at a point on that picture, brings it forward first. A minimized window is restored to be pictured.
 - No numbered marks drawn on screenshots (Set-of-Marks), so UI a program draws itself is reached by text read off the pixels or by coordinates only.
 - When the keyboard focus leaves a text box, Windows fades its border for about 250 ms and the action waits for that (about 380 ms instead of 170 ms).
 - Single clicks repeated on the same spot are kept about 550 ms apart, so Windows does not take them for a double click. Pressing a control directly has no such wait.

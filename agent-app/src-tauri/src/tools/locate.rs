@@ -590,11 +590,31 @@ pub fn guard(seen: &[winmgr::Slot], now: &[winmgr::Slot], x: i32, y: i32, title:
 
 fn by_point(ask: &Ask, x: i32, y: i32) -> Result<Located, Miss> {
     let (px, py) = ask.frame.to_shot(x, y).unwrap_or((x, y));
+    if let Some(h) = ask.frame.own {
+        return in_own_picture(&ask.frame, h, x, y, (px, py));
+    }
     let (nx, ny, moved) = guard(&ask.seen, &winmgr::layout(), x, y, &winmgr::title_of)
         .map_err(|why| Miss::new(MissKind::Stale, format!("Not done: since you last looked, {why}. Nothing was clicked or typed. Aim again on the fresh screenshot.")))?;
     let hwnd = winmgr::top_window_at(nx, ny).unwrap_or(0);
     let note = if moved { " (the window had moved since the screenshot; the point moved with it)".to_string() } else { String::new() };
     Ok(Located { point: (nx, ny), hwnd, scene: (hwnd != 0).then_some(hwnd), live: None, desc: format!("({px},{py})"), note })
+}
+
+/// A point on a picture of one window taken while others covered it: the point belongs to that window, which
+/// must still be there and the same size; it moves with the window, and `uncover` brings it forward
+fn in_own_picture(f: &Frame, h: isize, x: i32, y: i32, (px, py): (i32, i32)) -> Result<Located, Miss> {
+    let stale = |why: &str| Miss::new(MissKind::Stale, format!("Not done: since you last looked, {why}. Nothing was clicked or typed. Take a fresh screenshot."));
+    if winmgr::is_minimized(h) {
+        return Err(stale("the window was minimized"));
+    }
+    let Some((l, t, r, b)) = winmgr::rect_of(h) else { return Err(stale("the window has closed")) };
+    let size = ((f.width as f64 / f.scale).round() as i32, (f.height as f64 / f.scale).round() as i32);
+    if ((r - l) - size.0).abs() > 3 || ((b - t) - size.1).abs() > 3 {
+        return Err(stale("the window has been resized, so what was at that point has moved"));
+    }
+    let (nx, ny) = (x + l - f.left, y + t - f.top);
+    let note = if (nx, ny) != (x, y) { " (the window had moved since the screenshot; the point moved with it)".to_string() } else { String::new() };
+    Ok(Located { point: (nx, ny), hwnd: h, scene: Some(h), live: None, desc: format!("({px},{py})"), note })
 }
 
 /// Make sure a real click on a located control reaches it: when a window of another program covers the

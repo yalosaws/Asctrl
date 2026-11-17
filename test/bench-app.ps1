@@ -1,5 +1,7 @@
 # A small window with known controls for test/bench.ts: ordinary controls (readable by UI Automation),
 # a canvas that draws its own text (only OCR can read it), and a dialog that opens after a delay.
+# -NotOnTop: an ordinary window that others can cover (test/p2.ts); otherwise it stays on top.
+param([switch]$NotOnTop)
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -8,7 +10,7 @@ $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Asctrl Bench'
 $form.Size = New-Object System.Drawing.Size(720, 560)
 $form.StartPosition = 'CenterScreen'
-$form.TopMost = $true
+$form.TopMost = -not $NotOnTop
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 11)
 
 function Add-Control($c, $x, $y, $w, $h) {

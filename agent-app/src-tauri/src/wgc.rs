@@ -49,6 +49,38 @@ impl Picture {
         }
         Ok(out)
     }
+
+    /// The whole picture at `w` x `h` (not larger than it is), each pixel the average of those it covers, so
+    /// small text stays readable
+    pub fn shrink(&self, w: i32, h: i32) -> Vec<u8> {
+        let (sw, sh) = (self.area.width as usize, self.area.height as usize);
+        let (w, h) = ((w.max(1) as usize).min(sw), (h.max(1) as usize).min(sh));
+        if (w, h) == (sw, sh) {
+            return self.px.clone();
+        }
+        let mut out = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let (y0, y1) = (y * sh / h, ((y + 1) * sh / h).max(y * sh / h + 1));
+            for x in 0..w {
+                let (x0, x1) = (x * sw / w, ((x + 1) * sw / w).max(x * sw / w + 1));
+                let mut sum = [0u32; 4];
+                for sy in y0..y1 {
+                    for sx in x0..x1 {
+                        let s = (sy * sw + sx) * 4;
+                        for c in 0..4 {
+                            sum[c] += self.px[s + c] as u32;
+                        }
+                    }
+                }
+                let n = ((y1 - y0) * (x1 - x0)) as u32;
+                let d = (y * w + x) * 4;
+                for c in 0..4 {
+                    out[d + c] = (sum[c] / n) as u8;
+                }
+            }
+        }
+        out
+    }
 }
 
 fn err(what: &str) -> impl Fn(windows::core::Error) -> String + '_ {
@@ -62,6 +94,8 @@ pub fn capture(hwnd: isize) -> Result<Picture, String> {
     }
     let (l, t, _, _) = crate::winmgr::rect_of(hwnd).ok_or("window capture: no such window")?;
     unsafe {
+        // WinRT needs COM on this thread; harmless when it is already there
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         let mut device = None;
         let mut context = None;
         D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context))
@@ -141,5 +175,9 @@ mod tests {
         let big = p.cut(Area { left: 102, top: 51, width: 2, height: 1 }, 4, 2).unwrap();
         assert_eq!((big[0], big[4], big[8], big[12]), (12, 12, 13, 13));
         assert!(p.cut(Area { left: 99, top: 50, width: 2, height: 1 }, 2, 1).is_err());
+        // Half the size: each pixel the average of a 2x2 block
+        let half = p.shrink(2, 1);
+        assert_eq!((half[0], half[4]), ((0 + 1 + 10 + 11) / 4, (2 + 3 + 12 + 13) / 4));
+        assert_eq!(p.shrink(8, 8).len(), p.px.len(), "never larger than it is");
     }
 }

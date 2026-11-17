@@ -106,11 +106,19 @@ pub fn grab(area: Area, max_width: i32) -> Result<Shot, String> {
         return Err("The area is too large to capture".into());
     }
     let pixels = pixels(area, w, h, true)?;
-    let mut jpeg = Vec::with_capacity(pixels.len() / 12);
+    Ok(Shot { jpeg: jpeg(&pixels, w, h)?, width: w, height: h, scale })
+}
+
+/// Top-down BGRA rows, `w` x `h`, as JPEG
+pub fn jpeg(px: &[u8], w: i32, h: i32) -> Result<Vec<u8>, String> {
+    if w > u16::MAX as i32 || h > u16::MAX as i32 {
+        return Err("The area is too large to capture".into());
+    }
+    let mut jpeg = Vec::with_capacity(px.len() / 12);
     jpeg_encoder::Encoder::new(&mut jpeg, JPEG_QUALITY)
-        .encode(&pixels, w as u16, h as u16, jpeg_encoder::ColorType::Bgra)
+        .encode(px, w as u16, h as u16, jpeg_encoder::ColorType::Bgra)
         .map_err(|e| format!("Screenshot failed: {e}"))?;
-    Ok(Shot { jpeg, width: w, height: h, scale })
+    Ok(jpeg)
 }
 
 /// The pixels of `area` scaled to w x h, as top-down BGRA rows. `smooth` averages source pixels when
