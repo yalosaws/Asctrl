@@ -493,7 +493,8 @@ pub fn foreground() -> isize {
     if h != 0 && pid_of(h) == std::process::id() {
         return list().first().map(|w| w.handle).unwrap_or(0);
     }
-    h
+    // Its top-level window: a press through UI Automation can leave a child window (a button) as the foreground
+    if h != 0 { root_of(h) } else { 0 }
 }
 
 /// Make sure keystrokes have somewhere to go: when our own overlay holds the foreground, hand it to the

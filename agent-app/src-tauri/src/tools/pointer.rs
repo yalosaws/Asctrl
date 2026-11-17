@@ -102,12 +102,16 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
                 let before = pace.before(None);
                 let (framed, whole) = zone(loc.hwnd);
                 let anim = Fx::start(&c2, "a", "click", json!({ "count": 1 }), json!({ "at": fx::pt_json(loc.point), "zone": framed, "zoneIsWindow": whole, "win": framed }));
-                let s = l.press();
+                let theirs = winmgr::foreground();
+                let s = l.press_quietly();
+                // Should the press still have brought its window forward, the person's window goes back in front
+                let gave_back = theirs != 0 && theirs != loc.hwnd && winmgr::foreground() == loc.hwnd && winmgr::bring_to_front(winmgr::hwnd(theirs)).is_ok();
                 anim.step(0, s.is_ok());
                 anim.end(s.is_ok());
                 let s = s.map_err(Miss::from)?;
                 let change = pace.after_direct(before);
-                Ok(Did { done: format!("{s} (directly, in the background: the mouse, keyboard and window in front were left to the person){}", loc.note), change, hwnd: loc.scene, fresh: false, delivered: true })
+                let back = if gave_back { "; it brought its window forward, so the person's window was put back in front" } else { "" };
+                Ok(Did { done: format!("{s} (directly, in the background: the mouse, keyboard and window in front were left to the person{back}){}", loc.note), change, hwnd: loc.scene, fresh: false, delivered: true })
             })
             .await;
             return finish(ctx, args, r).await;

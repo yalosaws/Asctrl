@@ -907,6 +907,37 @@ impl Live {
         Ok(if returned { format!("{verb} {label}") } else { format!("{verb} {label} (the program is still busy with it: a dialog is probably open)") })
     }
 
+    /// Press it without taking the focus or the window in front, for a press made while the person at the computer
+    /// is working: for a classic push button (Win32, WinForms) its window is told it was clicked, the way the
+    /// button itself tells it (WM_COMMAND with BN_CLICKED). UI Automation's Invoke on such a button, and BM_CLICK
+    /// too, set the focus to it first, which brings its window to the front over the person's. Anything else is
+    /// pressed as usual.
+    pub fn press_quietly(&self) -> Result<String, String> {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{GWL_STYLE, GetClassNameW, GetDlgCtrlID, GetParent, GetWindowLongW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COMMAND};
+        self.guard()?;
+        if let Ok(h) = unsafe { self.el.CurrentNativeWindowHandle() }
+            && !h.is_invalid()
+        {
+            let mut buf = [0u16; 128];
+            let n = unsafe { GetClassNameW(h, &mut buf) } as usize;
+            let class = String::from_utf16_lossy(&buf[..n]).to_ascii_uppercase();
+            // A push button of any kind: plain or default (0, 1), owner-drawn (0xB: WinForms draws its own), split
+            // or a command link (0xC..0xF). Check boxes and radio buttons are buttons too, and toggle instead.
+            let push = matches!(unsafe { GetWindowLongW(h, GWL_STYLE) } & 0xF, 0 | 1 | 0xB..=0xF);
+            let parent = unsafe { GetParent(h) }.unwrap_or_default();
+            let id = unsafe { GetDlgCtrlID(h) };
+            if (class == "BUTTON" || class.contains(".BUTTON.")) && push && self.enabled() && !parent.is_invalid() {
+                const BN_CLICKED: usize = 0;
+                let wparam = WPARAM((BN_CLICKED << 16) | (id as u16 as usize));
+                let mut res = 0usize;
+                let sent = unsafe { SendMessageTimeoutW(parent, WM_COMMAND, wparam, LPARAM(h.0 as isize), SMTO_ABORTIFHUNG, 1200, Some(&mut res)) };
+                return Ok(if sent.0 != 0 { format!("Pressed {}", self.label) } else { format!("Pressed {} (the program is still busy with it: a dialog is probably open)", self.label) });
+            }
+        }
+        self.press()
+    }
+
     fn guard(&self) -> Result<(), String> {
         if let Ok(h) = unsafe { self.el.CurrentNativeWindowHandle() }
             && !h.is_invalid()

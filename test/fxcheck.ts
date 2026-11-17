@@ -247,14 +247,15 @@ try {
       page = await openPage(info.scale, Math.round(prim.bounds.w / info.scale), Math.round(prim.bounds.h / info.scale));
       pageScreen = key;
     }
-    await page.send("Page.navigate", { url: `http://127.0.0.1:${port}/?replay` });
+    const pg = page!;
+    await pg.send("Page.navigate", { url: `http://127.0.0.1:${port}/?replay` });
     for (let i = 0; i < 50; i++) {
-      const r = await page.send("Runtime.evaluate", { expression: "typeof fxReplay", returnByValue: true });
+      const r = await pg.send("Runtime.evaluate", { expression: "typeof fxReplay", returnByValue: true });
       if (r.result?.result?.value === "function") break;
       await new Promise((r) => setTimeout(r, 100));
     }
     const events = lines.filter((l) => ["plan", "start", "step", "end"].includes(l.e.phase as string));
-    const r = await page.send("Runtime.evaluate", {
+    const r = await pg.send("Runtime.evaluate", {
       expression: `fxReplay(${JSON.stringify(info)}, ${JSON.stringify(events)}, 9000)`,
       awaitPromise: true,
       returnByValue: true,

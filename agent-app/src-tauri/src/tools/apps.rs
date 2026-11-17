@@ -129,7 +129,14 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
                 },
                 None => done,
             };
-            report::conclude(ctx, args, Did { done, change: None, hwnd: h, fresh: h.is_some(), delivered: false }, true).await
+            let mut out = report::conclude(ctx, args, Did { done, change: None, hwnd: h, fresh: h.is_some(), delivered: false }, true).await;
+            // The window, for a program or a test to go on with (focus_window, close) without reading the words
+            if let Some(h) = h {
+                let mut d = out.data.take().unwrap_or_else(|| serde_json::json!({}));
+                d["handle"] = serde_json::json!(h);
+                out.data = Some(d);
+            }
+            out
         }
         Ok(Err(e)) => fail(e),
         Err(e) => fail(e.to_string()),
