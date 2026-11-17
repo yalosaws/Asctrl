@@ -3,9 +3,11 @@
 // would let it skip the apps (PowerShell, file tools). Per task it records: success (checked by what the task left
 // behind, not by the model's word), wall time, model calls, tokens and tool calls.
 //
-// Usage: node test/p0/run.ts [--only b01,office,...] [--model sonnet] [--root D:\other-checkout] [--turns 60] [--tools compact|full] [--dry]
+// Usage: node test/p0/run.ts [--only b01,office,...] [--model sonnet] [--root D:\other-checkout] [--turns 60] [--tools compact|full] [--popups 4] [--dry]
 //   --tools  the MCP surface the model gets: compact (five tools, the default) or full (every tool by name)
 //   --root   another checkout (its MCP server and its release driver), e.g. main for the v0.2 numbers
+//   --popups every Nth task gets an unexpected popup in the middle of its work (test/p0/popup.ps1, "Update
+//            available"), the experiment of docs/architecture-v2.md section 7: the summary compares those tasks
 //   --dry    no model: only sets up, checks and cleans up every task (all should fail, each for a clear reason)
 // Takes the computer over for the whole run (about 40 tasks, a few minutes each): leave it alone.
 // Results: test/out/p0-<time>.jsonl, and a summary per area at the end.
@@ -31,6 +33,7 @@ const turns = arg("turns") ?? "60";
 const only = arg("only")?.split(",");
 const surface = arg("tools") ?? "compact";
 const perTaskMs = 15 * 60_000;
+const popupEvery = Number(arg("popups") ?? 0);
 
 const NO = ["run_powershell", "job", "request_admin", "restart_computer", "read_file", "write_file", "edit_file", "list_files", "search_files", "disk_usage", "upload_file", "download_file"];
 const SYSTEM = `You are doing a task on this Windows computer through the asctrl tools; connect to this computer first (connect with no arguments).
@@ -64,6 +67,8 @@ interface Result {
   id: string; area: Area; ok: boolean; why: string; answer: string; ms: number;
   calls: number; turns: number; tokens: { input: number; cacheWrite: number; cacheRead: number; output: number };
   cost: number; tools: Record<string, number>; model: string; stop: string; reply: string;
+  /** --popups: a popup came up during the task, and whether it was gone (dismissed) before the task ended */
+  popup?: { shown: boolean; dismissed: boolean };
 }
 
 /** Runs one task in headless Claude Code and reads its stream of events */
@@ -180,16 +185,37 @@ const tasks = TASKS.filter((t) => !only || only.some((o) => t.id.startsWith(o) |
 console.log(`${tasks.length} task(s), driver ${path.relative(here, exe) || exe}${dry ? ", dry run" : `, ${claude}`}\nresults: ${out}\n`);
 
 const results: Result[] = [];
+/** Puts the unexpected popup up `ms` after the task starts; says what became of it once the task is over */
+function popupDuring(ms: number) {
+  let proc: ReturnType<typeof spawn> | null = null;
+  let shown = false;
+  let gone = false;
+  const timer = setTimeout(() => {
+    shown = true;
+    proc = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(here, "test/p0/popup.ps1"), "-Seconds", "600"], { stdio: "ignore", windowsHide: true });
+    proc.on("exit", () => (gone = true));
+  }, ms);
+  return () => {
+    clearTimeout(timer);
+    const r = { shown, dismissed: shown && gone };
+    if (proc && !gone) proc.kill();
+    return r;
+  };
+}
+
 try {
-  for (const t of tasks) {
+  for (const [n, t] of tasks.entries()) {
     const c = { work: path.join(base, t.id), site: web };
     web.got.clear();
     prepare(t, c);
     const before = { wins: await withDriver(windows), procs: pids() };
     const prompt = t.prompt(c);
+    // Every Nth task: a popup a few seconds into the work (at a different moment each time)
+    const popup = popupEvery > 0 && !dry && n % popupEvery === popupEvery - 1 ? popupDuring(8000 + ((n * 2900) % 9000)) : null;
     const r = dry
       ? { answer: "", reply: "", ms: 0, calls: 0, turns: 0, tokens: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 }, cost: 0, tools: {}, model: "", stop: "dry" }
       : await agentRun(claude, t, prompt, c.work, mcpConfig);
+    const pop = popup?.();
     let why: string;
     try {
       const v = t.check(c, r.answer);
@@ -201,11 +227,11 @@ try {
     if (/Not logged in|Invalid API key|run \/login/i.test(r.reply)) {
       throw new Error(`Claude Code is not signed in ("${r.reply.trim()}"). Sign in once in a terminal (run ${claude}, then /login), or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN (from: claude setup-token)`);
     }
-    const res: Result = { id: t.id, area: t.area, ok: !why, why, ...r };
+    const res: Result = { id: t.id, area: t.area, ok: !why, why, ...r, ...(pop ? { popup: pop } : {}) };
     results.push(res);
     appendFileSync(out, JSON.stringify(res) + "\n");
     const tok = r.tokens.input + r.tokens.cacheWrite + r.tokens.cacheRead + r.tokens.output;
-    console.log(`${res.ok ? "✓" : "✗"} ${t.id.padEnd(20)} ${(r.ms / 1000).toFixed(0).padStart(4)} s ${String(r.calls).padStart(3)} calls ${String(Math.round(tok / 1000)).padStart(5)}k tok  ${res.ok ? r.answer.slice(0, 50) : why.slice(0, 90)}${r.stop !== "success" && r.stop !== "dry" ? ` [${r.stop}]` : ""}`);
+    console.log(`${res.ok ? "✓" : "✗"} ${(t.id + (pop?.shown ? (pop.dismissed ? " +popup" : " +POPUP") : "")).padEnd(20)} ${(r.ms / 1000).toFixed(0).padStart(4)} s ${String(r.calls).padStart(3)} calls ${String(Math.round(tok / 1000)).padStart(5)}k tok  ${res.ok ? r.answer.slice(0, 50) : why.slice(0, 90)}${r.stop !== "success" && r.stop !== "dry" ? ` [${r.stop}]` : ""}`);
   }
 } finally {
   web.close();
@@ -222,6 +248,16 @@ for (const [a, rs] of rows) {
   const ok = rs.filter((r) => r.ok).length;
   const tok = mean(rs.map((r) => r.tokens.input + r.tokens.cacheWrite + r.tokens.cacheRead + r.tokens.output));
   console.log(`${a.padEnd(9)} ${`${ok}/${rs.length}`.padStart(9)} ${`${(mean(rs.map((r) => r.ms)) / 1000).toFixed(0)} s`.padStart(7)} ${mean(rs.map((r) => r.calls)).toFixed(1).padStart(6)} ${`${(tok / 1000).toFixed(0)}k`.padStart(8)} ${`$${mean(rs.map((r) => r.cost)).toFixed(2)}`.padStart(7)}`);
+}
+// The popup experiment: the tasks that had one against the rest
+const popped = results.filter((r) => r.popup?.shown);
+if (popped.length) {
+  const line = (name: string, rs: Result[]) =>
+    `${name.padEnd(14)} ${`${rs.filter((r) => r.ok).length}/${rs.length}`.padStart(7)} ok, ${(mean(rs.map((r) => r.ms)) / 1000).toFixed(0)} s, ${mean(rs.map((r) => r.calls)).toFixed(1)} calls per task`;
+  console.log(`
+popups: ${popped.filter((r) => r.popup!.dismissed).length}/${popped.length} dismissed during the task`);
+  console.log(line("with popup", popped));
+  console.log(line("without", results.filter((r) => !r.popup?.shown)));
 }
 const toolTotals: Record<string, number> = {};
 for (const r of results) for (const [k, v] of Object.entries(r.tools)) toolTotals[k] = (toolTotals[k] ?? 0) + v;

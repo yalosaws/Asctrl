@@ -10,7 +10,7 @@ foreach ($p in Get-CimInstance Win32_Process) {
         ($p.Name -eq 'node.exe' -and $c -match 'test[\\/][\w\\/]+\.ts') -or
         ($p.Name -in 'msedge.exe', 'chrome.exe' -and $c -match 'asctrl-(ext|probe)-profile|occl-') -or
         ($p.Name -eq 'asctrl-agent.exe' -and $c -match 'ws://127\.0\.0\.1:1') -or
-        ($p.Name -eq 'powershell.exe' -and $c -match 'bench-app\.ps1|jiggle\.ps1|answer\.ps1') -or
+        ($p.Name -eq 'powershell.exe' -and $c -match 'bench-app\.ps1|jiggle\.ps1|answer\.ps1|popup\.ps1') -or
         ($p.Name -eq 'Code.exe' -and $c -match 'asctrl-electron')
     if ($test) {
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
