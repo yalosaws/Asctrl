@@ -19,6 +19,10 @@ const BLOCKED: &str = "Input was blocked by Windows: the target window may be ru
 fn send(inputs: &[INPUT]) -> Result<(), String> {
     crate::presence::ours();
     let n = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
+    // A press can bring its window to the front, above the overlay: have it checked at once
+    if inputs.iter().any(|i| i.r#type == INPUT_MOUSE && unsafe { i.Anonymous.mi.dwFlags }.0 & (MOUSEEVENTF_LEFTDOWN.0 | MOUSEEVENTF_RIGHTDOWN.0 | MOUSEEVENTF_MIDDLEDOWN.0) != 0) {
+        crate::overlay::poke();
+    }
     if n as usize == inputs.len() { Ok(()) } else { Err(BLOCKED.into()) }
 }
 

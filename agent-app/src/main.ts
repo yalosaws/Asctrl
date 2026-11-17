@@ -10,6 +10,8 @@ import { fxEnd, fxPlan, fxStart, fxStep, recallPointers, workAbandoned, type FxE
 import { EASE, play, sleep, SPRING } from "./motion";
 import { runDemo } from "./demo";
 import { setSession } from "./think";
+import { probe } from "./probe";
+import { replay, type Line } from "./replay";
 
 type Status =
   | { state: "connecting" }
@@ -336,6 +338,14 @@ async function boot() {
     $("admin-tag").hidden = !(await invoke<boolean>("is_admin"));
     render(await invoke<Status>("get_status"));
     void entrance();
+  } else if (probe.on) {
+    // test/fxcheck.ts: a recorded log played through the real overlay, measured as it draws
+    (window as unknown as Record<string, unknown>).fxReplay = (info: OverlayInfo | null, lines: Line[], tail = 9000) =>
+      replay(info, lines, tail, () => {
+        orb.place(center(primary().work));
+        orb.show(true);
+        render({ state: "connected", techName: "Replay", code: "000000" });
+      });
   } else {
     document.body.classList.add("demo");
     void entrance();

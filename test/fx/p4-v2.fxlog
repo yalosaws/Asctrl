@@ -1,0 +1,116 @@
+44 {"info":{"monitors":[{"bounds":{"h":1440,"w":2560,"x":0,"y":0},"primary":true,"work":{"h":1368,"w":2560,"x":0,"y":0}}],"originX":0,"originY":0,"scale":1.5},"phase":"info"}
+295 {"args":{"appears":"Asctrl Bench","timeoutSec":15},"geo":{},"id":"f8a63fd7-1f02-4108-ac00-6ae4a61d387b","phase":"start","tool":"wait_for"}
+529 {"geo":{},"id":"f8a63fd7-1f02-4108-ac00-6ae4a61d387b","ok":true,"phase":"end","quiet":false,"text":"","tool":"wait_for"}
+531 {"args":{"max":1},"geo":{},"id":"f2ee9800-28c0-4e31-a6c1-14929c7e35b7","phase":"start","tool":"observe"}
+572 {"geo":{},"id":"f2ee9800-28c0-4e31-a6c1-14929c7e35b7","ok":true,"phase":"end","quiet":false,"text":"","tool":"observe"}
+573 {"args":{"args":{"names":["Ann","Bob","Cy"],"w":3017582},"script":"\n      const seen = [];\n      for (const name of args.names) {\n        fill({ Name: name }, { window: args.w });\n        click('Submit', { window: args.w });\n        seen.push(look({ window: args.w, query: 'Submitted:' }).text.match(/Submitted: \\w+/)[0]);\n      }\n      return seen;"},"geo":{},"id":"61b1248b-7bbd-472f-90eb-99fe5f6f57d2","phase":"start","tool":"exec"}
+613 {"args":{"after":"none","target":"Name","value":"Ann","window":3017582},"geo":{},"id":"p1-1","phase":"start","tool":"set_value"}
+661 {"args":{},"geo":{"targets":[[977,361]],"win":[751,264,1058,829],"zone":[782,338,930,309],"zoneIsWindow":false},"id":"p1-1.v0","phase":"start","tool":"element_action"}
+668 {"id":"p1-1.v0","index":0,"ok":true,"phase":"step","tool":"element_action"}
+669 {"geo":{},"id":"p1-1.v0","ok":true,"phase":"end","text":"","tool":"element_action"}
+795 {"geo":{},"id":"p1-1","ok":true,"phase":"end","quiet":false,"text":"","tool":"set_value"}
+795 {"args":{"after":"none","target":"Submit","window":3017582},"geo":{},"id":"p1-2","phase":"start","tool":"click"}
+842 {"args":{"count":1},"geo":{"at":[1292,363],"win":[751,264,1058,829],"zone":[751,264,1058,829],"zoneIsWindow":true},"id":"p1-2.a","phase":"start","tool":"click"}
+857 {"id":"p1-2.a","index":0,"ok":true,"phase":"step","tool":"click"}
+857 {"geo":{},"id":"p1-2.a","ok":true,"phase":"end","text":"","tool":"click"}
+1238 {"geo":{},"id":"p1-2","ok":true,"phase":"end","quiet":false,"text":"","tool":"click"}
+1238 {"args":{"query":"Submitted:","window":3017582},"geo":{},"id":"p1-3","phase":"start","tool":"observe"}
+1277 {"geo":{},"id":"p1-3","ok":true,"phase":"end","quiet":false,"text":"","tool":"observe"}
+1277 {"args":{"after":"none","target":"Name","value":"Bob","window":3017582},"geo":{},"id":"p1-4","phase":"start","tool":"set_value"}
+1328 {"args":{},"geo":{"targets":[[977,361]],"win":[751,264,1058,829],"zone":[782,338,930,309],"zoneIsWindow":false},"id":"p1-4.v0","phase":"start","tool":"element_action"}
+1342 {"id":"p1-4.v0","index":0,"ok":true,"phase":"step","tool":"element_action"}
+1342 {"geo":{},"id":"p1-4.v0","ok":true,"phase":"end","text":"","tool":"element_action"}
+1638 {"geo":{},"id":"p1-4","ok":true,"phase":"end","quiet":false,"text":"","tool":"set_value"}
+1638 {"args":{"after":"none","target":"Submit","window":3017582},"geo":{},"id":"p1-5","phase":"start","tool":"click"}
+1703 {"args":{"count":1},"geo":{"at":[1292,363],"win":[751,264,1058,829],"zone":[751,264,1058,829],"zoneIsWindow":true},"id":"p1-5.a","phase":"start","tool":"click"}
+1714 {"id":"p1-5.a","index":0,"ok":true,"phase":"step","tool":"click"}
+1715 {"geo":{},"id":"p1-5.a","ok":true,"phase":"end","text":"","tool":"click"}
+2056 {"geo":{},"id":"p1-5","ok":true,"phase":"end","quiet":false,"text":"","tool":"click"}
+2056 {"args":{"query":"Submitted:","window":3017582},"geo":{},"id":"p1-6","phase":"start","tool":"observe"}
+2096 {"geo":{},"id":"p1-6","ok":true,"phase":"end","quiet":false,"text":"","tool":"observe"}
+2096 {"args":{"after":"none","target":"Name","value":"Cy","window":3017582},"geo":{},"id":"p1-7","phase":"start","tool":"set_value"}
+2146 {"args":{},"geo":{"targets":[[977,361]],"win":[751,264,1058,829],"zone":[782,338,930,309],"zoneIsWindow":false},"id":"p1-7.v0","phase":"start","tool":"element_action"}
+2158 {"id":"p1-7.v0","index":0,"ok":true,"phase":"step","tool":"element_action"}
+2158 {"geo":{},"id":"p1-7.v0","ok":true,"phase":"end","text":"","tool":"element_action"}
+2456 {"geo":{},"id":"p1-7","ok":true,"phase":"end","quiet":false,"text":"","tool":"set_value"}
+2456 {"args":{"after":"none","target":"Submit","window":3017582},"geo":{},"id":"p1-8","phase":"start","tool":"click"}
+2509 {"args":{"count":1},"geo":{"at":[1292,363],"win":[751,264,1058,829],"zone":[751,264,1058,829],"zoneIsWindow":true},"id":"p1-8.a","phase":"start","tool":"click"}
+2523 {"id":"p1-8.a","index":0,"ok":true,"phase":"step","tool":"click"}
+2523 {"geo":{},"id":"p1-8.a","ok":true,"phase":"end","text":"","tool":"click"}
+2905 {"geo":{},"id":"p1-8","ok":true,"phase":"end","quiet":false,"text":"","tool":"click"}
+2905 {"args":{"query":"Submitted:","window":3017582},"geo":{},"id":"p1-9","phase":"start","tool":"observe"}
+2940 {"geo":{},"id":"p1-9","ok":true,"phase":"end","quiet":false,"text":"","tool":"observe"}
+2942 {"geo":{},"id":"61b1248b-7bbd-472f-90eb-99fe5f6f57d2","ok":true,"phase":"end","quiet":false,"text":"","tool":"exec"}
+2943 {"args":{"args":{"w":3017582},"script":"fill({ Name: 'Dee' }, { window: args.w });\nclick('Send it', { window: args.w, timeoutSec: 0 });\nreturn look({ window: args.w, query: 'Submitted:' }).text.match(/Submitted: \\w+/)[0];"},"geo":{},"id":"78e1e82c-15e9-4628-841f-52c325f7b1ac","phase":"start","tool":"exec"}
+2982 {"args":{"after":"none","target":"Name","value":"Dee","window":3017582},"geo":{},"id":"p2-1","phase":"start","tool":"set_value"}
+3024 {"args":{},"geo":{"targets":[[977,361]],"win":[751,264,1058,829],"zone":[782,338,930,309],"zoneIsWindow":false},"id":"p2-1.v0","phase":"start","tool":"element_action"}
+3036 {"id":"p2-1.v0","index":0,"ok":true,"phase":"step","tool":"element_action"}
+3036 {"geo":{},"id":"p2-1.v0","ok":true,"phase":"end","text":"","tool":"element_action"}
+3334 {"geo":{},"id":"p2-1","ok":true,"phase":"end","quiet":false,"text":"","tool":"set_value"}
+3334 {"args":{"after":"none","target":"Send it","timeoutSec":0,"window":3017582},"geo":{},"id":"p2-2","phase":"start","tool":"click"}
+3436 {"geo":{},"id":"p2-2","ok":false,"phase":"end","quiet":false,"text":"","tool":"click"}
+3462 {"geo":{},"id":"78e1e82c-15e9-4628-841f-52c325f7b1ac","ok":true,"phase":"end","quiet":false,"text":"","tool":"exec"}
+3463 {"args":{"id":2,"instead":{"args":{"after":"none","target":"Submit","window":3017582},"tool":"click"}},"geo":{},"id":"f252eeb0-7e50-4b87-88a2-503dbd2de5bb","phase":"start","tool":"resume"}
+3463 {"args":{"after":"none","target":"Submit","window":3017582},"geo":{},"id":"p2-3","phase":"start","tool":"click"}
+3516 {"args":{"count":1},"geo":{"at":[1292,363],"win":[751,264,1058,829],"zone":[751,264,1058,829],"zoneIsWindow":true},"id":"p2-3.a","phase":"start","tool":"click"}
+3528 {"id":"p2-3.a","index":0,"ok":true,"phase":"step","tool":"click"}
+3528 {"geo":{},"id":"p2-3.a","ok":true,"phase":"end","text":"","tool":"click"}
+3911 {"geo":{},"id":"p2-3","ok":true,"phase":"end","quiet":false,"text":"","tool":"click"}
+3911 {"args":{"query":"Submitted:","window":3017582},"geo":{},"id":"p2-4","phase":"start","tool":"observe"}
+3948 {"geo":{},"id":"p2-4","ok":true,"phase":"end","quiet":false,"text":"","tool":"observe"}
+3950 {"geo":{},"id":"f252eeb0-7e50-4b87-88a2-503dbd2de5bb","ok":true,"phase":"end","quiet":false,"text":"","tool":"resume"}
+3951 {"args":{"args":{"w":3017582},"script":"const who = ask('Which name?', { choices: ['Eve', 'Fay'] });\nfill({ Name: who }, { window: args.w });\nclick('Submit', { window: args.w });\nreturn who;"},"geo":{},"id":"f62b50ec-dace-4a98-859d-f2088ebc3dd5","phase":"start","tool":"exec"}
+3952 {"geo":{},"id":"f62b50ec-dace-4a98-859d-f2088ebc3dd5","ok":true,"phase":"end","quiet":false,"text":"","tool":"exec"}
+3953 {"args":{"answer":"Fay","id":3},"geo":{},"id":"9a6be3dd-045a-4ff5-a755-b8d34aafd589","phase":"start","tool":"resume"}
+3991 {"args":{"after":"none","target":"Name","value":"Fay","window":3017582},"geo":{},"id":"p3-1","phase":"start","tool":"set_value"}
+4037 {"args":{},"geo":{"targets":[[977,361]],"win":[751,264,1058,829],"zone":[782,338,930,309],"zoneIsWindow":false},"id":"p3-1.v0","phase":"start","tool":"element_action"}
+4050 {"id":"p3-1.v0","index":0,"ok":true,"phase":"step","tool":"element_action"}
+4050 {"geo":{},"id":"p3-1.v0","ok":true,"phase":"end","text":"","tool":"element_action"}
+4347 {"geo":{},"id":"p3-1","ok":true,"phase":"end","quiet":false,"text":"","tool":"set_value"}
+4347 {"args":{"after":"none","target":"Submit","window":3017582},"geo":{},"id":"p3-2","phase":"start","tool":"click"}
+4394 {"args":{"count":1},"geo":{"at":[1292,363],"win":[751,264,1058,829],"zone":[751,264,1058,829],"zoneIsWindow":true},"id":"p3-2.a","phase":"start","tool":"click"}
+4404 {"id":"p3-2.a","index":0,"ok":true,"phase":"step","tool":"click"}
+4405 {"geo":{},"id":"p3-2.a","ok":true,"phase":"end","text":"","tool":"click"}
+4784 {"geo":{},"id":"p3-2","ok":true,"phase":"end","quiet":false,"text":"","tool":"click"}
+4784 {"geo":{},"id":"9a6be3dd-045a-4ff5-a755-b8d34aafd589","ok":true,"phase":"end","quiet":false,"text":"","tool":"resume"}
+4785 {"args":{"query":"Submitted: Fay","window":3017582},"geo":{},"id":"6b2bc47d-8aa9-4fd8-9fae-afdf2728faaf","phase":"start","tool":"observe"}
+4821 {"geo":{},"id":"6b2bc47d-8aa9-4fd8-9fae-afdf2728faaf","ok":true,"phase":"end","quiet":false,"text":"","tool":"observe"}
+4822 {"args":{"args":{"w":3017582},"script":"try { click('No such thing', { window: args.w, timeoutSec: 0 }); } catch (e) { return 'caught: ' + e.message; }"},"geo":{},"id":"7991cd08-0ba5-4d13-96d2-bebf8918e593","phase":"start","tool":"exec"}
+4859 {"args":{"after":"none","target":"No such thing","timeoutSec":0,"window":3017582},"geo":{},"id":"p4-1","phase":"start","tool":"click"}
+4953 {"geo":{},"id":"p4-1","ok":false,"phase":"end","quiet":false,"text":"","tool":"click"}
+4976 {"geo":{},"id":"7991cd08-0ba5-4d13-96d2-bebf8918e593","ok":true,"phase":"end","quiet":false,"text":"","tool":"exec"}
+4994 {"args":{"abort":"not there today","id":4},"geo":{},"id":"89907873-648b-47a4-a188-3341d43c8dbe","phase":"start","tool":"resume"}
+5009 {"geo":{},"id":"89907873-648b-47a4-a188-3341d43c8dbe","ok":true,"phase":"end","quiet":false,"text":"","tool":"resume"}
+5009 {"args":{"script":"let n = 0;\nwhile (true) { n++; sleep(50); }","waitSec":0.5},"geo":{},"id":"826abaeb-123b-49a7-97b1-a6cebdf2d2f7","phase":"start","tool":"exec"}
+5518 {"geo":{},"id":"826abaeb-123b-49a7-97b1-a6cebdf2d2f7","ok":true,"phase":"end","quiet":false,"text":"","tool":"exec"}
+5519 {"args":{"id":5,"stop":true},"geo":{},"id":"73d43cc6-6146-47bf-b7e3-7fccbec5c37a","phase":"start","tool":"resume"}
+5566 {"geo":{},"id":"73d43cc6-6146-47bf-b7e3-7fccbec5c37a","ok":false,"phase":"end","quiet":false,"text":"","tool":"resume"}
+5567 {"args":{"args":{"url":"file:///D:/Asctrl/test/web/p3.html"},"script":"\n      const o = open(args.url, { browser: 'asctrl' });\n      const w = o.data.handle;\n      for (let i = 0; i < 3; i++) click('Save', { window: w });\n      type('Search here', 'from a program', { window: w });\n      return { w, saved: (read(w).match(/saved \\d+/g) || []).pop() };"},"geo":{},"id":"e3a8f72f-955e-4ff5-8ce7-aa1b9023fd96","phase":"start","tool":"exec"}
+5603 {"args":{"after":"none","browser":"asctrl","target":"file:///D:/Asctrl/test/web/p3.html"},"geo":{},"id":"p6-1","phase":"start","tool":"open_app"}
+6128 {"geo":{"rect":[24,15,1239,1329]},"id":"p6-1","ok":true,"phase":"end","quiet":false,"text":"","tool":"open_app"}
+6145 {"args":{"after":"none","target":"Save","window":3147346},"geo":{},"id":"p6-2","phase":"start","tool":"click"}
+6149 {"args":{"count":1},"geo":{"at":[97,445],"win":[24,15,1239,1329],"zone":[24,15,1239,1329],"zoneIsWindow":true},"id":"p6-2.page","phase":"start","tool":"click"}
+6240 {"id":"p6-2.page","index":0,"ok":true,"phase":"step","tool":"click"}
+6240 {"geo":{},"id":"p6-2.page","ok":true,"phase":"end","text":"","tool":"click"}
+6419 {"geo":{},"id":"p6-2","ok":true,"phase":"end","quiet":false,"text":"","tool":"click"}
+6419 {"args":{"after":"none","target":"Save","window":3147346},"geo":{},"id":"p6-3","phase":"start","tool":"click"}
+6421 {"args":{"count":1},"geo":{"at":[97,445],"win":[24,15,1239,1329],"zone":[24,15,1239,1329],"zoneIsWindow":true},"id":"p6-3.page","phase":"start","tool":"click"}
+6422 {"id":"p6-3.page","index":0,"ok":true,"phase":"step","tool":"click"}
+6422 {"geo":{},"id":"p6-3.page","ok":true,"phase":"end","text":"","tool":"click"}
+6603 {"geo":{},"id":"p6-3","ok":true,"phase":"end","quiet":false,"text":"","tool":"click"}
+6603 {"args":{"after":"none","target":"Save","window":3147346},"geo":{},"id":"p6-4","phase":"start","tool":"click"}
+6605 {"args":{"count":1},"geo":{"at":[97,445],"win":[24,15,1239,1329],"zone":[24,15,1239,1329],"zoneIsWindow":true},"id":"p6-4.page","phase":"start","tool":"click"}
+6607 {"id":"p6-4.page","index":0,"ok":true,"phase":"step","tool":"click"}
+6607 {"geo":{},"id":"p6-4.page","ok":true,"phase":"end","text":"","tool":"click"}
+6785 {"geo":{},"id":"p6-4","ok":true,"phase":"end","quiet":false,"text":"","tool":"click"}
+6785 {"args":{"after":"none","target":"Search here","text":"from a program","window":3147346},"geo":{},"id":"p6-5","phase":"start","tool":"type_text"}
+6791 {"args":{"count":1},"geo":{"at":[240,532],"win":[24,15,1239,1329],"zone":[24,15,1239,1329],"zoneIsWindow":true},"id":"p6-5.page","phase":"start","tool":"click"}
+6791 {"id":"p6-5.page","index":0,"ok":true,"phase":"step","tool":"click"}
+6791 {"geo":{},"id":"p6-5.page","ok":true,"phase":"end","text":"","tool":"click"}
+7121 {"geo":{},"id":"p6-5","ok":true,"phase":"end","quiet":false,"text":"","tool":"type_text"}
+7122 {"args":{"window":3147346},"geo":{},"id":"p6-6","phase":"start","tool":"read_text"}
+7123 {"geo":{},"id":"p6-6","ok":true,"phase":"end","quiet":false,"text":"","tool":"read_text"}
+7126 {"geo":{},"id":"e3a8f72f-955e-4ff5-8ce7-aa1b9023fd96","ok":true,"phase":"end","quiet":false,"text":"","tool":"exec"}
+7126 {"args":{"action":"close","after":"none","window":3147346},"geo":{"hwnd":3147346,"rect":[24,15,1239,1329]},"id":"39275874-45d5-437f-bd26-12a5aa3e61af","phase":"start","tool":"focus_window"}
+7141 {"geo":{"rect":[24,15,1239,1329]},"id":"39275874-45d5-437f-bd26-12a5aa3e61af","index":0,"ok":true,"phase":"step","tool":"focus_window"}
+7412 {"geo":{"rect":null},"id":"39275874-45d5-437f-bd26-12a5aa3e61af","ok":true,"phase":"end","quiet":false,"text":"","tool":"focus_window"}

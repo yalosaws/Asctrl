@@ -21,8 +21,8 @@ pub fn init(app: AppHandle) {
 /// the driver started, to see what the overlay was told when its drawing looks wrong
 static FX_LOG: OnceLock<Option<(std::sync::Mutex<std::fs::File>, std::time::Instant)>> = OnceLock::new();
 
-/// Send an animation event to the overlay
-pub fn emit(v: Value) {
+/// Write `v` to the animation log, if there is one
+pub fn note(v: &Value) {
     if let Some((f, t0)) = FX_LOG.get_or_init(|| {
         let p = std::env::var_os("ASCTRL_FX_LOG")?;
         let f = std::fs::OpenOptions::new().create(true).append(true).open(p).ok()?;
@@ -31,6 +31,11 @@ pub fn emit(v: Value) {
         use std::io::Write;
         let _ = writeln!(f.lock().unwrap(), "{} {}", t0.elapsed().as_millis(), v);
     }
+}
+
+/// Send an animation event to the overlay
+pub fn emit(v: Value) {
+    note(&v);
     if let Some(app) = APP.get() {
         let _ = app.emit("fx", v);
     }
@@ -142,7 +147,7 @@ pub fn zone_follows_window(call: &str, hwnd: isize, zone: Value) {
 pub fn click(call: &str, part: &str, at: (i32, i32), count: u32, ok: bool) {
     let win = crate::winmgr::top_window_at(at.0, at.1);
     let zone = json!(win.and_then(crate::winmgr::rect_of).map(rect_json));
-    let fx = Fx::start(call, part, "click", json!({ "count": count }), json!({ "at": pt_json(at), "zone": zone, "zoneIsWindow": true }));
+    let fx = Fx::start(call, part, "click", json!({ "count": count }), json!({ "at": pt_json(at), "zone": zone, "zoneIsWindow": true, "win": zone }));
     fx.step(0, ok);
     fx.end(ok);
     if let Some(w) = win {

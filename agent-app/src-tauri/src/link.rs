@@ -11,7 +11,7 @@ use crate::{AgentState, RelayState, Via, admin, attach, detach, fx, overlay, pub
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;

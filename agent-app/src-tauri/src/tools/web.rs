@@ -460,6 +460,32 @@ fn theirs_covered(p: &Page) -> bool {
     p.c.theirs && winmgr::rect_of(p.hwnd).is_some_and(|(l, t, r, b)| winmgr::covered(p.hwnd, crate::capture::Area { left: l, top: t, width: r - l, height: b - t }))
 }
 
+/// Draw an action on `k` on the overlay, as for one done with the mouse: a pointer flies there and presses, in a
+/// frame round the window. Only where the person can see it (nothing covers the window there); the page is
+/// worked without the mouse, so this is the only sign on screen of what happened. Never waits for anything.
+fn page_fx(p: &Page, k: &Pick) -> Option<crate::fx::Fx> {
+    let call = fx::call_id();
+    if call.is_empty() {
+        return None;
+    }
+    let (l, t, _, _) = winmgr::page_rect(p.hwnd, "Chrome_RenderWidgetHostHWND")?;
+    let s = winmgr::scale_of(p.hwnd);
+    let at = (l + (k.x * s).round() as i32, t + (k.y * s).round() as i32);
+    if winmgr::top_window_at(at.0, at.1) != Some(p.hwnd) {
+        return None;
+    }
+    let win = winmgr::rect_of(p.hwnd).map(fx::rect_json);
+    Some(crate::fx::Fx::start(&call, "page", "click", json!({ "count": 1 }), json!({ "at": fx::pt_json(at), "zone": win, "zoneIsWindow": true, "win": win })))
+}
+
+/// An action on `k` that is already done (typed into, set): drawn the same way, all at once
+fn page_mark(p: &Page, k: &Pick, ok: bool) {
+    if let Some(a) = page_fx(p, k) {
+        a.step(0, ok);
+        a.end(ok);
+    }
+}
+
 /// Press at `k` in the page, wait for what it set off, and say so
 async fn press(ctx: &Ctx, args: &Value, p: &Page, k: &Pick, turn: tokio::sync::OwnedMutexGuard<()>) -> Output {
     if theirs_covered(p) {
@@ -473,12 +499,21 @@ async fn press(ctx: &Ctx, args: &Value, p: &Page, k: &Pick, turn: tokio::sync::O
         return reply(ctx, args, p, format!("Clicked {} in the page by its script (the window is covered, and this browser doesn't draw covered windows, so a real click would wait for it; the page can tell a script click, and a few pages ignore one).", k.desc()), effect).await;
     }
     let _ = p.eval(ARM).await;
+    let anim = page_fx(p, k);
     let t0 = Instant::now();
     let at = |kind: &str| json!({ "type": kind, "x": k.x, "y": k.y, "button": if kind == "mouseMoved" { "none" } else { "left" }, "clickCount": 1 });
     for kind in ["mouseMoved", "mousePressed"] {
         if let Err(e) = p.input("Input.dispatchMouseEvent", at(kind)).await {
+            if let Some(a) = anim {
+                a.step(0, false);
+                a.end(false);
+            }
             return fail(format!("The browser did not take the click: {e}"));
         }
+    }
+    if let Some(a) = anim {
+        a.step(0, true);
+        a.end(true);
     }
     // A page that opens an alert from the click holds the release's answer until the alert is closed
     let released = tokio::time::timeout(Duration::from_secs(2), p.input("Input.dispatchMouseEvent", at("mouseReleased"))).await;
@@ -547,7 +582,9 @@ pub(super) async fn type_text(ctx: &Ctx, args: &Value) -> Option<Output> {
     let p = p.at(&k);
     let _ = p.eval(ARM).await;
     let t0 = Instant::now();
-    if let Err(e) = put(&p, &t, replace).await {
+    let put = put(&p, &t, replace).await;
+    page_mark(&p, &k, put.is_ok());
+    if let Err(e) = put {
         return Some(fail(format!("Could not type into {}: {e}", k.desc())));
     }
     let now = reads(&p).await;
@@ -600,6 +637,7 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Option<Output> {
         // Checkboxes and the rest: the usual way
         _ => return None,
     };
+    page_mark(&p, &k, true);
     let effect = if kind == "text" { settle(&p, t0).await.typed() } else { settle(&p, t0).await };
     drop(turn);
     Some(reply(ctx, args, &p, format!("{done}."), effect).await)

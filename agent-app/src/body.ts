@@ -12,6 +12,7 @@
 import type { Pt, R } from "./geo";
 import { orb } from "./orb";
 import { clamp, onFrame, sleep } from "./motion";
+import { probe as rec, probeId } from "./probe";
 
 export type Shape = { cx: number; cy: number; w: number; h: number; r: number };
 export type Mode = "ball" | "panel" | "light" | "ring" | "capsule" | "bar";
@@ -227,6 +228,7 @@ export class Pointer {
   private pts = CIRCLE.map((q) => [...q] as [number, number]);
   private m: { from: [number, number][]; to: [number, number][]; t: number; at: number; ms: number; res: () => void } | null = null;
   private live = true;
+  readonly pid = probeId();
   /** Squash and stretch (see STRETCH_*): how much, how fast that is changing, the way it points, last frame */
   private st = 0;
   private stV = 0;
@@ -244,6 +246,7 @@ export class Pointer {
     this.paths = [under, body];
     this.g.append(under, body);
     ptrLayer.append(this.g);
+    rec.mark({ k: "ptr+", id: this.pid, col: k, x, y });
     this.draw();
     onFrame(() => {
       if (!this.live) return false;
@@ -344,6 +347,7 @@ export class Pointer {
 
   /** Press down and up (the tip stays put) */
   async press() {
+    rec.mark({ k: "press", id: this.pid, x: this.x, y: this.y });
     await tween(200, (_, t) => (this.s = 1 - 0.22 * Math.sin(Math.PI * t)), (t) => t, PTR_MIN.press, () => this.rush);
   }
 
@@ -364,6 +368,7 @@ export class Pointer {
   }
 
   remove() {
+    if (this.live) rec.mark({ k: "ptr-", id: this.pid });
     this.live = false;
     this.g.remove();
   }
@@ -415,7 +420,9 @@ export const body = {
     if (out) return;
     out = true;
     stretch = 0;
-    this.place({ cx: P.cx.x, cy: P.cy.x });
+    // The springs carry on toward the orb's place: a bump or a shake under way finishes where the orb rests,
+    // instead of being frozen off to one side (the next flight would start from there)
+    wake();
     this.mode("ball");
   },
 
@@ -625,6 +632,9 @@ export function job(fn: () => Promise<void>): Promise<void> {
   lane = run;
   return run;
 }
+
+/** Where the body is drawn and in what shape (for the replay's measurements, probe.ts) */
+export const bodyState = () => ({ x: P.cx.x, y: P.cy.x, w: P.w.x, h: P.h.x, mode: root.dataset.mode ?? "", out, shown: !root.hidden && root.style.visibility !== "hidden" });
 
 export const busy = () => queued > 0;
 /** More work is waiting behind the job running now */

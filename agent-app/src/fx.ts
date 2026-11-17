@@ -11,6 +11,7 @@ import { bloom, dart, Outline, ripple, strand } from "./light";
 import { breathe, pulse } from "./edge";
 import { closeCard, deckRect, fillEntries, fillLines, openCard, progress, scan, setPanelHooks, skeleton, termEnd, termStart, type Card } from "./panel";
 import { el, fadeOut, play, sleep, SPRING, tween } from "./motion";
+import { probe, probeId } from "./probe";
 
 export interface FxEvent {
   phase: "plan" | "start" | "step" | "end";
@@ -181,7 +182,14 @@ const sent = new Map<string, { outcome: { p: Promise<boolean | null>; r: (v: boo
 const ZONE_PAD = 14;
 const ZONE_MIN = { w: 120, h: 64 };
 
-let zone: { r: R; ol: Outline; timer?: number } | null = null;
+/** The work frame up now: round `r`, in the window `win` (its rect, when the driver said which window) */
+let zone: { r: R; ol: Outline; timer?: number; pid: number; win: R | null } | null = null;
+
+/** The frame goes, fading for ms */
+function endZone(z: { ol: Outline; pid: number }, ms: number) {
+  void z.ol.out("fade", ms);
+  probe.mark({ k: "frame-", id: z.pid });
+}
 
 function union(a: R, b: R): R {
   const x = Math.min(a.x, b.x);
@@ -208,29 +216,42 @@ const sameRect = (a: R, b: R) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Mat
  * Frame the area being worked on (where all the window's operable controls are). The frame is drawn once and
  * stays put while actions keep landing in it; it is only redrawn when the work moves to a different area.
  */
-function frameZone(r: R, hug = false) {
+function frameZone(r: R, hug = false, win: R | null = null) {
   if (zone) window.clearTimeout(zone.timer);
   if (zone && !sameRect(zone.r, r)) {
-    void zone.ol.out("fade", 300);
+    endZone(zone, 300);
     zone = null;
   }
   // Around a whole window the ring overlaps its edge by 1.5 px (the ring is 2.5 wide), so rounding to device
   // pixels can never open a gap between them; around a group of controls it has room
-  if (!zone) zone = { r, ol: new Outline(r, "", hug ? 1 : 3).popIn().trace(560) };
+  if (!zone) {
+    zone = { r, ol: new Outline(r, "", hug ? 1 : 3).popIn().trace(560), pid: probeId(), win };
+    probe.mark({ k: "frame+", id: zone.pid, r, hug });
+  } else if (win) zone.win = win;
 }
 
-/** The frame the agent gave (the work area or the window), or one round the given points */
+/**
+ * The frame for an action: the area the agent gave (the work area or the window), or one round the points.
+ * One frame per window: while the actions stay in the window already framed (the driver says which, `win`), the
+ * frame stays as it is, however each action is framed (a fill frames the window's controls, a click the whole
+ * window), and only grows, smoothly, to take in a point outside it. Redrawing it for each action made the orb,
+ * which waits over the frame, hop between two spots on every step (test/fxcheck.ts measures it).
+ */
 function frameFor(e: FxEvent, points: Pt[]): R | null {
   const given = rect(e.geo?.zone);
+  const win = rect(e.geo?.win);
   const hug = !!given && e.geo?.zoneIsWindow === true;
   const want = hug ? given : given ? zoneOf([given]) : zoneOf(points.map((p) => ({ x: p.x, y: p.y, w: 0, h: 0 })));
-  // The same window cut another way (a fill frames its controls, a click the whole window): the frame already up
-  // stays, so the ball does not hop between two spots and the pointers keep their columns on every step
-  if (zone && points.every((p) => within(p, zone!.r)) && (holds(want, zone.r) || holds(zone.r, want))) {
-    window.clearTimeout(zone.timer);
-    return zone.r;
+  const z = zone;
+  if (z && (win && z.win ? sameRect(z.win, win) : points.every((p) => within(p, z.r)) && (holds(want, z.r) || holds(z.r, want)))) {
+    window.clearTimeout(z.timer);
+    if (!points.every((p) => within(p, z.r))) {
+      z.r = hug && z.win && sameRect(z.win, want) ? want : zoneOf([z.r, want]);
+      void z.ol.moveTo(z.r, 260);
+    }
+    return z.r;
   }
-  frameZone(want, hug);
+  frameZone(want, hug, win);
   return zone?.r ?? null;
 }
 
@@ -245,7 +266,7 @@ function unframeLater(ms = 8000, fadeMs = 420) {
   window.clearTimeout(z.timer);
   z.timer = window.setTimeout(() => {
     if (zone !== z) return;
-    void z.ol.out("fade", fadeMs);
+    endZone(z, fadeMs);
     zone = null;
     goHomeWhenFree();
   }, ms);
@@ -272,7 +293,7 @@ function dropZone(unless?: Pt) {
     if (unless.x >= r.x && unless.x <= r.x + r.w && unless.y >= r.y && unless.y <= r.y + r.h) return;
   }
   window.clearTimeout(zone.timer);
-  void zone.ol.out("fade", 220);
+  endZone(zone, 220);
   zone = null;
 }
 
@@ -322,7 +343,8 @@ const waiting: number[] = Array(STRIPS).fill(0);
 
 /** Whose column p is in: columns of the framed app, or of the screen when nothing is framed */
 function stripOf(p: Pt): number {
-  const r = zone?.r ?? monitorAt(p).work;
+  // The window's columns, not the frame's: they stay the same however the frame is cut or grows
+  const r = zone?.win ?? zone?.r ?? monitorAt(p).work;
   return Math.min(STRIPS - 1, Math.max(0, Math.floor(((p.x - r.x) / Math.max(1, r.w)) * STRIPS)));
 }
 
@@ -352,7 +374,9 @@ async function bring(i: number, p: Pt, rush: number, ready?: Promise<unknown>, n
     await ptr.moveTo(p, Math.min(360, Math.max(150, d * 0.45)), Math.min(30, d * 0.1), near && (() => near(ptr)));
     return ptr;
   }
-  await ready;
+  // It pours out of the ball once the ball is over the app, or on the way there if the action has already
+  // happened: waiting for the whole flight drew the first click of a stretch of work half a second late
+  await Promise.race([ready, sleep(rush > 1 ? 0 : 160)]);
   const o = body.pos;
   const fresh = new Pointer(o.x - DROP_AT.x, o.y - DROP_AT.y, i);
   fresh.rush = rush;
@@ -450,7 +474,7 @@ function dispatchStart(e: FxEvent) {
   sent.set(e.id, { outcome });
   const aimed = targets.flatMap((p, i) => (p ? [{ p, i }] : []));
   if (!aimed.length) return;
-  const framed = frameFor(
+  frameFor(
     e,
     aimed.map((a) => a.p),
   );
@@ -461,7 +485,7 @@ function dispatchStart(e: FxEvent) {
   const placed = job(async () => {
     try {
       const xs = aimed.map((a) => a.p.x);
-      await fly(station({ x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.min(...aimed.map((a) => a.p.y)) }, framed));
+      await fly(station({ x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.min(...aimed.map((a) => a.p.y)) }));
     } finally {
       // Whatever happened to the animation, the frame must not stay up for good
       unframeLater();
@@ -495,9 +519,9 @@ let held: Pointer | null = null;
 /** Where the ball waits while pointers work at p: still, just above the top edge of the app being worked on
  *  (the framed area round p), so every action in that app is sent from the same spot and the ball never moves
  *  between them. With nothing framed round p, just above p. */
-function station(p: Pt, r: R | null = zone?.r ?? null): Pt {
-  const holds = r && p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
-  return holds ? zoneSpot(r) : inside({ x: p.x, y: p.y - 64 });
+function station(p: Pt): Pt {
+  const z = zone;
+  return z && within(p, z.r) ? zoneSpot(z.win ?? z.r) : inside({ x: p.x, y: p.y - 64 });
 }
 
 /** The spot over a framed area: centred just above its top edge; below it when there is no room above (a
@@ -992,6 +1016,7 @@ const LOOKS = new Set(["screenshot", "observe", "read_text"]);
 const zooms = (e: FxEvent) => e.tool === "screenshot" && e.args?.x0 !== undefined;
 
 const TERM = new Set(["run_powershell", "job"]);
+const PROGRAM = new Set(["exec", "resume"]);
 const FILE = new Set(["read_file", "write_file", "edit_file", "list_files", "search_files", "disk_usage", "upload_file", "download_file", "clipboard"]);
 
 /** End events carry only the result; args and start geometry are filled in from here */
@@ -1099,5 +1124,7 @@ export function fxEnd(ev: FxEvent) {
       if (TERM.has(e.tool)) termEnd(e.id, ok, e.text ?? "");
       else if (FILE.has(e.tool)) void fileEnd(e);
   }
-  release(ok || !!ev.quiet, TERM.has(e.tool) ? 2600 : 1500);
+  // A program's call (exec, resume) ends when it stops for any reason, the AI's own stop included: its actions
+  // already showed their own failures as they happened, so the call itself never flashes red
+  release(ok || !!ev.quiet || PROGRAM.has(e.tool), TERM.has(e.tool) ? 2600 : 1500);
 }

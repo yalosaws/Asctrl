@@ -143,20 +143,119 @@ fn raise() {
     }
 }
 
-/// Re-raise immediately whenever the foreground window changes (the user clicks another app, the Start menu opens, etc.).
-/// The hook callback runs on the installing thread, so it must be installed on the main thread, which has a message loop.
-fn watch_foreground() {
+/// The visible windows above the overlay now, front to back. Only topmost windows can be (the overlay is one), so
+/// the walk from the top stops at the overlay, which is normally first, or at the first window that is not topmost.
+fn above_now() -> Vec<isize> {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
-    use windows::Win32::UI::WindowsAndMessaging::{EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS};
-    unsafe extern "system" fn on_event(_: HWINEVENTHOOK, _: u32, _: HWND, _: i32, _: i32, _: u32, _: u32) {
-        raise();
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    let ours = HWND_RAW.load(std::sync::atomic::Ordering::Relaxed);
+    let mut out = Vec::new();
+    if ours == 0 {
+        return out;
     }
     unsafe {
-        // Foreground changes and windows restored from minimized both bring other windows forward
-        SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_event), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-        SetWinEventHook(EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZEEND, None, Some(on_event), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        let mut h = GetTopWindow(None).unwrap_or_default();
+        while !h.is_invalid() && h.0 as isize != ours {
+            if GetWindowLongW(h, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 == 0 {
+                // Below the topmost band without meeting the overlay: it is not showing at all
+                return Vec::new();
+            }
+            if IsWindowVisible(h).as_bool() {
+                out.push(h.0 as isize);
+            }
+            h = GetWindow(h, GW_HWNDNEXT).unwrap_or(HWND::default());
+        }
     }
+    out
+}
+
+/// Windows that stay above the overlay however it is raised (the shell's own, in a band above every program's
+/// topmost windows: the Start menu, the input switcher...). They are not covering it in a way it can undo, so
+/// they don't count; without this the keeper would raise it forever.
+static UNBEATEN: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+
+/// Whether a window the overlay can go above is above it now
+fn covered_now() -> bool {
+    let skip = UNBEATEN.lock().unwrap();
+    above_now().iter().any(|h| !skip.contains(h))
+}
+
+/// The keeper thread, for pokes from the threads that act
+static KEEPER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const WM_POKE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 7;
+
+/// Something may just have put a window above the overlay (the driver brought a window to the front, or pressed a
+/// mouse button, which does): the keeper checks at once. Returns at once; never waits for the overlay.
+pub fn poke() {
+    let t = KEEPER.load(std::sync::atomic::Ordering::Relaxed);
+    if t != 0 {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(t, WM_POKE, Default::default(), Default::default());
+        }
+    }
+}
+
+/// Raises in the last second, so two programs that each insist on being on top don't trade places forever
+static RAISES: Mutex<(Option<Instant>, u32)> = Mutex::new((None, 0));
+
+/// Raise the overlay if anything is above it
+fn keep_up() {
+    if !covered_now() {
+        return;
+    }
+    let mut r = RAISES.lock().unwrap();
+    if r.0.is_none_or(|t| t.elapsed() > Duration::from_secs(1)) {
+        *r = (Some(Instant::now()), 0);
+    }
+    r.1 += 1;
+    if r.1 <= 30 {
+        drop(r);
+        let t = Instant::now();
+        raise();
+        let still = above_now();
+        let ms = t.elapsed().as_millis();
+        // For the animation log (ASCTRL_FX_LOG): each raise, how long it took, and what it could not go above
+        crate::fx::note(&serde_json::json!({ "phase": "keeper", "raiseMs": ms, "unbeaten": still.len() }));
+        *UNBEATEN.lock().unwrap() = still;
+    }
+}
+
+/// Keep the overlay on top, on a thread of its own: anything drawn on it (the pointers, a frame round a window)
+/// must not blink out while the window it is drawn over comes to the front. A program clicked to the front, a
+/// window restored, another topmost window (the test bench is one) all go above the overlay; this thread sees
+/// that the moment it happens (window events, pokes from the driver's own actions) and puts the overlay back
+/// above within a millisecond or so, and checks every 40 ms besides for what sends no event. On the main thread,
+/// which also runs the overlay's page, the same hooks came late: a window stayed above it for up to 280 ms.
+fn keep_on_top() {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    unsafe extern "system" fn on_event(_: HWINEVENTHOOK, event: u32, hwnd: HWND, obj: i32, _: i32, _: u32, _: u32) {
+        // A window shown counts only when it is a whole top-level window (not a caret, a tooltip's text...)
+        if event == EVENT_OBJECT_SHOW && (obj != OBJID_WINDOW.0 || unsafe { GetAncestor(hwnd, GA_ROOT) } != hwnd) {
+            return;
+        }
+        keep_up();
+    }
+    let _ = std::thread::Builder::new().name("overlay-keeper".into()).spawn(|| unsafe {
+        let mut msg = MSG::default();
+        // The thread's message queue exists from here, so pokes can be posted to it
+        let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+        KEEPER.store(GetCurrentThreadId(), std::sync::atomic::Ordering::Relaxed);
+        let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+        // Foreground changes, windows restored from minimized, windows reordered or shown all can cover it
+        for (from, to) in [(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND), (EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZEEND), (EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW), (EVENT_OBJECT_REORDER, EVENT_OBJECT_REORDER)] {
+            SetWinEventHook(from, to, None, Some(on_event), 0, 0, flags);
+        }
+        let _ = SetTimer(None, 0, 40, None);
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            if msg.message == WM_POKE || msg.message == WM_TIMER {
+                keep_up();
+            }
+            DispatchMessageW(&msg);
+        }
+    });
 }
 
 /// The overlay must never be the window in front: keys meant for programs would land on it, and an Alt there
@@ -185,16 +284,34 @@ pub fn show(win: &WebviewWindow) {
     give_away_foreground(prev);
 }
 
+/// Hidden from the taskbar and Alt+Tab (so the windows observe lists skip it too), and never takes focus on a
+/// click. Again after each change of click-through: the window library rewrites the whole extended style then,
+/// dropping these (the overlay was found in Alt+Tab, able to take the focus).
+fn restyle() {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    let raw = HWND_RAW.load(std::sync::atomic::Ordering::Relaxed);
+    if raw == 0 {
+        return;
+    }
+    let h = HWND(raw as *mut _);
+    unsafe {
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        let want = (ex | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize) & !(WS_EX_APPWINDOW.0 as isize);
+        if want != ex {
+            SetWindowLongPtrW(h, GWL_EXSTYLE, want);
+        }
+    }
+}
+
 fn harden(win: &WebviewWindow) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::*;
     let Ok(h) = win.hwnd() else { return };
     let h = HWND(h.0);
     HWND_RAW.store(h.0 as isize, std::sync::atomic::Ordering::Relaxed);
+    restyle();
     unsafe {
-        // Hidden from the taskbar and Alt+Tab (so the windows observe lists skip it too), and never takes focus on click
-        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-        SetWindowLongPtrW(h, GWL_EXSTYLE, ex | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize);
         // Invisible to screen capture, so the AI always sees the real desktop (Windows 10 2004+)
         let _ = SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE);
     }
@@ -229,8 +346,9 @@ pub fn setup(app: &AppHandle) {
     let _ = win.set_ignore_cursor_events(true);
     let _ = win.set_always_on_top(true);
     show(&win);
+    restyle();
     raise();
-    watch_foreground();
+    keep_on_top();
     *app.state::<Overlay>().info.lock().unwrap() = info;
 
     // Toggle mouse pass-through as the cursor enters or leaves an interactive region
@@ -252,11 +370,11 @@ pub fn setup(app: &AppHandle) {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.set_ignore_cursor_events(passing);
                 }
+                restyle();
             }
-            // Fallback: another topmost window may cover it without a foreground change, so re-raise every 0.3 s
+            // Should anything still hand the overlay the foreground, pass it on before a keystroke lands on it
+            // (keeping it on top is the keeper thread's job)
             if tick.is_multiple_of(10) {
-                raise();
-                // Should anything still hand the overlay the foreground, pass it on before a keystroke lands on it
                 give_away_foreground(0);
             }
         }
@@ -271,6 +389,8 @@ pub fn overlay_info(app: AppHandle) -> Info {
         None => Info::default(),
     };
     *app.state::<Overlay>().info.lock().unwrap() = info.clone();
+    // The screens the overlay draws on, for replaying the animation log (test/fxcheck.ts)
+    crate::fx::note(&serde_json::json!({ "phase": "info", "info": info }));
     info
 }
 

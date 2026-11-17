@@ -343,6 +343,8 @@ pub fn bring_to_front(h: HWND) -> Result<(), String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    // It went above the overlay (it does when it is a topmost window): the overlay is put back on top at once
+    crate::overlay::poke();
     Ok(())
 }
 
@@ -512,6 +514,12 @@ pub fn top_window_at(x: i32, y: i32) -> Option<isize> {
         return None;
     }
     Some(root_of(h.0 as isize))
+}
+
+/// Physical pixels per CSS pixel of a window (its monitor's scale; 1.0 when unknown)
+pub fn scale_of(handle: isize) -> f64 {
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd(handle)) };
+    if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
 }
 
 /// The top-level window a (possibly child) window belongs to

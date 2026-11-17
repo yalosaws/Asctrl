@@ -8,23 +8,32 @@ use super::*;
 use crate::fx::Fx;
 use serde_json::json;
 
-/// The animation, and the work area it framed (to tell afterwards whether that area went away)
+/// The animation, and the work area it framed (to tell afterwards whether that area went away; null when the
+/// whole window was framed). The overlay keeps one frame and one spot for the orb per window (`win`), however the
+/// actions in it are framed.
 fn anim(call: &str, part: &str, loc: &Located) -> (Fx, Value) {
-    let area = uia::work_area();
+    let win = winmgr::rect_of(loc.hwnd);
+    // The work area of the last scene read, when it is in this window (it may be another window's)
+    let inside = |r: &(i32, i32, i32, i32), w: &(i32, i32, i32, i32)| r.0 >= w.0 - 2 && r.1 >= w.1 - 2 && r.2 <= w.2 + 2 && r.3 <= w.3 + 2;
+    let area = uia::work_area().filter(|(r, _)| win.is_some_and(|w| inside(r, &w)));
     let zone = json!(area.map(|(r, _)| fx::rect_json(r)));
+    let (shown, whole) = match area {
+        Some((r, w)) => (fx::rect_json(r), w),
+        None => (json!(win.map(fx::rect_json)), true),
+    };
     let fx = Fx::start(
         call,
         part,
         "element_action",
         json!({}),
-        json!({ "targets": [fx::pt_json(loc.point)], "zone": zone, "zoneIsWindow": area.is_some_and(|(_, w)| w) }),
+        json!({ "targets": [fx::pt_json(loc.point)], "zone": shown, "zoneIsWindow": whole, "win": win.map(fx::rect_json) }),
     );
     (fx, zone)
 }
 
 /// Let the frame go at once when the area it was drawn round is no longer the work area (a popup closed)
 fn drop_zone_if_gone(call: &str, zone: Value) {
-    if json!(uia::work_area().map(|(r, _)| fx::rect_json(r))) != zone {
+    if !zone.is_null() && json!(uia::work_area().map(|(r, _)| fx::rect_json(r))) != zone {
         fx::zone_gone(call, zone);
     }
 }
