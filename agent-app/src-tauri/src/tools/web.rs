@@ -643,6 +643,11 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Option<Output> {
     Some(reply(ctx, args, &p, format!("{done}."), effect).await)
 }
 
+/// The text of document `d` as a person reads it: the whole root element, with what open shadow roots show, and
+/// non-breaking spaces as the spaces they look like (VS Code's editor draws every space as one, so "hello world"
+/// in a file read as "hello\u00a0world" and matched nothing)
+const PAGE_TEXT: &str = r"((d.documentElement ? d.documentElement.innerText : '') + [...d.querySelectorAll('*')].filter(h => h.shadowRoot).map(h => [...h.shadowRoot.children].map(c => c.innerText || '').join('\n')).filter(Boolean).map(x => '\n' + x).join('')).replace(/\u00a0/g, ' ')";
+
 /// Most of a page's text in one reply
 const MAX_TEXT: usize = 100_000;
 
@@ -664,10 +669,10 @@ pub(super) async fn read_text(args: &Value) -> Option<Output> {
         return None;
     }
     let p = page(args).await?;
-    let r = p.eval("[document.title, location.href, (() => { const t = d => { let s = d.body ? d.body.innerText : ''; for (const f of d.querySelectorAll('iframe,frame')) { let c = null; try { c = f.contentDocument; } catch (e) {} if (c) s += '\\n' + t(c); } return s; }; return t(document); })()]").await.ok()?;
+    let r = p.eval(&format!("[document.title, location.href, (() => {{ const t = d => {{ let s = {PAGE_TEXT}; for (const f of d.querySelectorAll('iframe,frame')) {{ let c = null; try {{ c = f.contentDocument; }} catch (e) {{}} if (c) s += '\\n' + t(c); }} return s; }}; return t(document); }})()]")).await.ok()?;
     let mut all = r[2].as_str().unwrap_or("").to_string();
     for f in p.c.frames_of(&p.tab.session) {
-        if let Ok(Value::String(t)) = cdp::eval_in(&p.c, &f.session, "document.body ? document.body.innerText : ''").await {
+        if let Ok(Value::String(t)) = cdp::eval_in(&p.c, &f.session, &format!("(() => {{ const d = document; return {PAGE_TEXT}; }})()")).await {
             all.push('\n');
             all.push_str(&t);
         }

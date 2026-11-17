@@ -223,7 +223,9 @@ pub fn free_port() -> Option<u16> {
 async fn http_get(port: u16, path: &str) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut s = tokio::time::timeout(Duration::from_millis(500), tokio::net::TcpStream::connect(("127.0.0.1", port))).await.ok()?.ok()?;
-    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes()).await.ok()?;
+    // The host with its port: Chromium writes the WebSocket address it answers with from this header, and
+    // without the port that address pointed at port 80
+    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").as_bytes()).await.ok()?;
     // Read until the body is all there (by its Content-Length): the server need not close the connection
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut buf = vec![];
@@ -265,7 +267,12 @@ pub async fn attach_app(port: u16, wait: Duration, pid: u32) -> Result<Arc<Conn>
                 .find(|n| !matches!(*n, "Mozilla" | "AppleWebKit" | "Chrome" | "Electron" | "Safari" | "Gecko)"))
                 .unwrap_or("the program")
                 .to_string();
-            match connect_url(url, pid, name).await {
+            // An address without a port (a program that writes it from a Host header without one) is on this port
+            let url = match url.strip_prefix("ws://127.0.0.1/").or_else(|| url.strip_prefix("ws://localhost/")) {
+                Some(rest) => format!("ws://127.0.0.1:{port}/{rest}"),
+                None => url.to_string(),
+            };
+            match connect_url(&url, pid, name).await {
                 Ok(c) if c.call(None, "Target.getTargets", json!({})).await.is_ok() => {
                     let mut all = APPS.lock().unwrap();
                     all.retain(|x| x.alive());

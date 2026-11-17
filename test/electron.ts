@@ -41,7 +41,12 @@ try {
   await tech.call("wait_for", { appears: "hello.txt", window: W, timeoutSec: 20, after: "none" });
 
   // 2.
-  const r = await tech.call("read_text", { window: W });
+  // The title shows the file before the editor has drawn it: read again until it has (up to 8 s)
+  let r = await tech.call("read_text", { window: W });
+  for (let i = 0; i < 16 && r.ok && !/hello from asctrl electron test/.test(r.text ?? ""); i++) {
+    await new Promise((res) => setTimeout(res, 500));
+    r = await tech.call("read_text", { window: W });
+  }
   say(r.ok && (r.data as { channel?: string } | undefined)?.channel === "page" && /hello from asctrl electron test/.test(r.text ?? ""), `read through the page, the file's text is there: ${first(r.text ?? r.error)}`);
 
   // 3.
