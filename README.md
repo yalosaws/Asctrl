@@ -34,7 +34,7 @@ It is built around three ideas:
 | `agent-app/src-tauri/src/screen.rs` | Telling whether the screen reacted to an action and when it has settled |
 | `agent-app/src-tauri/src/link.rs` | The local link and the relay link; running tool calls |
 | `agent-app/src/` | The overlay UI |
-| `src/console/` | MCP server and the controller library (`TechClient`) |
+| `src/console/` | MCP server (`mcp-server.ts`, stdio; `mcp-http.ts`, HTTP connector with `auth.ts`) and the controller library (`TechClient`) |
 | `src/relay/server.ts` | Relay server |
 | `src/shared/protocol.ts` | Message format shared by all parties |
 | `test/` | End-to-end test, plan tests, benchmark, profiler |
@@ -58,6 +58,45 @@ Open this folder in Claude Code: the project's `.mcp.json` already configures th
 To drive a **remote** computer, run the driver there, read the 6-digit code next to the orb, and:
 
 > Connect with code 123456 and find out why this computer is so slow
+
+## As a connector (remote MCP over HTTP)
+
+`src/console/mcp-http.ts` serves the same tools over Streamable HTTP, so Asctrl can be added as a connector in claude.ai (web, desktop and mobile), Claude Code, the Claude API, ChatGPT, Cursor and other MCP clients. It runs on a server next to the relay; every MCP session gets its own relay connection, and computers are reached by their 6-digit code (there is no "this computer" on a server). `upload_file` and `download_file` are left out there, since "this side" would be the server's own disk.
+
+Sign-in has two ways in, both resting on an access key you hand out:
+
+- **Bearer**: the client sends `Authorization: Bearer asc_…` (Claude Code with `--header`, the Claude API's `authorization_token`, any agent).
+- **OAuth 2.1** (discovery, dynamic client registration, PKCE, refresh): connectors such as claude.ai open a sign-in page where the user pastes the key once; their tokens are tied to that key.
+
+Revoking a key ends both. Keys and tokens are stored hashed in `data/auth.json` (`ASCTRL_DATA_DIR` to move it).
+
+On the server:
+
+```bash
+npm run keys -- add alice
+```
+
+```bash
+PUBLIC_URL=https://asctrl.example.com RELAY_URL=ws://127.0.0.1:8787 RELAY_TOKEN=… npm run mcp:http
+```
+
+It listens on `127.0.0.1:8788` (`HOST`, `PORT`); put a TLS proxy in front — connectors require https and a domain name. With Caddy:
+
+```
+asctrl.example.com {
+	reverse_proxy 127.0.0.1:8788 {
+		flush_interval -1
+	}
+}
+```
+
+Then add `https://asctrl.example.com/mcp` as a custom connector (claude.ai: Settings → Connectors → Add custom connector), or:
+
+```bash
+claude mcp add --transport http asctrl https://asctrl.example.com/mcp
+```
+
+`npm run keys -- list` shows keys and their live OAuth tokens; `npm run keys -- revoke alice` cuts one off. Sessions idle for `SESSION_IDLE_MIN` (120) are closed; each key keeps at most `SESSIONS_PER_KEY` (20). `npm run test:http` checks both sign-in ways against a local relay and a fake computer.
 
 ## Tools
 

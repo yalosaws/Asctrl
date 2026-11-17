@@ -59,7 +59,8 @@ export class TechClient {
   localPid = 0;
 
   private relayUrl: string;
-  private techName: string;
+  /** Shown to the user on the computer's consent card */
+  techName: string;
   private token?: string;
 
   constructor(relayUrl: string, techName = "Technician", token?: string) {

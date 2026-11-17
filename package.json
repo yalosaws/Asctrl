@@ -10,17 +10,23 @@
   "scripts": {
     "relay": "node src/relay/server.ts",
     "mcp": "node src/console/mcp-server.ts",
+    "mcp:http": "node src/console/mcp-http.ts",
+    "keys": "node src/console/mcp-http.ts keys",
     "typecheck": "tsc",
     "test": "node test/e2e.ts",
+    "test:http": "node test/http.ts",
     "bench": "node test/bench.ts",
     "prof": "node test/prof.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.4",
     "ws": "^8.22.2",
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^26.6.6",
     "@types/ws": "^8.18.2",
     "typescript": "^7.0.2"
