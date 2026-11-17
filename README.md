@@ -71,7 +71,7 @@ To drive a **remote** computer, run the driver there, read the 6-digit code next
 | | `screenshot` | The whole screen, one display, or one window (sharper, cheaper); `x0, y0, x1, y1`: part of the latest one again at full resolution. `x`, `y` of later actions refer to the latest screenshot |
 | | `read_text` | One control's full text, a window's text in reading order, or a region read off the pixels |
 | | `wait_for` | Return the moment a window `appears`, some `text` shows in `window` (or either goes away), or the screen settles; lists the controls of what appeared |
-| Acting | `click` | By target or `x`,`y`. Ordinary programs' controls are pressed through UI Automation (exact, no pointer movement); web pages, games and coordinates get a real mouse click, with real motion on arrival (games that read raw input, such as Roblox, ignore a pointer that was only placed) and the button held about a frame. `mode: "direct"` never uses the mouse |
+| Acting | `click` | By target or `x`,`y`. Ordinary programs' controls are pressed through UI Automation (exact, no pointer movement); web pages, games and coordinates get a real mouse click. `mode: "direct"` never uses the mouse |
 | | `type_text` | Type into a target, or into what has the focus; `replace`, `enter`. Reads the field back |
 | | `press_keys` | A key, a combination, or a sequence (`ctrl+a delete`); `repeat`, `holdSec`; `window` brings a window forward first |
 | | `set_value` | Make a control hold a value whatever kind it is — text, on/off, a chosen item, a number, expanded or not — and verify it. Idempotent. `fields` fills a whole form in one call |

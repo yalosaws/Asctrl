@@ -117,11 +117,6 @@ fn key(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 
 fn move_to(x: i32, y: i32) -> Result<(), String> {
     // SetCursorPos refused by UIPI reports "The operation completed successfully"; the code is useless
-    unsafe { SetCursorPos(x, y) }.map_err(|_| BLOCKED.to_string())?;
-    // SetCursorPos makes no mouse input: programs that read raw input (Roblox and other games) never learn
-    // the pointer arrived, so their buttons take no hover and ignore the click. A count out and back is real
-    // motion for them; the pointer is then put back exactly where it was sent.
-    send(&[mouse_at(MOUSEEVENTF_MOVE, 0, 1, 0), mouse_at(MOUSEEVENTF_MOVE, 0, -1, 0)])?;
     unsafe { SetCursorPos(x, y) }.map_err(|_| BLOCKED.to_string())
 }
 
@@ -186,21 +181,14 @@ pub fn click(x: i32, y: i32, button: &str, count: u32, modifiers: &str) -> Resul
     check_target(Some((x, y)))?;
     keep_clicks_apart(x, y, button);
     move_to(x, y)?;
-    // Long enough for the program to see the pointer arrive (hover state) before the press: a game takes it
-    // in on its next frame, which at 60 fps can be 17 ms away, and acts on the press the frame after
-    std::thread::sleep(Duration::from_millis(35));
+    // Long enough for the program to see the pointer arrive (hover state) before the press
+    std::thread::sleep(Duration::from_millis(15));
     if !mods.is_empty() {
         send(&keys_down(&mods))?;
     }
     let mut r = Ok(());
     for _ in 0..count.clamp(1, 3) {
-        // Held for about a frame, as a finger does: a game that polls the buttons once a frame never sees a
-        // press and release that arrive together
-        r = send(&[mouse(down, 0)]);
-        if r.is_ok() {
-            std::thread::sleep(Duration::from_millis(if count == 1 { 30 } else { 15 }));
-            r = send(&[mouse(up, 0)]);
-        }
+        r = send(&[mouse(down, 0), mouse(up, 0)]);
         if r.is_err() || count == 1 {
             break;
         }
