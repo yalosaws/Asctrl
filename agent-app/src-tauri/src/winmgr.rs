@@ -361,6 +361,11 @@ pub fn bring_to_front(h: HWND) -> Result<(), String> {
             unlock_foreground();
             let _ = BringWindowToTop(h);
             if !SetForegroundWindow(h).as_bool() {
+                // A window of a program running as administrator in front: one that isn't can't switch away from it
+                // by any means (its keys are blocked too), so say whose it is
+                if let Err(e) = crate::input::elevation_block(GetForegroundWindow(), "switching away from its window") {
+                    return Err(format!("Windows refused to switch windows: {e}"));
+                }
                 return Err("Windows refused to switch windows (the target may be running as administrator)".into());
             }
         }
