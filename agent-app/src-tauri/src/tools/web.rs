@@ -580,6 +580,22 @@ pub(super) async fn type_text(ctx: &Ctx, args: &Value) -> Option<Output> {
     let turn = lane(&p.tab.id).await;
     let k = find(&p, &want, nth, "field", wait).await?;
     let p = p.at(&k);
+    // A date, time, colour or range field takes no typed text (the browser draws its own picker): what is typed
+    // is set as its value, as the picker would
+    if p.eval("['date', 'time', 'datetime-local', 'month', 'week', 'color', 'range'].includes(window.__asctrlPick.type)").await.ok() == Some(Value::Bool(true)) {
+        let _ = p.eval(ARM).await;
+        let t0 = Instant::now();
+        let Ok(Value::String(v)) = p.eval(&format!("({SET_VALUE})({})", json!(t))).await else {
+            return Some(fail(format!("Could not set {}", k.desc())));
+        };
+        page_mark(&p, &k, !v.is_empty());
+        if v.is_empty() {
+            return Some(fail(format!("{} did not take \"{}\": give it in the form it shows (a date as 2026-12-24, a time as 20:00)", k.desc(), uia::clip(&t, 80))));
+        }
+        let effect = settle(&p, t0).await.typed();
+        drop(turn);
+        return Some(reply(ctx, args, &p, format!("Set {} to \"{}\" in the page, through the browser (it takes a value rather than typing).", k.desc(), uia::clip(&v, 200)), effect).await);
+    }
     let _ = p.eval(ARM).await;
     let t0 = Instant::now();
     let put = put(&p, &t, replace).await;
@@ -615,11 +631,16 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Option<Output> {
     let p = p.at(&k);
     let _ = p.eval(ARM).await;
     let t0 = Instant::now();
-    let kind = p.eval("(() => { const el = window.__asctrlPick; return el.tagName === 'SELECT' ? 'select' : (el.type === 'checkbox' || el.type === 'radio') ? 'check' : 'text'; })()").await.ok()?;
+    // Date, time, colour and range fields take no typed text (the browser draws their own pickers): their value is set
+    let kind = p.eval("(() => { const el = window.__asctrlPick; return el.tagName === 'SELECT' ? 'select' : (el.type === 'checkbox' || el.type === 'radio') ? 'check' : ['date', 'time', 'datetime-local', 'month', 'week', 'color', 'range'].includes(el.type) ? 'value' : 'text'; })()").await.ok()?;
     let done = match kind.as_str() {
         Some("text") => match put(&p, &value, true).await {
             Ok(()) => format!("Set {} to \"{}\" in the page, through the browser", k.desc(), uia::clip(&reads(&p).await, 200)),
             Err(e) => return Some(fail(format!("Could not set {}: {e}", k.desc()))),
+        },
+        Some("value") => match p.eval(&format!("({SET_VALUE})({})", json!(value))).await {
+            Ok(Value::String(v)) if !v.is_empty() => format!("Set {} to \"{}\" in the page, through the browser", k.desc(), uia::clip(&v, 200)),
+            _ => return Some(fail(format!("{} did not take \"{}\": give it in the form it shows (a date as 2026-12-24, a time as 20:00)", k.desc(), uia::clip(&value, 80)))),
         },
         Some("select") => {
             // The option whose text (else value) is the one asked for, chosen as a person's pick would be
@@ -647,6 +668,33 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Option<Output> {
 /// non-breaking spaces as the spaces they look like (VS Code's editor draws every space as one, so "hello world"
 /// in a file read as "hello\u00a0world" and matched nothing)
 const PAGE_TEXT: &str = r"((d.documentElement ? d.documentElement.innerText : '') + [...d.querySelectorAll('*')].filter(h => h.shadowRoot).map(h => [...h.shadowRoot.children].map(c => c.innerText || '').join('\n')).filter(Boolean).map(x => '\n' + x).join('')).replace(/\u00a0/g, ' ')";
+
+/// Set the picked date, time, colour or range field to a value, as its own picker would: the value as given, or
+/// else read as a date or a time ("24 December 2026", "8:00 PM") and put in the field's own form. The page sees
+/// the input and change events a pick makes. Gives the value the field took ("" when none).
+const SET_VALUE: &str = r#"(raw) => {
+  const el = window.__asctrlPick, t = el.type, pad = (n) => String(n).padStart(2, '0');
+  raw = String(raw).trim();
+  const tries = [raw];
+  const d = new Date(raw);
+  if (!isNaN(d)) {
+    const ymd = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()), hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+    tries.push(t === 'date' ? ymd : t === 'month' ? ymd.slice(0, 7) : t === 'datetime-local' ? ymd + 'T' + hm : t === 'time' ? hm : raw);
+  }
+  const m = /^(\d{1,2})[:.](\d{2})\s*([ap])?\.?m?\.?$/i.exec(raw);
+  if (m) {
+    let h = +m[1];
+    if (m[3] && /p/i.test(m[3]) && h < 12) h += 12;
+    if (m[3] && /a/i.test(m[3]) && h === 12) h = 0;
+    tries.push(pad(h) + ':' + m[2]);
+  }
+  const set = Object.getOwnPropertyDescriptor(el.ownerDocument.defaultView.HTMLInputElement.prototype, 'value').set;
+  for (const v of tries) { set.call(el, v); if (el.value) break; }
+  const E = el.ownerDocument.defaultView.Event;
+  el.dispatchEvent(new E('input', { bubbles: true }));
+  el.dispatchEvent(new E('change', { bubbles: true }));
+  return el.value;
+}"#;
 
 /// Most of a page's text in one reply
 const MAX_TEXT: usize = 100_000;

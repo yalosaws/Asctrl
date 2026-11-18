@@ -377,7 +377,16 @@ pub(super) async fn observe(ctx: &Ctx, args: &Value) -> Output {
         if hwnd == 0 {
             return Ok((out + "\nNothing to read: say which window.", winmgr::layout()));
         }
-        let scene = uia::snapshot(hwnd, offscreen)?;
+        let scene = match uia::snapshot(hwnd, offscreen) {
+            Ok(s) => s,
+            // The window in front can't be read (a program running as administrator came up there): where things
+            // stand, and the other windows, are still worth having, and the AI can go on with one of them
+            Err(e) if window.is_none() => {
+                out += &format!("\nThe window in front can't be read: {e}");
+                return Ok((out, winmgr::layout()));
+            }
+            Err(e) => return Err(e),
+        };
         let title = uia::clip(&scene.title, 80);
         if winmgr::is_minimized(hwnd) {
             out += &format!("\n\"{title}\" is minimized: focus_window restores it.");

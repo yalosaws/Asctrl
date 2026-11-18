@@ -66,6 +66,9 @@ try {
   await act("a field by its placeholder", "type_text", { target: "Search here", text: "hello" }, /Asctrl Page Test/);
   await act("a field by its label", "set_value", { target: "Email address", value: "a@b.c" }, /Asctrl Page Test/);
   await act("a list by its aria-label", "set_value", { target: "Size", value: "Large" }, /size Large/);
+  // Date and time fields take no typed text: their value is set, as their picker would, from the way people write it
+  await act("a date field, from a date as people write it", "set_value", { target: "Arrival date", value: "24 December 2026" }, /arrive 2026-12-24/);
+  await act("a time field, typed to", "type_text", { target: "Arrival time", text: "8:00 PM" }, /at 20:00/);
   await act("a change that comes a moment later", "click", { target: "Late change" }, /late done/);
   await act("a field inside an iframe", "set_value", { target: "Ticket subject", value: "Printer" }, /Asctrl Page Test/);
   await act("a list inside an iframe", "set_value", { target: "Priority", value: "High" }, /Asctrl Page Test/);

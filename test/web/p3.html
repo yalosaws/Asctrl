@@ -25,6 +25,7 @@
 <p><input placeholder="Search here" size="30"></p>
 <p><label for="email">Email address</label> <input id="email" size="30"></p>
 <p><select aria-label="Size" onchange="say('size ' + this.value)"><option>Small</option><option>Large</option></select></p>
+<p><label for="arrive">Arrival date</label> <input id="arrive" type="date" onchange="say('arrive ' + this.value)"> <label for="at">Arrival time</label> <input id="at" type="time" onchange="say('at ' + this.value)"></p>
 <p><a href="p3b.html">Next page</a></p>
 <p><iframe title="Ticket frame" width="420" height="120" srcdoc="&lt;label&gt;Ticket subject &lt;input id=s&gt;&lt;/label&gt; &lt;select aria-label=Priority id=p&gt;&lt;option&gt;Low&lt;/option&gt;&lt;option&gt;High&lt;/option&gt;&lt;/select&gt; &lt;button onclick=&quot;parent.say('ticket ' + s.value + ' ' + p.value)&quot;&gt;Open ticket&lt;/button&gt;"></iframe></p>
 <div style="margin-top: 3000px"><button onclick="say('deep pressed')">Deep button</button></div>
