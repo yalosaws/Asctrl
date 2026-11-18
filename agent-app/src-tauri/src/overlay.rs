@@ -283,9 +283,23 @@ pub fn show(win: &WebviewWindow) {
     give_away_foreground(prev);
 }
 
-/// Hidden from the taskbar and Alt+Tab (so the windows observe lists skip it too), and never takes focus on a
-/// click. Again after each change of click-through: the window library rewrites the whole extended style then,
-/// dropping these (the overlay was found in Alt+Tab, able to take the focus).
+/// Whether the mouse goes through the overlay now; false only while the cursor is over an interactive region
+static PASSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// The extended style the overlay should have: hidden from the taskbar and Alt+Tab (so the windows observe lists
+/// skip it too), never taking focus on a click, and letting the mouse through unless it is over a region.
+fn ex_style(ex: isize, passing: bool) -> isize {
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    let through = (WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0) as isize;
+    let ex = (ex | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize) & !(WS_EX_APPWINDOW.0 as isize);
+    if passing { ex | through } else { ex & !through }
+}
+
+/// Make the window's extended style what it should be. Run on every tick rather than on each change, and written
+/// here rather than through the window library's set_ignore_cursor_events: that one applies later on the window's
+/// own thread and rewrites the whole style, so a change could land after this had read the style, or be undone,
+/// and the overlay stayed solid over the whole screen, swallowing every click, while this side believed the mouse
+/// was going through. Whatever overwrites the style now, the next tick puts it right.
 fn restyle() {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::*;
@@ -296,9 +310,11 @@ fn restyle() {
     let h = HWND(raw as *mut _);
     unsafe {
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-        let want = (ex | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize) & !(WS_EX_APPWINDOW.0 as isize);
+        let want = ex_style(ex, PASSING.load(std::sync::atomic::Ordering::Relaxed));
         if want != ex {
             SetWindowLongPtrW(h, GWL_EXSTYLE, want);
+            // Asynchronous: a busy window thread must not hold up the loop that keeps the mouse working
+            let _ = SetWindowPos(h, None, 0, 0, 0, 0, SWP_ASYNCWINDOWPOS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
     }
 }
@@ -342,6 +358,8 @@ pub fn setup(app: &AppHandle) {
     let Some(win) = app.get_webview_window("main") else { return };
     let info = layout(&win);
     harden(&win);
+    // Left on for good: when the window library rewrites the style, the mouse keeps going through. restyle() is
+    // what turns it off over an interactive region.
     let _ = win.set_ignore_cursor_events(true);
     let _ = win.set_always_on_top(true);
     show(&win);
@@ -353,7 +371,6 @@ pub fn setup(app: &AppHandle) {
     // Toggle mouse pass-through as the cursor enters or leaves an interactive region
     let app = app.clone();
     std::thread::spawn(move || {
-        let mut passing = true;
         let mut tick = 0u32;
         loop {
             std::thread::sleep(Duration::from_millis(30));
@@ -364,13 +381,8 @@ pub fn setup(app: &AppHandle) {
                 && crate::input::cursor_pos().is_ok_and(|(x, y)| {
                     ov.regions.lock().unwrap().iter().any(|r| x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h)
                 });
-            if inside == passing {
-                passing = !inside;
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.set_ignore_cursor_events(passing);
-                }
-                restyle();
-            }
+            PASSING.store(!inside, std::sync::atomic::Ordering::Relaxed);
+            restyle();
             // Should anything still hand the overlay the foreground, pass it on before a keystroke lands on it
             // (keeping it on top is the keeper thread's job)
             if tick.is_multiple_of(10) {
@@ -409,4 +421,35 @@ pub fn set_hit_regions(app: AppHandle, rects: Vec<HitRect>, scale: Option<f64>) 
             h: (r.h * s).ceil() as i32,
         })
         .collect();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ex_style;
+
+    /// The style found on a computer whose clicks had all stopped working, and the same window letting them through
+    const STUCK_SOLID: isize = 0x0800_0198;
+    const THROUGH: isize = 0x0808_01B8;
+
+    #[test]
+    fn a_solid_overlay_goes_back_to_letting_the_mouse_through() {
+        assert_eq!(ex_style(STUCK_SOLID, true), THROUGH);
+    }
+
+    #[test]
+    fn over_a_region_the_overlay_catches_the_mouse() {
+        assert_eq!(ex_style(THROUGH, false), STUCK_SOLID);
+    }
+
+    #[test]
+    fn the_right_style_is_left_alone() {
+        assert_eq!(ex_style(THROUGH, true), THROUGH);
+        assert_eq!(ex_style(STUCK_SOLID, false), STUCK_SOLID);
+    }
+
+    #[test]
+    fn what_the_window_library_drops_is_put_back() {
+        // WS_EX_APPWINDOW on, WS_EX_TOOLWINDOW and WS_EX_NOACTIVATE gone, as after it rewrites the style
+        assert_eq!(ex_style(0x0004_0118 | 0x0008_0020, true), THROUGH);
+    }
 }
