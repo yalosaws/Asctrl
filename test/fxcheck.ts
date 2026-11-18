@@ -4,9 +4,10 @@
 // pointers that vanish and come back, how far each drawn press trails its real action, and frames left up after
 // their window is gone. No desktop is touched.
 //
-// Usage: node test/fxcheck.ts <log>... [--json] [--check] [--keep]
+// Usage: node test/fxcheck.ts <log>... [--json] [--check] [--keep] [--squeeze]
 //   --check: fail (exit 1) when a log breaks the limits below (the overlay's regression test)
 //   --keep: reuse the overlay already built in test/out/fxcheck-dist
+//   --squeeze: replay pauses over 10 s as 10 s (long runs with an AI thinking between calls)
 // A log without an "info" line (older drivers) is replayed on this computer's primary screen.
 
 import { spawn, execFileSync } from "node:child_process";
@@ -205,7 +206,8 @@ function measure(marks: Mark[]) {
   const lagAt: number[] = [];
   const undrawnAt: number[] = [];
   let undrawn = 0;
-  for (const s of fx.filter((m) => m.phase === "step" && ["click", "element_action"].includes(m.tool))) {
+  // Actions that happened (a failed one shakes red instead of pressing)
+  for (const s of fx.filter((m) => m.phase === "step" && ["click", "element_action"].includes(m.tool) && (m as { ok?: boolean }).ok !== false)) {
     const st = fx.find((m) => m.id === s.id && m.phase === "start");
     if (!st?.at) continue;
     const p = presses.find((q) => !used.has(q) && q.t >= st.t && q.t <= s.t + 4000 && Math.hypot(q.x - st.at!.x, q.y - st.at!.y) < 30);
@@ -278,6 +280,16 @@ try {
       await new Promise((r) => setTimeout(r, 100));
     }
     const events = lines.filter((l) => ["plan", "start", "step", "end"].includes(l.e.phase as string));
+    // --squeeze: pauses longer than 10 s (the AI thinking) are cut to 10 s, past every linger of the overlay
+    // (a frame stays 8 s), so a long run replays in minutes and draws the same
+    if (argv.includes("--squeeze")) {
+      let cut = 0;
+      for (let i = 1; i < events.length; i++) {
+        const gap = events[i].t - cut - events[i - 1].t;
+        if (gap > 10_000) cut += gap - 10_000;
+        events[i] = { ...events[i], t: events[i].t - cut };
+      }
+    }
     const r = await pg.send("Runtime.evaluate", {
       expression: `fxReplay(${JSON.stringify(info)}, ${JSON.stringify(events)}, 9000)`,
       awaitPromise: true,
