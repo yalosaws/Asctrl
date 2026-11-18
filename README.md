@@ -401,7 +401,7 @@ node test/run.ts
 
 What has been shown, on one Windows 11 machine (2560x1440 at 150 %, one display):
 
-- Unit tests 51 / 51, end-to-end 59 / 59, plan tests all passing, HTTP connector 35 / 35, benchmark 14 / 14 tasks in 10.8 s, and every desktop test (p2–p6, l2, l4, l5, tools, electron, ext) passing (November 18).
+- Unit tests 51 / 51, end-to-end 59 / 59, plan tests 17 / 17, HTTP connector passing, benchmark 14 / 14 tasks in 11.0 s, and the desktop tests (p2–p6, l2, l4, l5, tools, electron) passing on the final build (November 18). `ext` passed once on that build; see below.
 - The P0 benchmark (40 real tasks, a frontier model through the five tools in headless Claude Code): 39 / 40 done (browser 9 / 10, Settings 10 / 10, Office 10 / 10, VS Code 10 / 10), 47 s, 14.7 model calls and about 232k tokens per task. The one failure (a date field) is fixed.
 - What the overlay draws, replayed from the logs of every desktop test: the orb moves only when the work changes program, a window's frame is drawn once, no pointer blinks, no frame outlives its window.
 - The HTTP connector added in claude.ai (signed in with OAuth), then used from the desktop app to connect to a real computer through the hosted relay and read its screen.
@@ -411,6 +411,8 @@ What has been shown, on one Windows 11 machine (2560x1440 at 150 %, one display)
 What has not been shown:
 
 - **Forty real tasks, on one machine, once.** The P0 run is one pass of each task; the spread between runs, and tasks in other programs, are not measured yet.
+- **No P0 numbers for v0.2**, so the gain of this version over the last is not measured.
+- **`ext` is not settled.** With one check made stricter, its last run lost the connection to the driver early on, for a reason not yet found, so the stricter version has not passed.
 - **Real programs are only partly covered.** Local test pages and one public page, Settings, Word / Excel / PowerPoint, VS Code, a small WinForms window, Calculator and an Explorer folder. WeChat, games and several displays are untested.
 - **No comparison with any other framework**, and no public benchmark has been run.
 - **Little or no test coverage**: drag, scroll, input methods, several displays, windows running as administrator, right-to-left layouts.
@@ -426,7 +428,7 @@ Known limits:
 - A window of a program running as administrator in front blocks a driver that isn't from switching windows or typing (Windows' integrity levels); the driver names that program, `observe` still works, and `request_admin` is the way past it.
 - Windows only.
 
-Suggested order from here: have an agent do more real tasks in a browser, Settings and Office and fix what fails; an independent code review; then the limits above.
+Suggested order from here: settle `ext` and run the v0.2 baseline; have an agent do more real tasks in a browser, Settings and Office and fix what fails; an independent code review; then the limits above.
 
 ## Security
 
