@@ -216,6 +216,8 @@ try {
       ? { answer: "", reply: "", ms: 0, calls: 0, turns: 0, tokens: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 }, cost: 0, tools: {}, model: "", stop: "dry" }
       : await agentRun(claude, t, prompt, c.work, mcpConfig);
     const pop = popup?.();
+    // Checked once what the task opened is closed again: the programs let go of the files they saved
+    await cleanUp(before).catch((e) => console.error(`  clean-up: ${(e as Error).message}`));
     let why: string;
     try {
       const v = t.check(c, r.answer);
@@ -223,7 +225,6 @@ try {
     } catch (e) {
       why = (e as Error).message;
     }
-    await cleanUp(before).catch((e) => console.error(`  clean-up: ${(e as Error).message}`));
     if (/Not logged in|Invalid API key|run \/login/i.test(r.reply)) {
       throw new Error(`Claude Code is not signed in ("${r.reply.trim()}"). Sign in once in a terminal (run ${claude}, then /login), or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN (from: claude setup-token)`);
     }

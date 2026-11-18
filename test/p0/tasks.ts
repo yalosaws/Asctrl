@@ -26,7 +26,9 @@ export function ps(script: string): string {
 /** The text of one part of an Office file (they are zip archives of XML) */
 function part(file: string, entry: string): string {
   if (!existsSync(file)) throw new Error(`${path.basename(file)} was not saved`);
-  return ps(`Add-Type -A System.IO.Compression.FileSystem; $z=[IO.Compression.ZipFile]::OpenRead('${file}'); try { $e=$z.Entries | ? FullName -like '${entry}'; foreach($x in $e){ $r=New-Object IO.StreamReader($x.Open()); $r.ReadToEnd(); $r.Close() } } finally { $z.Dispose() }`);
+  // Opened sharing it with the program that saved it: Word and Excel keep the file open (and locked for writing)
+  // while it is still on screen
+  return ps(`Add-Type -A System.IO.Compression; $f=[IO.File]::Open('${file}', 'Open', 'Read', 'ReadWrite'); $z=New-Object IO.Compression.ZipArchive($f, [IO.Compression.ZipArchiveMode]::Read); try { $e=$z.Entries | ? FullName -like '${entry}'; foreach($x in $e){ $r=New-Object IO.StreamReader($x.Open()); $r.ReadToEnd(); $r.Close() } } finally { $z.Dispose(); $f.Dispose() }`);
 }
 const plain = (xml: string) => xml.replace(/<w:tab\/>/g, "\t").replace(/<\/w:p>/g, "\n").replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'");
 const norm = (s: string) => s.toLowerCase().replace(/[\s,]+/g, " ").trim();
