@@ -524,14 +524,18 @@ export class Runner {
     } catch (e) {
       job.lines.push(`✗ ${(e as Error).message}`);
       job.status = "failed";
-      this.unreported = job;
     } finally {
       if (job.marked && !job.ended) {
         const end = await this.call("plan_mark", { plan: job.id, end: true }).catch(() => undefined);
         if (end?.text) job.lines.push(...end.text.split("\n").filter(Boolean));
       }
       job.ms = performance.now() - t0;
-      if (job.status === "failed") for (const j of this.jobs) if (j.status === "queued") j.status = "cancelled";
+      // Told only now that its report is whole: a plan sent while the failure was still being written up (the look at
+      // where things stand) used to get a report with no time, no such look, and no word of the plans cancelled
+      if (job.status === "failed") {
+        for (const j of this.jobs) if (j.status === "queued") j.status = "cancelled";
+        this.unreported = job;
+      }
     }
   }
 
@@ -541,7 +545,6 @@ export class Runner {
     const n = job.pending.size / 2;
     if (n) job.lines.push(`(${n === 1 ? "the decision model's choice in this plan was" : `the decision model's ${n} choices in this plan were`} not remembered, since the plan failed)`);
     job.status = "failed";
-    this.unreported = job;
     // A short look at where things stand, so the AI can re-plan without a separate look: the one the driver took
     // when the batch failed, if nothing has been done since
     if (job.where && job.where.at === this.calls) {
