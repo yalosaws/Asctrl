@@ -227,7 +227,7 @@ Debugging the real window:
 cd agent-app && npm run tauri dev
 ```
 
-UI debugging in the browser with demo data (add `?state=ready|admin|reboot|connected|offline|connecting` to the URL to switch state):
+UI debugging in the browser with demo data (add `?state=ready|admin|reboot|act|connected|offline|connecting` to the URL to switch state):
 
 ```bash
 cd agent-app && npm run dev
@@ -236,6 +236,10 @@ cd agent-app && npm run dev
 **Relay URL**, in order of precedence: `--relay <url>`; environment variable `ASCTRL_RELAY_URL`; `relay.txt` next to the exe; the compile-time `ASCTRL_RELAY_URL`; the hosted relay `ws://124.222.182.40:8787` in release builds, `ws://localhost:8787` in debug builds. A driver that can't reach its relay still works over the local link.
 
 `--code <6 digits>` fixes the code (used to keep it across an elevated restart). `ASCTRL_CODE` only works in debug builds. `ASCTRL_LOCAL_FILE` moves the local link's address file (test runs use their own, so they never disturb a driver already running).
+
+**The overlay** draws what the AI does without ever holding an action back: the orb waits over the program being worked on (over its main window, so the work going into one of its dialogs and back leaves it in place), sends a pointer of its own out to each click, and frames the window in use, one frame per window, kept while the actions stay there. Two programs worked at once each get a frame and pointers of their own, and the orb stays put between them. A frame goes the moment its window closes, hides or moves. The overlay keeps itself above other topmost windows from a thread of its own, so nothing it draws blinks out when a window is brought forward. Clicks and typing through a page (no mouse) are drawn where the element is, when the person can see it.
+
+`ASCTRL_FX_LOG=<file>` writes every animation event the driver sends to the overlay, with the screen layout, to a file; `node test/fxcheck.ts <log>...` plays such logs through the real overlay code in a headless Chrome and measures what the person would see: moves of the orb no change of program called for, frames redrawn within one window, pointers that blink, how late each press is drawn, frames left after their window went (`--check` fails over the limits; `test/fx/*.fxlog` are kept as its regression cases). `test/zorder.ps1` measures how long a window covers the overlay during a test.
 
 **Admin mode**: the AI calls `request_admin` → the person clicks Allow → Windows shows UAC and they click "Yes" → the driver restarts as administrator → the console reconnects automatically.
 
@@ -365,6 +369,14 @@ The P0 benchmark: a frontier model does 40 real tasks (a browser, Windows Settin
 node test/p0/run.ts --dry
 ```
 
+`--popups 4` puts an unexpected "Update available" window in front of the work a few seconds into every fourth task, and the summary compares those tasks with the rest (the experiment of section 7 of `docs/architecture-v2.md`).
+
+What the overlay drew in a recorded run (any test, with `ASCTRL_FX_LOG` set), measured without touching the desktop:
+
+```bash
+node test/fxcheck.ts test/fx/p4-v1.fxlog test/fx/p4-v2.fxlog --check
+```
+
 Speed and reliability on a real desktop (moves the mouse and types for about 20 seconds; leave the computer alone):
 
 ```bash
@@ -389,15 +401,17 @@ node test/run.ts
 
 What has been shown, on one Windows 11 machine (2560x1440 at 150 %, one display):
 
-- Unit tests 48 / 48, end-to-end 59 / 59, plan tests 17 / 17, HTTP connector 32 / 32, benchmark 14 / 14 tasks in 11.2 s.
+- Unit tests 51 / 51, end-to-end 59 / 59, plan tests all passing, HTTP connector 35 / 35, benchmark 14 / 14 tasks in 10.8 s, and every desktop test (p2–p6, l2, l4, l5, tools, electron, ext) passing (November 18).
+- The P0 benchmark (40 real tasks, a frontier model through the five tools in headless Claude Code): 39 / 40 done (browser 9 / 10, Settings 10 / 10, Office 10 / 10, VS Code 10 / 10), 47 s, 14.7 model calls and about 232k tokens per task. The one failure (a date field) is fixed.
+- What the overlay draws, replayed from the logs of every desktop test: the orb moves only when the work changes program, a window's frame is drawn once, no pointer blinks, no frame outlives its window.
 - The HTTP connector added in claude.ai (signed in with OAuth), then used from the desktop app to connect to a real computer through the hosted relay and read its screen.
 - Per call: pressing a control directly 140–215 ms, a real mouse click about 160 ms, switching windows about 300 ms, `observe` about 35 ms, a screenshot about 50 ms.
 - An AI (Claude, through these tools) solved Extreme sudokus on sudoku.com: the page opened and waited for, the board read with `read` in under 50 ms (a banner over it reported, not misread), and 53–58 cells filled in about 6 s with the pace chosen per step. Gmail compose-and-discard runs as a plan.
 
 What has not been shown:
 
-- **Few real tasks.** Apart from the sudoku and Gmail runs, every test is a script with fixed steps: they measure whether the tools are fast and correct, not whether an agent finishes tasks more often.
-- **Real programs are barely covered.** Two web pages, a small WinForms window, Calculator and one Explorer folder. Electron programs (VS Code, WeChat), Office, games and several displays are untested.
+- **Forty real tasks, on one machine, once.** The P0 run is one pass of each task; the spread between runs, and tasks in other programs, are not measured yet.
+- **Real programs are only partly covered.** Local test pages and one public page, Settings, Word / Excel / PowerPoint, VS Code, a small WinForms window, Calculator and an Explorer folder. WeChat, games and several displays are untested.
 - **No comparison with any other framework**, and no public benchmark has been run.
 - **Little or no test coverage**: drag, scroll, input methods, several displays, windows running as administrator, right-to-left layouts.
 - The code has had no independent review.
@@ -405,10 +419,11 @@ What has not been shown:
 Known limits:
 
 - Screenshots of the screen use GDI, so they show what is on top. A window that another program's window covers is still read and pictured as it draws itself (Windows Graphics Capture: text targets, `observe`, `wait_for`, and `screenshot` with `window`), without moving anything; a click on it, by text or at a point on that picture, brings it forward first. A minimized window is restored to be pictured.
-- No numbered marks drawn on screenshots (Set-of-Marks), so UI a program draws itself is reached by text read off the pixels or by coordinates only.
+- UI a program draws itself (no UI Automation, no page) is reached by text read off the pixels, by coordinates, or by the numbered marks a screenshot can carry (`marks: true`) where controls are known.
 - When the keyboard focus leaves a text box, Windows fades its border for about 250 ms and the action waits for that (about 380 ms instead of 170 ms).
 - Single clicks repeated on the same spot are kept about 550 ms apart, so Windows does not take them for a double click. Pressing a control directly has no such wait.
-- The overlay is left out of screen captures, so where the orb points, frames and draws is checked by eye only.
+- The overlay is left out of screen captures, so what it draws is measured by replaying its event log through its own code (`test/fxcheck.ts`), not by looking at the screen; how it looks is checked by eye.
+- A window of a program running as administrator in front blocks a driver that isn't from switching windows or typing (Windows' integrity levels); the driver names that program, `observe` still works, and `request_admin` is the way past it.
 - Windows only.
 
 Suggested order from here: have an agent do more real tasks in a browser, Settings and Office and fix what fails; an independent code review; then the limits above.
