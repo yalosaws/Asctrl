@@ -140,7 +140,7 @@ try {
   // 6. Let go after 15 s without work: the extension says which tabs it holds
   await sleep(22_000);
   const held = await tech.call("read_text", { window: W });
-  say(held.ok, `after a pause the tab is worked again (attached anew): ${first(held.text ?? held.error)}`);
+  say(held.ok && (held.data as { channel?: string } | undefined)?.channel === "page", `after a pause the tab is worked again (attached anew): ${first(held.text ?? held.error)}`);
 
   // 7. A form in an iframe from another site (its own process), in this browser and in Asctrl's own
   for (const which of ["user", "asctrl"] as const) {

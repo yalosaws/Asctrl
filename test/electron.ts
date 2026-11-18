@@ -51,7 +51,13 @@ try {
 
   // 3.
   const mouse = cursor();
-  const c = await tech.call("click", { window: W, target: "Explorer", after: "none" });
+  // While VS Code is still building its window the page has no such element yet, and the click goes the usual way
+  // (through UI Automation): once it has, it goes through the page
+  let c = await tech.call("click", { window: W, target: "Explorer", after: "none" });
+  for (let i = 0; i < 16 && c.ok && (c.data as { channel?: string } | undefined)?.channel !== "page"; i++) {
+    await new Promise((res) => setTimeout(res, 500));
+    c = await tech.call("click", { window: W, target: "Explorer", after: "none" });
+  }
   say(c.ok && (c.data as { channel?: string } | undefined)?.channel === "page" && cursor() === mouse, `a click by name through the page, the mouse stayed put: ${first(c.text ?? c.error)}`);
 } catch (e) {
   console.error(e);
