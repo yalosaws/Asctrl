@@ -119,8 +119,10 @@ impl LineSync {
 
 /// How long a control given the focus directly may take to say it has it, before it is clicked instead
 const FOCUS_DIRECT: Duration = Duration::from_millis(100);
-/// How long a clicked control (a page's, often) may take to say it has the focus
-const FOCUS_CLICK: Duration = Duration::from_millis(300);
+/// How long a clicked control (a page's, often) may take to say it has the focus. A page may first close
+/// what the last field opened (Gmail's address suggestions under "To" take most of a second); only a
+/// control that never takes it waits this long.
+const FOCUS_CLICK: Duration = Duration::from_millis(1200);
 
 /// Put the keyboard focus on a located target: a control of an ordinary program takes it directly; anything
 /// else (a web page's field, a spot on a canvas, a control that won't take it) is clicked.
