@@ -92,6 +92,10 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
         Ok::<_, String>((target, opened, loaded))
     })
     .await;
+    // The window this step brought up is the plan's own: the popup watcher must not take it for a popup
+    if let Ok(Ok((_, Some(o), _))) = &r {
+        super::popups::adopt(o.hwnd);
+    }
     drop(turn);
     match r {
         Ok(Ok((target, opened, loaded))) => {

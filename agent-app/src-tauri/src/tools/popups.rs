@@ -26,6 +26,14 @@ const DISMISS: [&str; 24] = [
     "以后再说", "稍后", "稍后再说", "暂不", "暂不需要", "不用了", "跳过", "知道了", "我知道了", "关闭", "下次再说", "残忍拒绝",
 ];
 
+/// The dismiss buttons that are also the close box of a window's frame. A window that draws its own frame
+/// (Windows 11 Notepad, WinUI and Electron programs) lists its caption buttons as plain buttons, so on a
+/// window with a minimize or maximize button these close the program, not a popup
+const CLOSE_BOX: [&str; 4] = ["close", "关闭", "×", "✕"];
+
+/// The other caption buttons: a window that has one is a program's own window, not a popup
+const CAPTION: [&str; 8] = ["minimize", "maximize", "restore", "最小化", "最大化", "还原", "向下还原", "恢复"];
+
 /// Never pressed on the watcher's own judgment, whatever the rules say
 const DESTRUCTIVE: [&str; 22] = [
     "delete", "remove", "erase", "discard", "send", "submit", "purchase", "buy", "pay", "replace", "overwrite", "format", "uninstall",
@@ -40,6 +48,8 @@ struct Watch {
     keep: Vec<String>,
     /// Windows already looked at (there at the start, or judged since)
     known: HashSet<isize>,
+    /// Windows the plan itself brought up (its `open` steps): never a popup
+    own: HashSet<isize>,
     /// What was done, for the plan's report
     log: Vec<String>,
 }
@@ -79,7 +89,7 @@ pub fn start(args: &Value) {
         .unwrap_or_default();
     let known = winmgr::list().into_iter().map(|w| w.handle).collect();
     let plan = str_arg(args, "plan").to_string();
-    *WATCH.lock().unwrap() = Some(Watch { plan, on, keep: lower(args.get("keep").unwrap_or(&Value::Null)), known, log: vec![] });
+    *WATCH.lock().unwrap() = Some(Watch { plan, on, keep: lower(args.get("keep").unwrap_or(&Value::Null)), known, own: HashSet::new(), log: vec![] });
     let mine = GEN.fetch_add(1, Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
         let mut last = crate::events::seq();
@@ -105,6 +115,12 @@ pub fn start(args: &Value) {
                 BUSY.store(false, Ordering::SeqCst);
                 continue;
             };
+            // The step it waited for may have been the plan's own `open` of this very window
+            if ours(found.hwnd) {
+                drop(turn);
+                BUSY.store(false, Ordering::SeqCst);
+                continue;
+            }
             let line = tokio::task::spawn_blocking(move || dismiss(found)).await.unwrap_or_else(|e| e.to_string());
             drop(turn);
             if let Some(w) = WATCH.lock().unwrap().as_mut() {
@@ -113,6 +129,19 @@ pub fn start(args: &Value) {
             BUSY.store(false, Ordering::SeqCst);
         }
     });
+}
+
+/// A window the plan's own step brought up (open_app): the plan's, never a popup to dismiss. Called while
+/// that step still holds its turn, so a watcher that judged the window meanwhile sees this before it presses.
+pub fn adopt(h: isize) {
+    if let Some(w) = WATCH.lock().unwrap().as_mut() {
+        w.known.insert(h);
+        w.own.insert(h);
+    }
+}
+
+fn ours(h: isize) -> bool {
+    WATCH.lock().unwrap().as_ref().is_some_and(|w| w.own.contains(&h))
 }
 
 /// The plan ended: stop watching, and say what was done
@@ -140,6 +169,7 @@ pub fn busy() -> bool {
 }
 
 struct Found {
+    hwnd: isize,
     title: String,
     point: (i32, i32),
     /// Pressed directly (UI Automation) unless it is part of a web page
@@ -186,6 +216,7 @@ fn judge(h: isize, on: &[(String, String)], keep: &[String]) -> Option<Found> {
             .filter(|n| n.has(flag::ACTIONABLE) && n.rect.2 > n.rect.0)
             .find(|n| n.name.trim().to_lowercase() == name)
             .map(|n| Found {
+                hwnd: h,
                 title: scene.title.clone(),
                 point: ((n.rect.0 + n.rect.2) / 2, (n.rect.1 + n.rect.3) / 2),
                 rf: (!n.has(flag::WEB)).then_some(n.rf),
@@ -201,12 +232,20 @@ fn judge(h: isize, on: &[(String, String)], keep: &[String]) -> Option<Found> {
     if keep.iter().any(|t| shows(t)) {
         return None;
     }
-    let f = DISMISS.iter().find_map(|b| press_of(b))?;
+    let buttons: Vec<String> = scene.nodes.iter().filter(|n| n.has(flag::ACTIONABLE)).map(|n| n.name.trim().to_lowercase()).collect();
+    let f = press_of(dismiss_button(&buttons)?)?;
     let l = f.button.to_lowercase();
     if DESTRUCTIVE.iter().any(|d| l.contains(d)) {
         return None;
     }
     Some(Found { why: "a popup the plan didn't expect", ..f })
+}
+
+/// Which of a window's buttons (names in lower case) only dismisses it, if any. On a program's own window
+/// (it has a minimize or maximize button) the close box is not one: it would close the program.
+fn dismiss_button(buttons: &[String]) -> Option<&'static str> {
+    let framed = buttons.iter().any(|b| CAPTION.contains(&b.as_str()));
+    DISMISS.iter().copied().filter(|d| !(framed && CLOSE_BOX.contains(d))).find(|d| buttons.iter().any(|b| b == d))
 }
 
 fn dismiss(f: Found) -> String {
@@ -221,5 +260,30 @@ fn dismiss(f: Found) -> String {
     match pressed {
         Ok(()) => format!("↷ \"{title}\" popped up ({}): pressed \"{}\"", f.why, f.button),
         Err(e) => format!("↷ \"{title}\" popped up ({}): pressing \"{}\" failed: {e}", f.why, f.button),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_programs_own_close_box_is_not_a_dismiss_button() {
+        // Windows 11 Notepad lists its caption buttons as plain buttons
+        assert_eq!(dismiss_button(&names(&["文件", "添加新标签页", "最小化", "最大化", "关闭"])), None);
+        assert_eq!(dismiss_button(&names(&["minimize", "restore", "close"])), None);
+    }
+
+    #[test]
+    fn a_popup_is_still_dismissed() {
+        assert_eq!(dismiss_button(&names(&["later", "install now"])), Some("later"));
+        // A dialog without minimize or maximize: its close box dismisses it
+        assert_eq!(dismiss_button(&names(&["关闭"])), Some("关闭"));
+        // A program-like popup: its own dismiss button, not the close box
+        assert_eq!(dismiss_button(&names(&["最小化", "关闭", "稍后再说"])), Some("稍后再说"));
     }
 }
