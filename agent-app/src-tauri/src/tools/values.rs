@@ -63,12 +63,11 @@ fn type_into(loc: &Located, value: &str, call: &str, part: &str, prior: Option<S
         return Ok(format!("Filled {}", loc.desc));
     }
     // The program takes the keys in a moment after they are sent: read again for a short while before calling it wrong
-    let started = std::time::Instant::now();
-    let mut got = l.value();
-    while got.as_deref().is_some_and(|v| !same(v, value)) && started.elapsed() < Duration::from_millis(250) {
-        std::thread::sleep(Duration::from_millis(30));
+    let mut got = None;
+    crate::until::holds(Duration::from_millis(250), || {
         got = l.value();
-    }
+        got.as_deref().is_none_or(|v| same(v, value))
+    });
     match got {
         Some(v) if same(&v, value) => {
             // It reads the value and did not before: a paste has arrived, so the clipboard can go back now

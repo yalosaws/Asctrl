@@ -412,13 +412,17 @@ pub fn act(h: HWND, action: &str) -> Result<String, String> {
     .into())
 }
 
+/// How long a window may take to come out of minimized or maximized, and to get to where it was moved
+const RESTORE_MAX: std::time::Duration = std::time::Duration::from_millis(500);
+const MOVE_MAX: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Move and/or resize a window so its visible edge lands on the given rectangle (screen pixels); a missing
 /// number keeps the current value. A maximized or minimized window is restored first.
 pub fn set_bounds(h: HWND, x: Option<i32>, y: Option<i32>, w: Option<i32>, hgt: Option<i32>) -> Result<Rect, String> {
     unsafe {
         if IsIconic(h).as_bool() || IsZoomed(h).as_bool() {
             let _ = ShowWindow(h, SW_RESTORE);
-            std::thread::sleep(std::time::Duration::from_millis(60));
+            crate::until::holds(RESTORE_MAX, || !IsIconic(h).as_bool() && !IsZoomed(h).as_bool());
         }
         let vis = visible_rect(h).ok_or("That window has no position")?;
         let mut raw = RECT::default();
@@ -429,7 +433,15 @@ pub fn set_bounds(h: HWND, x: Option<i32>, y: Option<i32>, w: Option<i32>, hgt: 
         let (nw, nh) = (w.unwrap_or(vis.right - vis.left).max(120), hgt.unwrap_or(vis.bottom - vis.top).max(80));
         SetWindowPos(h, None, nx - ml, ny - mt, nw + ml + mr, nh + mt + mb, SWP_NOZORDER | SWP_NOACTIVATE)
             .map_err(|_| "Windows refused to move the window (it may be running as administrator)".to_string())?;
-        std::thread::sleep(std::time::Duration::from_millis(30));
+        // Done when it is there, or when it moved and stopped short of it (a window with a minimum size)
+        let target = (nx, ny, nx + nw, ny + nh);
+        let mut last = (vis.left, vis.top, vis.right, vis.bottom);
+        crate::until::holds(MOVE_MAX, || {
+            let now = visible_rect(h).map(|r| (r.left, r.top, r.right, r.bottom)).unwrap_or(last);
+            let settled = now == target || (now == last && now != (vis.left, vis.top, vis.right, vis.bottom));
+            last = now;
+            settled
+        });
         let r = visible_rect(h).unwrap_or(vis);
         Ok((r.left, r.top, r.right, r.bottom))
     }

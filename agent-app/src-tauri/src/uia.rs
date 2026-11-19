@@ -265,6 +265,11 @@ fn with_reg<T>(f: impl FnOnce(&mut Registry) -> T) -> T {
 /// More references than this and the oldest are forgotten
 const MAX_REFS: usize = 40_000;
 
+/// How long a control may take to show a state it was put in (toggled, opened, selected)
+const STATE_TAKES: Duration = Duration::from_millis(300);
+/// How long a list just opened may take to fill
+const LIST_FILLS: Duration = Duration::from_millis(500);
+
 impl Registry {
     fn assign(&mut self, key: Vec<i32>, el: &IUIAutomationElement, hwnd: isize) -> u32 {
         let rf = match (!key.is_empty()).then(|| self.by_key.get(&key).copied()).flatten() {
@@ -1033,8 +1038,9 @@ impl Live {
                 if self.toggle_state() == Some(want) {
                     return Ok(format!("{label} is {want}"));
                 }
+                let before = self.toggle_state();
                 unsafe { p.Toggle() }.map_err(|e| Some(fail("Toggling it", e)))?;
-                std::thread::sleep(Duration::from_millis(30));
+                crate::until::holds(STATE_TAKES, || self.toggle_state() != before);
             }
             return match self.toggle_state() {
                 Some(s) if s == want => Ok(format!("{label} is {want}")),
@@ -1086,17 +1092,11 @@ impl Live {
             }
             // A web page applies the value a moment after the call returns: read again for a short while
             let same = |a: &str, b: &str| newlines(a).trim_end() == newlines(b).trim_end();
-            let started = std::time::Instant::now();
-            loop {
-                let got = unsafe { p.CurrentValue() }.map(|b| b.to_string()).unwrap_or_default();
-                if same(&got, value) {
-                    return Ok(format!("{label} now reads \"{}\"", clip(&got, 80)));
-                }
-                if started.elapsed() >= Duration::from_millis(150) {
-                    return Err(None);
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
+            let read = || unsafe { p.CurrentValue() }.map(|b| b.to_string()).ok().filter(|got| same(got, value));
+            return match crate::until::until(Duration::from_millis(150), read) {
+                Some(got) => Ok(format!("{label} now reads \"{}\"", clip(&got, 80))),
+                None => Err(None),
+            };
         }
         Err(None)
     }
@@ -1125,7 +1125,7 @@ impl Live {
         let was_closed = expander.as_ref().is_some_and(|p| unsafe { p.CurrentExpandCollapseState() }.is_ok_and(|s| s == ExpandCollapseState_Collapsed));
         if was_closed && let Some(p) = &expander {
             let _ = unsafe { p.Expand() };
-            std::thread::sleep(Duration::from_millis(120));
+            crate::until::holds(STATE_TAKES, || unsafe { p.CurrentExpandCollapseState() }.is_ok_and(|s| s != ExpandCollapseState_Collapsed));
         }
         let want = norm(name);
         let find = || -> Option<(IUIAutomationElement, String)> {
@@ -1148,12 +1148,8 @@ impl Live {
             }
             partial
         };
-        let mut item = find();
-        if item.is_none() && was_closed {
-            // The list may still be filling
-            std::thread::sleep(Duration::from_millis(250));
-            item = find();
-        }
+        // A list just opened may still be filling
+        let item = crate::until::until(if was_closed { LIST_FILLS } else { Duration::ZERO }, find);
         let Some((item, item_name)) = item else {
             if was_closed && let Some(p) = &expander {
                 let _ = unsafe { p.Collapse() };
@@ -1166,14 +1162,18 @@ impl Live {
             return (expander.is_some() || self.role() != "ComboBox").then(|| Err(format!("{label} has no item \"{name}\"")));
         };
         let r = if let Some(p) = pattern::<IUIAutomationSelectionItemPattern>(&item, UIA_SelectionItemPatternId) {
-            unsafe { p.Select() }.map_err(|e| fail("Selecting the item", e))
+            let r = unsafe { p.Select() }.map_err(|e| fail("Selecting the item", e));
+            // Closing the list before the choice took would drop it
+            if r.is_ok() {
+                crate::until::holds(STATE_TAKES, || unsafe { p.CurrentIsSelected() }.is_ok_and(|b| b.as_bool()));
+            }
+            r
         } else if let Some(p) = pattern::<IUIAutomationInvokePattern>(&item, UIA_InvokePatternId) {
             unsafe { p.Invoke() }.map_err(|e| fail("Pressing the item", e))
         } else {
             Err(format!("The item \"{item_name}\" of {label} can't be picked without the mouse; open it and click the item"))
         };
         if was_closed && let Some(p) = &expander {
-            std::thread::sleep(Duration::from_millis(40));
             let _ = unsafe { p.Collapse() };
         }
         Some(r.map(|_| format!("{label} is now \"{}\"", clip(&item_name, 60))))

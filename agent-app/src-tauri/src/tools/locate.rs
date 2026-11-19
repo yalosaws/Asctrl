@@ -268,13 +268,7 @@ fn from_live(live: uia::Live, anywhere: bool) -> Result<Located, Miss> {
     let mut part = visible_part(&live, win);
     if part.is_none() && live.scroll_into_view() {
         // The view scrolls, often with an animation
-        for _ in 0..6 {
-            std::thread::sleep(Duration::from_millis(50));
-            part = visible_part(&live, win);
-            if part.is_some() {
-                break;
-            }
-        }
+        part = crate::until::until(Duration::from_millis(300), || visible_part(&live, win));
     }
     let Some(rect) = part else {
         let why = if winmgr::is_minimized(live.hwnd) { "its window is minimized (focus_window restores it)" } else { "it is scrolled out of view, collapsed or hidden" };
@@ -452,6 +446,7 @@ fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
     let f = ask.frame;
     let at = |x: i32, y: i32| f.at(x, y);
     loop {
+        let seen = crate::events::seq();
         // The window in front is looked up again each time round: a dialog may be on its way up
         let hwnd = ask.window.unwrap_or_else(winmgr::foreground);
         let mut title = winmgr::title_of(hwnd);
@@ -550,7 +545,8 @@ fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
             }
             return Err(Miss::new(MissKind::Absent, msg));
         }
-        std::thread::sleep(Duration::from_millis(120));
+        // Look again when a window comes, goes or changes title, or after a while for what changes inside one
+        crate::events::wait(seen, Duration::from_millis(120).min(ask.wait.saturating_sub(start.elapsed())));
     }
 }
 
@@ -619,6 +615,9 @@ fn in_own_picture(f: &Frame, h: isize, x: i32, y: i32, (px, py): (i32, i32)) -> 
     Ok(Located { point: (nx, ny), hwnd: h, scene: Some(h), live: None, desc: format!("({px},{py})"), note })
 }
 
+/// How long a window brought forward may take to be drawn in front
+const FRONT_TAKES: Duration = Duration::from_millis(300);
+
 /// Make sure a real click on a located control reaches it: when a window of another program covers the
 /// spot, the control's own window is brought forward first. A plain point is clicked as it is.
 pub fn uncover(loc: &Located) -> Result<(), String> {
@@ -634,7 +633,7 @@ pub fn uncover(loc: &Located) -> Result<(), String> {
     }
     let main = loc.scene.unwrap_or(loc.hwnd);
     winmgr::bring_to_front(winmgr::hwnd(main))?;
-    std::thread::sleep(Duration::from_millis(60));
+    crate::until::holds(FRONT_TAKES, || reaches().is_none());
     match reaches() {
         None => Ok(()),
         Some(cover) => Err(format!(
