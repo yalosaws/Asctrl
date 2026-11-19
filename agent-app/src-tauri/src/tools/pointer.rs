@@ -113,7 +113,7 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
                 let s = s.map_err(Miss::from)?;
                 let change = pace.after_direct(before);
                 let back = if gave_back { "; it brought its window forward, so the person's window was put back in front" } else { "" };
-                Ok(Did { done: format!("{s} (directly, in the background: the mouse, keyboard and window in front were left to the person{back}){}", loc.note), change, hwnd: loc.scene, fresh: false, delivered: true })
+                Ok(Did { done: format!("{s} (directly, in the background: the mouse, keyboard and window in front were left to the person{back}){}", loc.note), change, hwnd: loc.scene, fresh: false, delivered: true, verified: None })
             })
             .await;
             return finish(ctx, args, r).await;
@@ -183,7 +183,7 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
         anim.end(true);
         fx::zone_follows_window(&call, loc.hwnd, framed);
         let change = if delivered { pace.after_direct(before) } else { pace.after(before) };
-        Ok(Did { done: done.unwrap_or_default() + &loc.note, change, hwnd: loc.scene, fresh: false, delivered })
+        Ok(Did { done: done.unwrap_or_default() + &loc.note, change, hwnd: loc.scene, fresh: false, delivered, verified: None })
     })
     .await;
     drop(turn);
@@ -250,7 +250,7 @@ pub(super) async fn scroll(ctx: &Ctx, args: &Value) -> Output {
         let _ = done.send(true);
         let still = change.as_ref().is_some_and(|c| !c.changed);
         let hint = if still { " (if nothing moved, the view is already at its end, or the pointer is not over what scrolls)" } else { "" };
-        Ok(Did { done: format!("Scrolled {dir} {amount} at {desc}{note}{hint}"), change, hwnd, fresh: false, delivered: false })
+        Ok(Did { done: format!("Scrolled {dir} {amount} at {desc}{note}{hint}"), change, hwnd, fresh: false, delivered: false, verified: None })
     })
     .await;
     drop(turn);
@@ -285,7 +285,7 @@ pub(super) async fn drag(ctx: &Ctx, args: &Value) -> Output {
         fx::zone_follows_window(&call, a.hwnd, framed);
         r?;
         let change = pace.after(before);
-        Ok(Did { done: format!("Dragged {} to {}{}{}", a.desc, b.desc, a.note, b.note), change, hwnd: a.scene, fresh: false, delivered: false })
+        Ok(Did { done: format!("Dragged {} to {}{}{}", a.desc, b.desc, a.note, b.note), change, hwnd: a.scene, fresh: false, delivered: false, verified: None })
     })
     .await;
     drop(turn);
@@ -321,7 +321,7 @@ pub(super) async fn mouse(ctx: &Ctx, args: &Value) -> Output {
         if action == "look" {
             let before = pace.before(None);
             input::mouse_look(dx, dy, look_ms)?;
-            return Ok(Did { done: format!("Mouse moved by ({dx}, {dy})"), change: pace.after(before), hwnd: Some(winmgr::foreground()), fresh: false, delivered: false });
+            return Ok(Did { done: format!("Mouse moved by ({dx}, {dy})"), change: pace.after(before), hwnd: Some(winmgr::foreground()), fresh: false, delivered: false, verified: None });
         }
         let loc = match &ask {
             Some(a) => Some(locate::resolve(a)?),
@@ -347,7 +347,7 @@ pub(super) async fn mouse(ctx: &Ctx, args: &Value) -> Output {
             Some(l) => (l.desc.clone(), l.note.clone(), l.scene),
             None => ("the pointer's position".to_string(), String::new(), shown.and_then(|(x, y)| winmgr::top_window_at(x, y))),
         };
-        Ok(Did { done: format!("{done} {desc}{note}"), change: pace.after(before), hwnd, fresh: false, delivered: false })
+        Ok(Did { done: format!("{done} {desc}{note}"), change: pace.after(before), hwnd, fresh: false, delivered: false, verified: None })
     })
     .await;
     drop(turn);

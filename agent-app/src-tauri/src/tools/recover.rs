@@ -134,9 +134,14 @@ pub fn shortlist(nodes: &[Node], want: &str, kind: Kind, skip: &HashSet<u32>) ->
     out
 }
 
-/// The window a step works in, as a handle; the one in front when it names none
-fn window_of(step: &Value) -> isize {
-    winmgr::find_arg(step.get("window")).ok().flatten().map(|h| h.0 as isize).unwrap_or_else(winmgr::foreground)
+/// The window a step works in, as a handle; the one in front when it names none. None when it names one
+/// that isn't there: then the candidates of whatever is in front are not the ones meant.
+fn window_of(step: &Value) -> Option<isize> {
+    match winmgr::find_arg(step.get("window")) {
+        Ok(Some(h)) => Some(h.0 as isize),
+        Ok(None) => Some(winmgr::foreground()),
+        Err(_) => None,
+    }
 }
 
 /// Whether `text` shows in the step's window now (once or several times), without waiting
@@ -222,7 +227,8 @@ where
     };
     let skip: HashSet<u32> = named.iter().filter_map(|c| c["ref"].as_str()?.strip_prefix('e')?.parse().ok()).collect();
     let want = str_arg(step, "target").to_string();
-    let (hwnd, wk) = (window_of(step), wish.kind);
+    let Some(hwnd) = window_of(step) else { return Outcome { out, notes } };
+    let wk = wish.kind;
     let more = tokio::task::spawn_blocking(move || uia::snapshot(hwnd, false).map(|s| shortlist(&s.nodes, &want, wk, &skip)).unwrap_or_default()).await.unwrap_or_default();
     let all: Vec<Value> = named.into_iter().chain(more.iter().map(Cand::json)).take(MAX_CANDS).collect();
     let win = tokio::task::spawn_blocking(move || winmgr::info(hwnd)).await.ok().flatten();

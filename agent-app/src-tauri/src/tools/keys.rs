@@ -156,7 +156,7 @@ fn other_field_focused(loc: &Located) -> Option<String> {
 
 /// Focus `loc` for typing, and make sure the keys will go there: once more if another field kept the focus,
 /// then refuse rather than type into the wrong one
-fn focus_for_typing(loc: &Located, call: &str) -> Result<(), String> {
+pub(super) fn focus_for_typing(loc: &Located, call: &str) -> Result<(), String> {
     focus_target(loc, call, "f")?;
     if other_field_focused(loc).is_none() {
         return Ok(());
@@ -174,9 +174,10 @@ fn focus_for_typing(loc: &Located, call: &str) -> Result<(), String> {
 }
 
 /// What the focused field holds after typing `typed`: (what has the focus, a note for the reply, the
-/// field's content when it was seen to hold the text). A program takes keys in a moment after they are
+/// field's content when it was seen to hold the text, whether the text was seen to arrive: Some(false) only
+/// when it plainly can't have — the focus is on something that takes no text). A program takes keys in a moment after they are
 /// sent, so a field that does not show the text yet is read again for a short while before it is called wrong.
-fn readback(typed: &str) -> (Option<String>, String, Option<String>) {
+fn readback(typed: &str) -> (Option<String>, String, Option<String>, Option<bool>) {
     let flat = |s: &str| uia::newlines(s);
     let want = flat(typed);
     let want = want.trim_end();
@@ -184,20 +185,20 @@ fn readback(typed: &str) -> (Option<String>, String, Option<String>) {
     let mut last = String::new();
     let mut changed = started;
     loop {
-        let Some(fo) = uia::focused() else { return (None, String::new(), None) };
+        let Some(fo) = uia::focused() else { return (None, String::new(), None, None) };
         let label = fo.label.clone();
         if matches!(fo.role, "Button" | "CheckBox" | "RadioButton" | "Link" | "MenuItem" | "TabItem" | "SplitButton") {
             let note = format!(". Careful: the keyboard focus is on {label}, which is not a text field, so the text may have gone nowhere");
-            return (Some(label), note, None);
+            return (Some(label), note, None, Some(false));
         }
         if fo.password || typed.contains('\n') || typed.is_empty() {
-            return (Some(label), String::new(), None);
+            return (Some(label), String::new(), None, None);
         }
-        let Some(v) = fo.value else { return (Some(label), String::new(), None) };
+        let Some(v) = fo.value else { return (Some(label), String::new(), None, None) };
         let v = flat(&v);
         if v.contains(want) {
             let note = format!("; it now reads \"{}\"", uia::clip(&v, 100));
-            return (Some(label), note, Some(v));
+            return (Some(label), note, Some(v), Some(true));
         }
         if v != last {
             last = v.clone();
@@ -215,7 +216,7 @@ fn readback(typed: &str) -> (Option<String>, String, Option<String>) {
         } else {
             format!(". Careful: it now reads \"{}\", which is not what was typed (an input method, autocomplete or formatting may have changed it)", uia::clip(&v, 100))
         };
-        return (Some(label), note, None);
+        return (Some(label), note, None, None);
     }
 }
 
@@ -268,8 +269,11 @@ pub(super) async fn type_text(ctx: &Ctx, args: &Value) -> Output {
         // What the field holds before a paste, to tell afterwards that the paste really arrived
         let prior = if !t.is_empty() && !pace.fast && pastes(&t, &method) { uia::focused().and_then(|f| f.value).map(|v| v.replace('\r', "")) } else { None };
         let how = if t.is_empty() { "" } else { enter_text(&t, &method)? };
-        // Read the field back before Enter sends it away
-        let (into, note, landed) = if pace.fast { (None, String::new(), None) } else { readback(&t) };
+        // Read the field back before Enter sends it away. Fast mode too: this waits for the text itself, not for
+        // the screen, so it costs nothing when the text is there
+        let (into, note, landed, verified) = if t.is_empty() { (None, String::new(), None, None) } else { readback(&t) };
+        // Asked to type into a field, and the keys went to something that takes no text
+        let verified = verified.filter(|v| *v || ask.is_some());
         // The field holds the text and did not before: the program has read the clipboard, so it can go back now.
         // (A field that already read the same proves nothing: the paste may still be on its way.)
         if let (Some(now), Some(was)) = (&landed, &prior)
@@ -294,7 +298,7 @@ pub(super) async fn type_text(ctx: &Ctx, args: &Value) -> Output {
             None => format!("\"{}\"", uia::clip(&winmgr::title_of(fg), 50)),
         };
         let sent = if enter && n > 0 { ", then pressed Enter" } else { "" };
-        Ok(Did { done: format!("{what} {place}{how}{note}{sent}"), change, hwnd: scene.or(Some(fg).filter(|h| *h != 0)), fresh: false, delivered: false })
+        Ok(Did { done: format!("{what} {place}{how}{note}{sent}"), change, hwnd: scene.or(Some(fg).filter(|h| *h != 0)), fresh: false, delivered: false, verified })
     })
     .await;
     drop(turn);
@@ -349,7 +353,7 @@ pub(super) async fn press_keys(ctx: &Ctx, args: &Value) -> Output {
             (None, n) => format!(" ×{n}"),
         };
         let place = if title.trim().is_empty() { String::new() } else { format!(" in \"{}\"", uia::clip(&title, 50)) };
-        Ok(Did { done: format!("Pressed {keys}{times}{place}"), change, hwnd: Some(fg).filter(|h| *h != 0), fresh: false, delivered: false })
+        Ok(Did { done: format!("Pressed {keys}{times}{place}"), change, hwnd: Some(fg).filter(|h| *h != 0), fresh: false, delivered: false, verified: None })
     })
     .await;
     drop(turn);

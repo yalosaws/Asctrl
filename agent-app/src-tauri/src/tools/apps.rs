@@ -129,7 +129,7 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
                 },
                 None => done,
             };
-            let mut out = report::conclude(ctx, args, Did { done, change: None, hwnd: h, fresh: h.is_some(), delivered: false }, true).await;
+            let mut out = report::conclude(ctx, args, Did { done, change: None, hwnd: h, fresh: h.is_some(), delivered: false, verified: None }, true).await;
             // The window, for a program or a test to go on with (focus_window, close) without reading the words
             if let Some(h) = h {
                 let mut d = out.data.take().unwrap_or_else(|| serde_json::json!({}));
@@ -218,7 +218,7 @@ pub(super) async fn focus_window(ctx: &Ctx, args: &Value) -> Output {
         let there = winmgr::rect_of(h).is_some();
         let title = uia::clip(&winmgr::title_of(h), 60);
         let done = if title.is_empty() { done } else { format!("{done}: \"{title}\"") };
-        Ok(Did { done, change: Some(change), hwnd: there.then_some(h), fresh: false, delivered: false })
+        Ok(Did { done, change: Some(change), hwnd: there.then_some(h), fresh: false, delivered: false, verified: None })
     })
     .await;
     drop(turn);

@@ -165,7 +165,7 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
                 let ok = screen::wait_stable_in(target, area, Duration::from_millis(400), timeout.saturating_sub(start.elapsed()), Duration::from_millis(1500));
                 let s = start.elapsed().as_secs_f64();
                 return if ok && scope() == target {
-                    Ok(Did { done: format!("Screen settled after {s:.1} s"), change: None, hwnd: target, fresh: false, delivered: false })
+                    Ok(Did { done: format!("Screen settled after {s:.1} s"), change: None, hwnd: target, fresh: false, delivered: false, verified: None })
                 } else {
                     Err(format!("The requested view did not stay stable for {s:.1} s"))
                 };
@@ -202,8 +202,8 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
             // sliding over the page, must not report something still on screen as gone
             let sure = overruled_since.is_none_or(|t| t.elapsed() >= GONE_SURE);
             match (found, gone) {
-                (Some((d, hwnd, list)), false) => return Ok(Did { done: format!("{what} appeared after {s:.1} s: {d}"), change: None, hwnd, fresh: list, delivered: false }),
-                (None, true) if sure && problem.is_empty() => return Ok(Did { done: format!("{what} is gone after {s:.1} s"), change: None, hwnd: scope(), fresh: false, delivered: false }),
+                (Some((d, hwnd, list)), false) => return Ok(Did { done: format!("{what} appeared after {s:.1} s: {d}"), change: None, hwnd, fresh: list, delivered: false, verified: None }),
+                (None, true) if sure && problem.is_empty() => return Ok(Did { done: format!("{what} is gone after {s:.1} s"), change: None, hwnd: scope(), fresh: false, delivered: false, verified: None }),
                 _ => {}
             }
             if start.elapsed() >= timeout {

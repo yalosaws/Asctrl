@@ -22,11 +22,14 @@ pub struct Did {
     pub fresh: bool,
     /// The program itself confirmed the action (UI Automation): no visible change does not mean it missed
     pub delivered: bool,
+    /// Whether what the action was for was seen to happen: Some(true) checked and so, Some(false) checked and
+    /// not so (the action then fails, whatever was sent), None when it can't be told
+    pub verified: Option<bool>,
 }
 
 impl Did {
     pub fn new(done: impl Into<String>) -> Did {
-        Did { done: done.into(), change: None, hwnd: None, fresh: false, delivered: false }
+        Did { done: done.into(), change: None, hwnd: None, fresh: false, delivered: false, verified: None }
     }
 }
 
@@ -77,7 +80,14 @@ pub fn effect(c: Option<&screen::Change>) -> Option<&'static str> {
 
 /// The structured part of an action's reply
 fn did_data(did: &Did) -> Option<Value> {
-    effect(did.change.as_ref()).map(|e| serde_json::json!({ "effect": e }))
+    let mut data = serde_json::json!({});
+    if let Some(e) = effect(did.change.as_ref()) {
+        data["effect"] = serde_json::json!(e);
+    }
+    if let Some(v) = did.verified {
+        data["verified"] = serde_json::json!(v);
+    }
+    data.as_object().is_some_and(|o| !o.is_empty()).then_some(data)
 }
 
 /// Most lines of control changes in a reply; observe shows everything
@@ -126,6 +136,12 @@ pub async fn conclude(ctx: &Ctx, args: &Value, did: Did, shot_default: bool) -> 
         o.data = data.clone();
         o
     };
+    // Sent, and seen not to have done what it was for: a failure, not a success with a warning
+    if did.verified == Some(false) {
+        let mut o = fail(body);
+        o.data = data;
+        return o;
+    }
     // Inside a batch every step says what it did in a line; the batch reports once at the end
     if STEP.try_with(|s| *s).unwrap_or(false) || after == After::None {
         return with(text(body));
@@ -156,11 +172,11 @@ pub async fn conclude(ctx: &Ctx, args: &Value, did: Did, shot_default: bool) -> 
         ctx.saw(tokio::task::spawn_blocking(winmgr::layout).await.unwrap_or_default());
     }
     if !want_shot {
-        return text(body);
+        return with(text(body));
     }
     match look::capture_view(ctx).await {
-        Ok((image, note)) => Output { ok: true, text: Some(format!("{body}\n{note}")), image: Some(image), ..Default::default() },
-        Err(e) => text(format!("{body}\n(the screenshot after it failed: {e})")),
+        Ok((image, note)) => with(Output { ok: true, text: Some(format!("{body}\n{note}")), image: Some(image), ..Default::default() }),
+        Err(e) => with(text(format!("{body}\n(the screenshot after it failed: {e})"))),
     }
 }
 

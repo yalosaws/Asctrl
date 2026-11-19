@@ -51,7 +51,7 @@ fn type_into(loc: &Located, value: &str, call: &str, part: &str, prior: Option<S
     {
         return Ok(format!("{} already reads \"{}\"", loc.desc, uia::clip(p, 80)));
     }
-    keys::focus_target(loc, call, part)?;
+    if value.is_empty() { keys::focus_target(loc, call, part)?; } else { keys::focus_for_typing(loc, call)?; }
     input::press_keys("ctrl+a")?;
     std::thread::sleep(Duration::from_millis(20));
     if value.is_empty() {
@@ -59,7 +59,6 @@ fn type_into(loc: &Located, value: &str, call: &str, part: &str, prior: Option<S
     } else {
         keys::enter_text(value, "auto")?;
     }
-    std::thread::sleep(Duration::from_millis(60));
     let Some(l) = &loc.live else { return Ok(format!("Typed \"{}\" at {} (not a readable control, so not checked)", uia::clip(value, 60), loc.desc)) };
     if l.is_password() {
         return Ok(format!("Filled {}", loc.desc));
@@ -184,7 +183,7 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Output {
         } else {
             lines.remove(0).1
         };
-        Ok((Did { done, change, hwnd, fresh: false, delivered: true }, failed == 0))
+        Ok((Did { done, change, hwnd, fresh: false, delivered: true, verified: None }, failed == 0))
     })
     .await;
     drop(turn);
@@ -228,7 +227,7 @@ pub(super) async fn element_action(ctx: &Ctx, args: &Value) -> Output {
         let done = r?;
         let change = pace.after_direct(before);
         drop_zone_if_gone(&call, zone);
-        Ok(Did { done, change, hwnd: loc.scene, fresh: false, delivered: true })
+        Ok(Did { done, change, hwnd: loc.scene, fresh: false, delivered: true, verified: None })
     })
     .await;
     drop(turn);
