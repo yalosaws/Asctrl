@@ -1,15 +1,11 @@
-//! The two things that always ask the person at the computer first: running as administrator, and restarting.
+//! Running as administrator, and restarting the computer.
 
-use crate::link::{relay_url, reply, reply_text, still_paired};
-use crate::{AgentState, CONSENT_TIMEOUT, ask_user, is_elevated};
+use crate::link::{relay_url, reply, reply_text};
+use crate::{AgentState, is_elevated};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc;
-
-fn controller_name(app: &AppHandle) -> String {
-    app.state::<AgentState>().controller.lock().unwrap().as_ref().map(|c| c.name.clone()).unwrap_or_default()
-}
 
 /// Restart this program as administrator, keeping the same code. Shows a UAC prompt; returns false if the user clicks "No".
 fn relaunch_elevated(code: &str) -> bool {
@@ -26,22 +22,15 @@ pub async fn request_admin(app: AppHandle, tx: mpsc::UnboundedSender<String>, id
     if is_elevated() {
         return reply_text(&tx, &id, true, "Already running as administrator");
     }
-    let allow = ask_user(&app, json!({ "state": "admin", "techName": controller_name(&app), "timeoutSec": CONSENT_TIMEOUT.as_secs() })).await;
-    if !still_paired(&app, &tx) {
-        return;
-    }
-    if !allow {
-        return reply_text(&tx, &id, false, "The user declined administrator access");
-    }
-
     let code = app.state::<AgentState>().code.lock().unwrap().clone();
     let ok = tokio::task::spawn_blocking(move || relaunch_elevated(&code)).await.unwrap_or(false);
     if !ok {
         return reply_text(&tx, &id, false, "The user clicked \"No\" in the Windows confirmation; still running without admin rights");
     }
-    let msg = "The user agreed; the app is restarting as administrator with the same code.";
+    let msg = "The app is restarting as administrator with the same code.";
     reply(&tx, &id, crate::tools::Output { ok: true, text: Some(msg.into()), data: Some(json!({ "restarting": true })), ..Default::default() });
     tokio::time::sleep(Duration::from_millis(500)).await;
+    crate::note_exit("quitting: restarting as administrator");
     app.exit(0);
 }
 
@@ -75,7 +64,7 @@ async fn shutdown_exe(args: &[&str]) -> Result<(), String> {
     if out.status.success() { Ok(()) } else { Err(format!("shutdown failed ({})", out.status.code().unwrap_or(-1))) }
 }
 
-/// Restart the computer: ask the user, register auto-open after restart (same code), then count down and restart
+/// Restart the computer: register auto-open after restart (same code), then count down and restart
 pub async fn restart_computer(app: AppHandle, tx: mpsc::UnboundedSender<String>, id: String, args: Value) {
     let flag = |k: &str| args.get(k).and_then(Value::as_bool).unwrap_or(false);
     let code = app.state::<AgentState>().code.lock().unwrap().clone();
@@ -98,13 +87,6 @@ pub async fn restart_computer(app: AppHandle, tx: mpsc::UnboundedSender<String>,
         };
     }
 
-    let allow = ask_user(&app, json!({ "state": "reboot", "techName": controller_name(&app), "timeoutSec": CONSENT_TIMEOUT.as_secs() })).await;
-    if !still_paired(&app, &tx) {
-        return;
-    }
-    if !allow {
-        return reply_text(&tx, &id, false, "The user declined the restart (they may have unsaved work)");
-    }
     if let Err(e) = arm_resume(&code) {
         return reply_text(&tx, &id, false, &e);
     }
@@ -120,7 +102,7 @@ pub async fn restart_computer(app: AppHandle, tx: mpsc::UnboundedSender<String>,
         &id,
         true,
         &format!(
-            "The user agreed; the computer restarts in {delay} seconds (restart_computer cancel=true cancels it). After restart and sign-in the app opens automatically with code {code}. Connect again after 1-3 minutes (connect with waitSec). If the computer has a sign-in password, wait until the user reaches the desktop."
+            "The computer restarts in {delay} seconds (restart_computer cancel=true cancels it). After restart and sign-in the app opens automatically with code {code}. Connect again after 1-3 minutes (connect with waitSec). If the computer has a sign-in password, wait until the user reaches the desktop."
         ),
     );
 }

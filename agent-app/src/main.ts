@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { center, hit, home, initGeo, isTauri, primary, setHome, snap, syncHits, type OverlayInfo } from "./geo";
+import { center, hit, home, initGeo, isTauri, primary, snap, syncHits, type OverlayInfo } from "./geo";
 import { orb } from "./orb";
 import { bloom, ripple, sheen } from "./light";
 import { collapse, expand, isShown, relayout as relayoutEdge } from "./edge";
@@ -17,22 +17,17 @@ type Status =
   | { state: "connecting" }
   | { state: "offline"; message?: string }
   | { state: "ready"; code: string }
-  | { state: "admin"; techName: string; timeoutSec: number }
-  | { state: "reboot"; techName: string; timeoutSec: number }
-  | { state: "act"; techName: string; timeoutSec: number; what: string; level: "irreversible" | "external" }
   | { state: "connected"; techName: string; code: string };
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 const codeCard = $("code-card");
-const consent = $("consent");
 const menu = $("menu");
 const orbHit = $<HTMLButtonElement>("orb-hit");
 
 let state: Status["state"] = "connecting";
 let lastCode = "";
 let entered = false;
-let consentTimer: number | undefined;
 
 // ---------------- Assist code ----------------
 
@@ -59,7 +54,6 @@ function renderCode(code: string) {
 const PANELS: [HTMLElement, "left" | "below"][] = [
   [codeCard, "left"],
   [menu, "left"],
-  [consent, "below"],
 ];
 const sizes = new Map<HTMLElement, { w: number; h: number }>();
 
@@ -117,7 +111,6 @@ function showPanel(p: HTMLElement, on: boolean, interactive = false) {
 let menuTimer: number | undefined;
 function openMenu() {
   window.clearTimeout(menuTimer);
-  if (state === "admin" || state === "reboot" || state === "act") return;
   resetQuit();
   showPanel(menu, true, true);
 }
@@ -157,83 +150,12 @@ $("btn-end").addEventListener("click", () => {
   else render({ state: "ready", code: lastCode });
 });
 
-// ---------------- Questions (admin access, restart) ----------------
-
-type Ask = "admin" | "reboot" | "act";
-const ASK_TEXT: Record<Ask, [string, string]> = {
-  admin: ["needs administrator access", "If you allow it, they can also:"],
-  reboot: ["needs to restart your computer", "Before you click Allow:"],
-  act: ["wants to do something that can't be taken back", "It is about to:"],
-};
-
-function showConsent(name: string, timeoutSec: number, kind: Ask, act?: { what: string; level: string }) {
-  $("consent-name").textContent = name || "The AI";
-  [$("consent-ask").textContent, $("consent-sub").textContent] = ASK_TEXT[kind];
-  if (kind === "act" && act) {
-    $("consent-ask").textContent = act.level === "external" ? "wants to send something out" : "wants to do something that can't be undone";
-    $("act-what").textContent = act.what;
-  }
-  $("perm-admin").hidden = kind !== "admin";
-  $("admin-note").hidden = kind !== "admin";
-  $("perm-reboot").hidden = kind !== "reboot";
-  $("reboot-note").hidden = kind !== "reboot";
-  $("perm-act").hidden = kind !== "act";
-  $("act-note").hidden = kind !== "act";
-  showPanel(menu, false, true);
-  showPanel(consent, true, true);
-
-  const bar = $("timer-bar");
-  const started = Date.now();
-  window.clearInterval(consentTimer);
-  const tick = () => {
-    const left = Math.max(0, timeoutSec - (Date.now() - started) / 1000);
-    bar.style.transform = `scaleX(${left / timeoutSec})`;
-    $("timer-sec").textContent = String(Math.ceil(left));
-    if (left <= 0) window.clearInterval(consentTimer);
-  };
-  tick();
-  consentTimer = window.setInterval(tick, 200);
-}
-
-function hideConsent() {
-  window.clearInterval(consentTimer);
-  showPanel(consent, false, true);
-}
-
-async function respond(allow: boolean) {
-  hideConsent();
-  if (allow) {
-    orb.setMood("happy");
-    orb.bump(1);
-    bloom(orb.pos, { size: 220, ms: 760, tone: "mint" });
-    ripple(orb.pos, { size: 60, ms: 700, tone: "mint" });
-  }
-  if (isTauri) await invoke("respond", { allow });
-  else render({ state: "connected", techName: $("consent-name").textContent ?? "", code: lastCode });
-}
-$("btn-allow").addEventListener("click", () => respond(true));
-$("btn-deny").addEventListener("click", () => respond(false));
-
 // ---------------- State machine ----------------
 
 function render(s: Status) {
   state = s.state;
   document.body.dataset.state = s.state;
   setSession(s.state);
-  const asking = s.state === "admin" || s.state === "reboot" || s.state === "act";
-
-  if (asking) {
-    const c = center(primary().work);
-    setHome({ x: c.x, y: c.y - 190 });
-    orb.goTo(home(), "normal");
-    orb.setMood("ask");
-    orb.bump(1);
-    showPanel(codeCard, false);
-    showConsent(s.techName, s.timeoutSec, s.state as Ask, s.state === "act" ? { what: s.what, level: s.level } : undefined);
-    return;
-  }
-  setHome(null);
-  hideConsent();
   if (s.state !== "connected") workAbandoned();
 
   switch (s.state) {

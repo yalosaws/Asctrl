@@ -143,6 +143,12 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
     let peeked = Arc::new(Mutex::new(None));
     for (i, step) in steps.iter().enumerate() {
         let tool = str_arg(step, "tool");
+        // Ended mid-plan: the steps left are not run
+        if session_over() {
+            results.push(serde_json::json!({ "ok": false, "text": SESSION_OVER, "fast": false }));
+            failed = Some(i);
+            break;
+        }
         let k = step.get("k").and_then(Value::as_u64);
         // A popup being dismissed goes first: this step must not act on the screen it covers
         popups::clear(Duration::from_secs(2)).await;

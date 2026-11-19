@@ -102,7 +102,6 @@ async function openPage(scale: number, w: number, h: number) {
 
 // ---- Measuring ----
 
-const ctr = (r: R) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
 const overlaps = (a: R, b: R) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 const pct = (xs: number[], q: number) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor(q * xs.length))] : 0);
 

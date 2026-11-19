@@ -47,17 +47,63 @@ pub fn any() -> Option<Arc<Conn>> {
 
 // ---------- In the driver
 
+/// Who may open the pipe, as a security descriptor kept for the driver's life: this user and the system, with a
+/// medium integrity label. Without it a driver running as administrator made a pipe only administrators could
+/// open, and the relay a browser starts (as the user, not elevated) was refused for good.
+fn pipe_security() -> Option<usize> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW};
+    use windows::Win32::Security::{GetTokenInformation, PSECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::core::{HSTRING, PWSTR};
+    static SD: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *SD.get_or_init(|| unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        let mut buf = vec![0u8; 256];
+        let mut len = 0u32;
+        let got = GetTokenInformation(token, TokenUser, Some(buf.as_mut_ptr() as *mut _), buf.len() as u32, &mut len);
+        let _ = CloseHandle(token);
+        got.ok()?;
+        let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let mut s = PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut s).ok()?;
+        let sid = s.to_string().ok();
+        let _ = LocalFree(Some(HLOCAL(s.0 as *mut _)));
+        let sddl = format!("D:P(A;;GA;;;SY)(A;;GA;;;{})S:(ML;;NW;;;ME)", sid?);
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(&HSTRING::from(sddl), 1, &mut sd, None).ok()?;
+        Some(sd.0 as usize)
+    })
+}
+
+fn create_pipe(name: &str, first: bool) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use windows::Win32::Security::SECURITY_ATTRIBUTES;
+    let mut opts = ServerOptions::new();
+    opts.first_pipe_instance(first);
+    match pipe_security() {
+        Some(sd) => {
+            let mut sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd as *mut _, bInheritHandle: false.into() };
+            // SAFETY: `sa` and the descriptor it points at outlive the call (the descriptor lives as long as the driver)
+            unsafe { opts.create_with_security_attributes_raw(name, &mut sa as *mut _ as *mut _) }
+        }
+        None => opts.create(name),
+    }
+}
+
 /// Take the relays' connections, for as long as the driver runs
 pub async fn serve() {
     register();
     let name = pipe_name();
     let mut first = true;
+    let started = std::time::Instant::now();
     loop {
-        // The first instance only if no one else has the name (another copy of the driver keeps its own)
-        let server = match ServerOptions::new().first_pipe_instance(first).create(&name) {
+        // The first instance only if no one else has the name (another copy of the driver keeps its own). A copy
+        // on its way out (this one restarted as administrator, or was started again) is waited for a while.
+        let server = match create_pipe(&name, first) {
             Ok(s) => s,
             Err(e) => {
-                if first {
+                if first && started.elapsed() > Duration::from_secs(15) {
                     eprintln!("browser extension: pipe {name} not available: {e}");
                     return;
                 }

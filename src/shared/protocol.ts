@@ -208,7 +208,7 @@ export interface WindowEvent {
   title: string;
 }
 
-/** request_admin's reply when the person agreed: the driver is about to restart elevated */
+/** request_admin's reply when Windows agreed: the driver is about to restart elevated */
 export interface AdminData {
   restarting: true;
 }

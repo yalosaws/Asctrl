@@ -1,7 +1,7 @@
 // Light primitives: bloom, ripple, dart, sweep, outline. All plain DOM elements that only animate
 // transform and opacity and remove themselves when done. No fullscreen canvas.
 
-import { center, grow, snapRect, type Pt, type R } from "./geo";
+import { grow, snapRect, type Pt, type R } from "./geo";
 import { clamp, done, EASE, el, fadeOut, play, playOut, SPRING } from "./motion";
 
 const layer = document.getElementById("marks") as HTMLDivElement;
@@ -79,29 +79,6 @@ export function sweep(r: R, o: { ms?: number; loop?: boolean } = {}) {
   const a = play(band, frames, { duration: o.loop ? ms / 0.72 : ms, easing: EASE.inOut, iterations: o.loop ? Infinity : 1 });
   if (!o.loop) void done(a).then(() => box.remove());
   return () => void fadeOut(box, 220);
-}
-
-/** A "snapshot" shrinks from the area into a target point (the orb takes the screenshot) */
-export function capture(r: R, to: () => Pt, o: { ms?: number } = {}): Promise<void> {
-  const s = snapRect(r);
-  const sheet = el("div", "photo", layer);
-  setRect(sheet, s);
-  const c = center(s);
-  const t = to();
-  const k = Math.max(0.012, 34 / Math.max(s.w, s.h));
-  const dx = t.x - c.x;
-  const dy = t.y - c.y;
-  return playOut(
-    sheet,
-    [
-      { transform: "translate(0,0) scale(1)", opacity: 0 },
-      { transform: "translate(0,0) scale(.985)", opacity: 1, offset: 0.18 },
-      { transform: `translate(${dx * 0.12}px,${dy * 0.12}px) scale(${Math.max(k, 0.8)})`, opacity: 1, offset: 0.4 },
-      { transform: `translate(${dx}px,${dy}px) scale(${k})`, opacity: 1, offset: 0.94 },
-      { transform: `translate(${dx}px,${dy}px) scale(${k * 0.4})`, opacity: 0 },
-    ],
-    { duration: o.ms ?? 760, easing: "cubic-bezier(.6,0,.3,1)" },
-  );
 }
 
 /** Press-and-hold marker */
@@ -216,12 +193,6 @@ export class Outline {
     this.r = to;
     setRect(this.el, to);
     anim.cancel();
-  }
-
-  shake() {
-    this.el.classList.add("bad");
-    play(this.el, [{ translate: "0" }, { translate: "-8px" }, { translate: "7px" }, { translate: "-3px" }, { translate: "0" }], { duration: 360, easing: EASE.inOut, fill: "none" });
-    return this;
   }
 
   /** fade: fade out; burst: scatter outward; sink: collapse inward */

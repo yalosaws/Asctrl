@@ -39,8 +39,9 @@ It is built around three ideas:
 | `agent-app/src-tauri/src/uia.rs` | UI Automation: scenes, stable references, change detection between readings, operating controls |
 | `agent-app/src-tauri/src/screen.rs` | Telling whether the screen reacted to an action and when it has settled |
 | `agent-app/src-tauri/src/browser_ext.rs` | The person's own browser through Asctrl's extension (`browser-extension/`): the relay the browser starts over native messaging, the named pipe it reaches the driver by, and registering it for Chrome, Edge and Brave |
-| `agent-app/src-tauri/src/safety.rs` | Effect levels (read, reversible, irreversible, external), the person's yes on this computer before what can't be taken back (`ASCTRL_CONFIRM`), and the action log (`%LOCALAPPDATA%\Asctrl\actions.log`) |
-| `agent-app/src-tauri/src/presence.rs` | Whose input is whose: Asctrl marks its own; any other mouse or keyboard input is a person, and actions that need the real mouse, keyboard or focus wait until they stop (`ASCTRL_YIELD_MAX`, `ASCTRL_NO_YIELD=1`) |
+| `agent-app/src-tauri/src/safety.rs` | Effect levels (read, reversible, irreversible, external) and the action log (`%LOCALAPPDATA%\Asctrl\actions.log`) |
+| `agent-app/src-tauri/src/presence.rs` | Whose input is whose: Asctrl marks its own; any other mouse or keyboard input is a person, and actions that need the real mouse, keyboard or focus wait until they stop (`ASCTRL_YIELD_MAX`, `ASCTRL_NO_YIELD=1`). Read from raw input, never from low-level hooks, so the person's mouse never waits on the driver |
+| `agent-app/src-tauri/src/input.rs` | Mouse and keyboard (SendInput). Every key and button Asctrl holds down is tracked and let go when an input is cut off, when the session ends and when the driver quits, so the person's mouse is never left in a drag |
 | `agent-app/src-tauri/src/events.rs` | The timeline: windows shown, hidden, destroyed, brought to the front, renamed, as Windows reports them (`ASCTRL_NO_EVENTS=1` turns it off) |
 | `agent-app/src-tauri/src/wgc.rs` | Capturing one window as it draws itself (Windows Graphics Capture), for reading a window others cover |
 | `agent-app/src-tauri/src/cdp.rs` | Asctrl's own browser (Chrome, else Edge, with a profile of its own) and the Chrome DevTools Protocol connection to it |
@@ -152,8 +153,8 @@ Then give the computer's 6-digit code: *Connect with code 123456 and …*. One c
 | Files | `read_file` / `write_file` / `edit_file` | Read (line numbers, in parts), write, exact replace. Detects UTF-8 / UTF-16 / ANSI and keeps encoding and line endings |
 | | `list_files` / `search_files` / `disk_usage` | A folder's contents, or with `pattern` the files below it by name; search contents by regex; where disk space goes |
 | | `upload_file` / `download_file` | Copy files between the MCP server's machine and the connected computer (≤ 20 MB) |
-| Privileges | `request_admin` | Ask the person at the computer for administrator rights; the driver restarts elevated and the console reconnects by itself |
-| | `restart_computer` | Restart with the person's consent; the driver reopens after sign-in with the same code |
+| Privileges | `request_admin` | Go straight to the Windows UAC prompt; the driver restarts elevated and the console reconnects by itself |
+| | `restart_computer` | Restart without asking; the driver reopens after sign-in with the same code |
 
 ### Targets
 
@@ -227,7 +228,7 @@ Debugging the real window:
 cd agent-app && npm run tauri dev
 ```
 
-UI debugging in the browser with demo data (add `?state=ready|admin|reboot|act|connected|offline|connecting` to the URL to switch state):
+UI debugging in the browser with demo data (add `?state=ready|connected|offline|connecting` to the URL to switch state):
 
 ```bash
 cd agent-app && npm run dev
@@ -241,7 +242,7 @@ cd agent-app && npm run dev
 
 `ASCTRL_FX_LOG=<file>` writes every animation event the driver sends to the overlay, with the screen layout, to a file; `node test/fxcheck.ts <log>...` plays such logs through the real overlay code in a headless Chrome and measures what the person would see: moves of the orb no change of program called for, frames redrawn within one window, pointers that blink, how late each press is drawn, frames left after their window went (`--check` fails over the limits; `test/fx/*.fxlog` are kept as its regression cases). `test/zorder.ps1` measures how long a window covers the overlay during a test.
 
-**Admin mode**: the AI calls `request_admin` → the person clicks Allow → Windows shows UAC and they click "Yes" → the driver restarts as administrator → the console reconnects automatically.
+**Admin mode**: the AI calls `request_admin` → Windows shows UAC and the person clicks "Yes" → the driver restarts as administrator → the console reconnects automatically.
 
 **Limitations**: without admin rights, windows running as administrator can't be read or controlled; the UAC prompt and the lock screen can't be clicked with any rights. Windows only.
 
@@ -249,7 +250,7 @@ cd agent-app && npm run dev
 
 Both run on `124.222.182.40` (`ssh yalosaws`), as user `ubuntu`.
 
-**Relay** — `ws://124.222.182.40:8787`, systemd service `asctrl-relay`, code in `~/asctrl-relay`. The console's `.mcp.json` and release builds of the driver point at it; it requires a token, read from `ASCTRL_RELAY_TOKEN` (falling back to a gitignored `.env` at the repo root, then the Windows user environment). To update it, copy `src/relay/server.ts` and `src/shared/protocol.ts` to the matching paths under `~/asctrl-relay/src/` and `sudo systemctl restart asctrl-relay`; drivers reconnect by themselves. Last updated 2026-11-17.
+**Relay** — `ws://124.222.182.40:8787`, systemd service `asctrl-relay`, code in `~/asctrl-relay`. The console's `.mcp.json` and release builds of the driver point at it; it requires a token, read from `ASCTRL_RELAY_TOKEN` (falling back to a gitignored `.env` at the repo root, then the Windows user environment). To update it, copy `src/relay/server.ts` and `src/shared/protocol.ts` to the matching paths under `~/asctrl-relay/src/` and `sudo systemctl restart asctrl-relay`; drivers reconnect by themselves. Last updated 2026-11-19, with the HTTP connector (the compact five tools: connect, query, act, exec, resume); the old files are kept in `~/asctrl-backup/`.
 
 **HTTP connector** — `https://asctrl.yalosaws.com/mcp`, systemd service `asctrl-mcp` on `127.0.0.1:8788`, code in `~/asctrl-mcp` (`package.json`, `package-lock.json`, `src/console/`, `src/shared/`, and the PNG and ICO files of `agent-app/src-tauri/icons/`). Its settings (`PUBLIC_URL`, `RELAY_URL`, `RELAY_TOKEN`, `NACE_API_KEY`, `ASCTRL_DATA_DIR`) are in `/etc/asctrl-mcp.env`, readable by root only; keys and tokens in `~/asctrl-mcp/data/auth.json`. TLS comes from the server's Caddy (`~/workspace/ops/config/Caddyfile`, the `asctrl.yalosaws.com` block; reload with `~/workspace/ops/bin/caddy reload --config` that file). To update, copy the changed files to the same paths under `~/asctrl-mcp/`, run `npm ci --omit=dev` there if the dependencies changed, and `sudo systemctl restart asctrl-mcp`. Keys:
 
@@ -339,7 +340,7 @@ An Electron program (VS Code, a copy of its own) worked through its pages:
 node test/electron.ts
 ```
 
-Programs' popup rules, waiting on a condition and answering a stuck step with code; skills kept by themselves, checked against the window, exported and put right; the person's yes before what can't be taken back; the decision model inside programs; the five tools:
+Programs' popup rules, waiting on a condition and answering a stuck step with code; skills kept by themselves, checked against the window, exported and put right; the action log; the decision model inside programs; the five tools:
 
 ```bash
 node test/l2.ts
@@ -434,18 +435,19 @@ Suggested order from here: settle `ext` and run the v0.2 baseline; have an agent
 
 Software like this is, structurally, remote-control software; the difference is **informed consent and visibility**.
 
-- A remote connection needs the code, which the person reads out themselves; administrator access and restarts must be confirmed at the computer
+- A remote connection needs the code, which the person reads out themselves. Nothing is confirmed in the app after that: restarts, deletions and messages go ahead at once, and only the Windows UAC prompt stands before administrator rights
 - The local link accepts only a process that can read the user's own `local.json`, and never a web page
-- A running session is visible at all times (gradient border around the screen, the orb showing each action) and can be ended from the orb (click it for the menu)
-- Quitting the driver disconnects. Left Alt + right Alt held together quits it at once, even if the overlay is stuck
+- The relay limits wrong codes and tokens: 5 per address and 60 in all per 10 minutes, after which technicians are turned away before their code is looked at (`test/relay-limit.ts`)
+- A running session is visible at all times (gradient border around the screen, the orb showing each action) and can be ended from the orb (click it for the menu). Ending it stops what is still running (a plan's remaining steps put no more input in), lets go of anything held down, and gives the computer a new code, so whoever was sent away can't come straight back with the old one
+- Quitting the driver disconnects. Left Alt + right Alt held together quits it at once, even if the overlay is stuck. Nothing else ends it: a close sent to the overlay window (Alt+F4 while it held the focus) is refused, and every start, quit and refused close is written with its reason to `%LOCALAPPDATA%\Asctrl\driver.log`
 - The relay can require a `RELAY_TOKEN`
 - The HTTP connector needs an access key, sent as a Bearer token or pasted once on its OAuth sign-in page (which names the app asking and where it will be signed in, and is rate limited). Only hashes of keys and tokens are stored; revoking a key ends its OAuth tokens too. A session can be used only with the key that opened it. It never offers `upload_file` / `download_file`, which would reach the server's own disk
 
 **Still to do before wide use:**
 
 - [ ] Put the relay behind an HTTPS reverse proxy and use `wss://` (currently plaintext)
-- [ ] Limit attempts / expire codes to prevent brute-force guessing
-- [ ] Optional confirmation at the computer for dangerous commands
-- [ ] Write an action log to disk
+- [x] Limit attempts to prevent brute-force guessing (codes still don't expire on their own)
+- [ ] Optional confirmation at the computer for dangerous commands (removed on purpose in November 2026: nothing asks)
+- [x] Write an action log to disk (`%LOCALAPPDATA%\Asctrl\actions.log`)
 - [ ] Code signing, to reduce SmartScreen / antivirus blocking
 - [ ] Client ID metadata documents (CIMD) on the connector's OAuth server, so busy clients stop registering a new client per sign-in

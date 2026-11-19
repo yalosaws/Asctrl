@@ -66,15 +66,11 @@ export async function runDemo(h: Hooks) {
   (window as unknown as Record<string, unknown>).demoFx = (tool: string, args = {}, geo = {}, ms = 800, ok = true, text = "", geoEnd = {}) =>
     sim(tool, args, geo, ms, ok, text, geoEnd);
 
-  const T = { techName: "Alex", timeoutSec: 120 };
   if (only) {
     const map: Record<string, unknown> = {
       connecting: { state: "connecting" },
       offline: { state: "offline", message: "IO error" },
       ready: { state: "ready", code: "482913" },
-      admin: { state: "admin", ...T },
-      reboot: { state: "reboot", ...T },
-      act: { state: "act", ...T, what: 'Click "Send" in "Inbox - Gmail"', level: "external" },
       connected: { state: "connected", techName: "Alex", code: "482913" },
     };
     h.render(map[only] ?? map.ready);

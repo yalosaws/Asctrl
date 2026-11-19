@@ -16,14 +16,86 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const BLOCKED: &str = "Input was blocked by Windows: the target window may be running as administrator (call request_admin, then reconnect), or the lock screen / UAC prompt is showing";
 
+/// A key or mouse button Asctrl pressed and has not released yet
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Held {
+    /// (virtual key, scan code, flags without KEYUP)
+    Key(u16, u16, u32),
+    /// The flag that releases it (MOUSEEVENTF_LEFTUP, ...)
+    Button(u32),
+}
+
+/// What Asctrl holds down right now. Something left held turns the person's mouse into a drag, or their clicks
+/// into ctrl- or shift-clicks, long after the AI is gone: it is let go when an input is cut off half way, when
+/// the session ends, and when the program quits.
+static HELD: std::sync::Mutex<Vec<Held>> = std::sync::Mutex::new(Vec::new());
+
+const BUTTON_PAIRS: [(MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS); 3] =
+    [(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP), (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP), (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP)];
+
+/// Note what the inputs Windows took pressed and released
+fn track(taken: &[INPUT]) {
+    let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    for i in taken {
+        if i.r#type == INPUT_KEYBOARD {
+            let k = unsafe { i.Anonymous.ki };
+            let h = Held::Key(k.wVk.0, k.wScan, k.dwFlags.0 & !KEYEVENTF_KEYUP.0);
+            held.retain(|x| *x != h);
+            if k.dwFlags.0 & KEYEVENTF_KEYUP.0 == 0 {
+                held.push(h);
+            }
+        } else if i.r#type == INPUT_MOUSE {
+            let f = unsafe { i.Anonymous.mi.dwFlags }.0;
+            for (down, up) in BUTTON_PAIRS {
+                if f & (down.0 | up.0) != 0 {
+                    held.retain(|x| *x != Held::Button(up.0));
+                }
+                if f & down.0 != 0 && f & up.0 == 0 {
+                    held.push(Held::Button(up.0));
+                }
+            }
+        }
+    }
+}
+
+fn send_raw(inputs: &[INPUT]) -> usize {
+    let n = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) } as usize;
+    track(&inputs[..n.min(inputs.len())]);
+    n
+}
+
 fn send(inputs: &[INPUT]) -> Result<(), String> {
     crate::presence::ours();
-    let n = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
+    let n = send_raw(inputs);
     // A press can bring its window to the front, above the overlay: have it checked at once
     if inputs.iter().any(|i| i.r#type == INPUT_MOUSE && unsafe { i.Anonymous.mi.dwFlags }.0 & (MOUSEEVENTF_LEFTDOWN.0 | MOUSEEVENTF_RIGHTDOWN.0 | MOUSEEVENTF_MIDDLEDOWN.0) != 0) {
         crate::overlay::poke();
     }
-    if n as usize == inputs.len() { Ok(()) } else { Err(BLOCKED.into()) }
+    if n == inputs.len() {
+        Ok(())
+    } else {
+        // Cut off half way (Windows refused the rest): whatever went down is let go, rather than left held
+        release_all();
+        Err(BLOCKED.into())
+    }
+}
+
+/// Let go of every key and button Asctrl still holds down. What Windows refuses to take now stays on the list,
+/// for the next try.
+pub fn release_all() {
+    let held: Vec<Held> = HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if held.is_empty() {
+        return;
+    }
+    crate::presence::ours();
+    // Keys in the reverse order they went down (modifiers last), then the buttons
+    for h in held.iter().rev() {
+        let up = match *h {
+            Held::Key(vk, scan, flags) => key(VIRTUAL_KEY(vk), scan, KEYBD_EVENT_FLAGS(flags) | KEYEVENTF_KEYUP),
+            Held::Button(up) => mouse(MOUSE_EVENT_FLAGS(up), 0),
+        };
+        send_raw(&[up]);
+    }
 }
 
 fn mouse(flags: MOUSE_EVENT_FLAGS, data: i32) -> INPUT {
@@ -107,7 +179,7 @@ pub fn elevation_block(hwnd: HWND, what: &str) -> Result<(), String> {
     match window_elevated(hwnd) {
         Some((true, name)) => Err(format!(
             "{name} is running as administrator, so Windows blocks {what} from the assist app. \
-             Call request_admin (the user approves), then connect again with the same code, and retry."
+             Call request_admin (Windows shows its own confirmation), then connect again with the same code, and retry."
         )),
         _ => Ok(()),
     }
@@ -198,8 +270,8 @@ pub fn click(x: i32, y: i32, button: &str, count: u32, modifiers: &str) -> Resul
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    if !mods.is_empty() {
-        let _ = send(&keys_up(&mods));
+    if !mods.is_empty() && send(&keys_up(&mods)).is_err() {
+        release_all();
     }
     *LAST_CLICK.lock().unwrap() = Some((std::time::Instant::now(), x, y, button.to_string()));
     r
@@ -526,5 +598,30 @@ pub fn hold_keys(combo: &str, ms: u64) -> Result<(), String> {
     check_target(None)?;
     send(&keys_down(&keys))?;
     std::thread::sleep(Duration::from_millis(ms));
-    send(&keys_up(&keys))
+    let r = send(&keys_up(&keys));
+    if r.is_err() {
+        release_all();
+    }
+    r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_goes_down_is_kept_until_it_comes_up() {
+        HELD.lock().unwrap().clear();
+        let shift = key(VK_LSHIFT, 0x2a, KEYBD_EVENT_FLAGS(0));
+        let a = key(VIRTUAL_KEY(0x41), 0x1e, KEYBD_EVENT_FLAGS(0));
+        // Cut off after shift and A went down, before either came up
+        track(&[shift, a]);
+        assert_eq!(HELD.lock().unwrap().len(), 2);
+        track(&[key(VIRTUAL_KEY(0x41), 0x1e, KEYEVENTF_KEYUP)]);
+        assert_eq!(*HELD.lock().unwrap(), vec![Held::Key(VK_LSHIFT.0, 0x2a, 0)]);
+        track(&[mouse(MOUSEEVENTF_LEFTDOWN, 0)]);
+        assert!(HELD.lock().unwrap().contains(&Held::Button(MOUSEEVENTF_LEFTUP.0)));
+        track(&[mouse(MOUSEEVENTF_LEFTUP, 0), key(VK_LSHIFT, 0x2a, KEYEVENTF_KEYUP)]);
+        assert!(HELD.lock().unwrap().is_empty());
+    }
 }

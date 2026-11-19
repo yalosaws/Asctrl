@@ -347,6 +347,9 @@ fn watch_quit_keys() {
                 while (down(VK_LMENU.0) || down(VK_RMENU.0)) && start.elapsed() < Duration::from_millis(1500) {
                     std::thread::sleep(Duration::from_millis(10));
                 }
+                crate::input::release_all();
+                crate::note_exit("quitting: both Alt keys were held");
+                crate::link::forget_local();
                 std::process::exit(0);
             }
         }

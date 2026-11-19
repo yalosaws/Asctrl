@@ -71,8 +71,20 @@ fn file() -> std::path::PathBuf {
 /// Read, change and write the list as one step
 static LOCK: Mutex<()> = Mutex::new(());
 
+/// The skills kept. No file yet: none. A file that can't be read as skills is an error, so nothing is ever
+/// written over it (an empty list written back would lose every skill in it).
+fn load_checked() -> Result<Vec<Skill>, String> {
+    let f = file();
+    match std::fs::read_to_string(&f) {
+        Ok(s) if s.trim().is_empty() => Ok(vec![]),
+        Ok(s) => serde_json::from_str(&s).map_err(|e| format!("{} can't be read as skills ({e}); it is left as it is, and nothing is kept until it is fixed or moved away", f.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) => Err(format!("could not read {}: {e}", f.display())),
+    }
+}
+
 fn load() -> Vec<Skill> {
-    std::fs::read_to_string(file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    load_checked().unwrap_or_default()
 }
 
 fn store(all: &[Skill]) -> Result<(), String> {
@@ -87,7 +99,7 @@ fn store(all: &[Skill]) -> Result<(), String> {
 
 fn change<R>(f: impl FnOnce(&mut Vec<Skill>) -> R) -> Result<R, String> {
     let _one = LOCK.lock().unwrap();
-    let mut all = load();
+    let mut all = load_checked()?;
     let r = f(&mut all);
     store(&all)?;
     Ok(r)

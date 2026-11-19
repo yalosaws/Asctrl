@@ -44,7 +44,7 @@ function resolveRelayToken(): string | undefined {
 
 const CONNECT_LOCAL = "1. connect (no arguments = this computer; a 6-digit code = a remote one).";
 const CONNECT_HOSTED =
-  "1. connect with the 6-digit code shown in the Asctrl app on the computer to drive (ask the user for it if you don't have it); the user clicks Allow there.";
+  "1. connect with the 6-digit code shown in the Asctrl app on the computer to drive (ask the user for it if you don't have it).";
 
 /** In compact mode: how the tools named above are reached */
 const COMPACT_NOTE = `
@@ -218,7 +218,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
     "connect",
     {
       description: hosted
-        ? "Connect to a computer: the one showing this 6-digit code in its Asctrl app (ask the user for it). The user is asked to allow it there. " +
+        ? "Connect to a computer: the one showing this 6-digit code in its Asctrl app (ask the user for it). " +
           "When reconnecting after a restart, pass waitSec to keep retrying until the driver is back."
         : "Connect to a computer. Without arguments: this computer, directly (the driver app is started if it is not running). " +
           "With code: a remote computer showing that 6-digit code, through the relay; it connects right away. " +
@@ -372,8 +372,8 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
         "web pages, games, canvases and plain coordinates get a real mouse click (the control is scrolled into view and its window brought forward first). " +
         "A click by x,y is refused, with a fresh screenshot, if another window has since appeared over that point or the window was moved away or resized; if the window only moved, the click moves with it. " +
         "The reply says whether the screen reacted and what changed, so a miss shows at once. " +
-        "What sends something out (Send, Submit, Pay, Place order) or can't be undone (Delete, Discard) may wait for the person at the computer to allow it, as set on that computer; " +
-        "a refusal says nothing was done. effect declares such a click when its words don't say so.",
+        "What sends something out (Send, Submit, Pay, Place order) or can't be undone (Delete, Discard) goes ahead at once, with no question at the computer. " +
+        "effect records such a click in the action log when its words don't say so.",
       inputSchema: {
         ...pointing,
         effect: z.enum(["reversible", "irreversible", "external"]).optional().describe("What the click does, when its words don't say: irreversible (can't be undone) or external (sends, pays, publishes). Only raises the level the computer works out itself"),
@@ -753,7 +753,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
     "request_admin",
     {
       description:
-        "Request administrator rights. The user clicks Allow in the app, then \"Yes\" in the Windows confirmation; the driver then restarts as administrator " +
+        "Request administrator rights. The user clicks \"Yes\" in the Windows confirmation; the driver then restarts as administrator " +
         "and this tool reconnects to it automatically (takes about 5-15 seconds). " +
         "Call it whenever the task needs admin rights: repairing system files, managing services, installing software, " +
         "or when a tool reports that the target window runs as administrator (Windows blocks input to it until the driver is elevated).",
@@ -785,7 +785,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
     "restart_computer",
     {
       description:
-        "Restart the computer. The user is asked to agree in the app first (and reminded to save files), then it counts down and restarts; after restart and sign-in the driver opens automatically with the same code. " +
+        "Restart the computer. It counts down and restarts without asking, so unsaved work is lost; after restart and sign-in the driver opens automatically with the same code. " +
         "Then reconnect with connect (waitSec: 300 recommended). " +
         "prepareOnly: only register \"open automatically at next sign-in\" without restarting (for installers that restart, or a manual restart by the user); cancel: cancel a pending restart.",
       inputSchema: {
@@ -939,7 +939,12 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
         if (!r.ok || !r.file) return toContent(r);
         let dest = path.resolve(localPath);
         if (/[\\/]$/.test(localPath) || (existsSync(dest) && statSync(dest).isDirectory())) {
-          dest = path.join(dest, r.file.name);
+          // The name comes from the other computer: only its last part, so it can't reach outside this folder
+          const name = path.basename(String(r.file.name).replace(/\\/g, "/"));
+          if (!name || name === "." || name === "..") throw new Error(`The file's name "${r.file.name}" can't be used; give a file path instead of a folder`);
+          const inside = path.join(dest, name);
+          if (path.dirname(inside) !== dest) throw new Error(`The file's name "${r.file.name}" can't be used; give a file path instead of a folder`);
+          dest = inside;
         }
         await mkdir(path.dirname(dest), { recursive: true });
         const buf = Buffer.from(r.file.data, "base64");

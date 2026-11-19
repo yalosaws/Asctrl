@@ -1,5 +1,4 @@
-//! L5: what an action does to the world, asking the person at the computer before what can't be taken back, and
-//! a record of what was done.
+//! L5: what an action does to the world, and a record of what was done.
 //!
 //! Each action has an effect level:
 //! - read: looks only (observe, screenshot, read_text, wait_for, ...).
@@ -9,17 +8,13 @@
 //!
 //! The level comes from what the action is aimed at (its target's words: the text named, or the name of the
 //! control a reference stands for) and from what the caller declares (`effect`). A declaration can only raise
-//! the level, never lower it: the AI can't talk its way past the check. Besides clicks:
+//! the level, never lower it. Besides clicks:
 //! - A PowerShell command that deletes, formats, uninstalls, shuts down or changes the system's protection is
 //!   irreversible; one that sends mail or posts to the web is external.
 //! - Enter (typed with the text, or pressed) in a messaging program or in a message field sends: external.
 //!
-//! The levels that need the person's yes are set on this computer (`ASCTRL_CONFIRM`: "off", "external", or the
-//! default "external,irreversible"), never by the caller. Asking shows on the overlay, with what is about to be
-//! done; no answer in time is a no, and a no means nothing was done.
-//!
 //! Every action (not the looking) is appended to %LOCALAPPDATA%\Asctrl\actions.log, one JSON line each: when, who
-//! drove, the tool, what it aimed at, its level, whether the person was asked and said yes, and how it went.
+//! drove, the tool, what it aimed at, its level, and how it went.
 //! Typed text and values are recorded by their length only.
 
 use crate::tools::Output;
@@ -159,52 +154,8 @@ pub fn level(tool: &str, args: &Value) -> (Level, String) {
     (l, what)
 }
 
-/// The levels that need the person's yes, as set on this computer
-fn needs_yes(l: Level) -> bool {
-    let set = std::env::var("ASCTRL_CONFIRM").unwrap_or_else(|_| "external,irreversible".into()).to_lowercase();
-    if set.trim() == "off" || set.trim().is_empty() {
-        return false;
-    }
-    set.split(',').any(|s| Level::parse(s.trim()) == Some(l))
-}
-
-/// Before an action: ask the person when its level needs it. Some(reply) when it must not go ahead.
-pub async fn gate(tool: &str, args: &Value) -> (Level, String, Option<bool>, Option<Output>) {
-    let (l, what) = level(tool, args);
-    if !needs_yes(l) {
-        return (l, what, None, None);
-    }
-    let shown = describe(tool, args, &what);
-    let yes = crate::confirm_act(&shown, l.as_str()).await;
-    if yes {
-        return (l, what, Some(true), None);
-    }
-    let why = if l == Level::External { "it sends something out to someone else" } else { "it can't be undone" };
-    let mut o = crate::tools::fail(format!(
-        "The person at the computer did not allow this ({why}): {shown}. Nothing was done. Ask them, or do something else."
-    ));
-    o.data = Some(json!({ "refused": true, "effect": l.as_str() }));
-    (l, what, Some(false), Some(o))
-}
-
-/// What is about to be done, in words for the person at the computer
-fn describe(tool: &str, args: &Value, what: &str) -> String {
-    let win = args.get("window").and_then(|w| w.as_str().map(str::to_string).or_else(|| w.as_i64().map(|h| crate::winmgr::title_of(h as isize)))).unwrap_or_default();
-    let in_win = if win.is_empty() { String::new() } else { format!(" in \"{}\"", crate::uia::clip(&win, 60)) };
-    let verb = match tool {
-        "click" | "mouse" => "Click",
-        "element_action" => "Press",
-        "type_text" => "Type and press Enter in",
-        "set_value" => "Set",
-        "press_keys" => "Press Enter",
-        "run_powershell" => "Run the command",
-        _ => tool,
-    };
-    if what.is_empty() { format!("{verb}{in_win}") } else { format!("{verb} \"{}\"{in_win}", crate::uia::clip(what, 80)) }
-}
-
 /// After an action: one line in the log
-pub fn record(tool: &str, args: &Value, l: Level, what: &str, asked: Option<bool>, out: &Output) {
+pub fn record(tool: &str, args: &Value, l: Level, what: &str, out: &Output) {
     if l == Level::Read {
         return;
     }
@@ -241,7 +192,6 @@ pub fn record(tool: &str, args: &Value, l: Level, what: &str, asked: Option<bool
         "aimed": what,
         "args": a,
         "effect": l.as_str(),
-        "asked": asked,
         "ok": out.ok,
         "channel": out.data.as_ref().and_then(|d| d.get("channel")).cloned(),
         "result": result,

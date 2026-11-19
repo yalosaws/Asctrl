@@ -135,10 +135,7 @@ pub(super) async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
                 return fail("File is too large; the limit is 20 MB");
             }
             blocking(move || {
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
-                }
-                std::fs::write(&path, &bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+                files::write_whole(&path, &bytes)?;
                 Ok(format!("Saved to {} ({} bytes)", path.display(), bytes.len()))
             })
             .await

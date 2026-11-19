@@ -50,33 +50,5 @@
         <button class="btn ghost" id="btn-quit">Quit</button>
       </div>
     </div>
-
-    <!-- Question: administrator access / restart -->
-    <div class="panel ask" id="consent" role="dialog" aria-modal="true" aria-labelledby="consent-title" hidden>
-      <h2 id="consent-title"><b id="consent-name"></b> <span id="consent-ask"></span></h2>
-      <p class="sheet-sub" id="consent-sub"></p>
-      <ul class="perm" id="perm-admin" hidden>
-        <li>Repair system files and manage services</li>
-        <li>Install or uninstall software</li>
-        <li>Change system settings</li>
-      </ul>
-      <ul class="perm" id="perm-reboot" hidden>
-        <li>Save any open documents and close pages you need first</li>
-        <li>The computer will restart in a few seconds</li>
-        <li>This app reopens after the restart with the same code</li>
-      </ul>
-      <ul class="perm" id="perm-act" hidden>
-        <li id="act-what"></li>
-      </ul>
-      <p class="sheet-note" id="act-note" hidden>If you don't answer, it is not done.</p>
-      <p class="sheet-note" id="admin-note" hidden>After you click Allow, Windows will ask for confirmation. Click "Yes" and the app will reopen by itself.</p>
-      <p class="sheet-note" id="reboot-note" hidden>If Windows asks for your password after the restart, sign in as usual and they will reconnect.</p>
-      <div class="timer"><div class="timer-bar" id="timer-bar"></div></div>
-      <p class="timer-text">Declining automatically in <span id="timer-sec">120</span> s</p>
-      <div class="actions">
-        <button class="btn ghost" id="btn-deny">Deny</button>
-        <button class="btn primary" id="btn-allow">Allow</button>
-      </div>
-    </div>
   </body>
 </html>

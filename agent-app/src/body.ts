@@ -39,15 +39,8 @@ const ptrLayer = document.createElementNS(NS, "svg");
 ptrLayer.id = "ptrs";
 ptrLayer.innerHTML =
   "<defs>" +
-  '<filter id="goo-f"><feGaussianBlur in="SourceGraphic" stdDeviation="6"/><feColorMatrix values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 20 -8"/></filter>' +
   '<path id="ptr-probe"/></defs>';
 document.body.append(ptrLayer);
-
-/** The splitting happens in a box just big enough for it, so the liquid filter never covers the whole screen */
-const goo = document.createElement("div");
-goo.id = "goo";
-goo.hidden = true;
-document.body.append(goo);
 
 // ---- Tempo ----
 // The actions set the pace, never the animation. One action now and then plays at the full, unhurried pace;
@@ -511,93 +504,7 @@ export const body = {
   veil(on: boolean) {
     root.style.visibility = on ? "hidden" : "";
   },
-
-  /** The ball divides into one drop per target; each drop flies to its target and pours into a pointer there */
-  async split(targets: Pt[]): Promise<Pointer[]> {
-    const o = this.pos;
-    const box = gooBox([o, ...targets.map((t) => ({ x: t.x + DROP_AT.x, y: t.y + DROP_AT.y }))]);
-    root.style.visibility = "hidden";
-    const blob = gooDot("goo-blob", o, box);
-    blob.animate([{ scale: 1 }, { scale: 0.55, offset: 0.35 }, { scale: 0 }], { duration: (640 + targets.length * 80) / tempo(), easing: "cubic-bezier(.5,0,.3,1)", fill: "forwards" });
-    const list = await Promise.all(
-      targets.map(async (t, i) => {
-        const d = gooDot("goo-drop", o, box, `var(--ptr-${(i % 4) + 1})`);
-        const end = { x: t.x + DROP_AT.x, y: t.y + DROP_AT.y };
-        // Each drop curves out its own way, so several never travel on top of each other
-        const bend = (i - (targets.length - 1) / 2) * 40;
-        const nx = -(end.y - o.y);
-        const ny = end.x - o.x;
-        const nl = Math.hypot(nx, ny) || 1;
-        const c = { x: (o.x + end.x) / 2 + (nx / nl) * bend, y: (o.y + end.y) / 2 + (ny / nl) * bend - 20 };
-        await beat(i * 90);
-        const ms = Math.min(620, Math.max(340, Math.hypot(end.x - o.x, end.y - o.y) * 0.7));
-        await tween(ms, (e) => {
-          const u = 1 - e;
-          moveDot(d, { x: u * u * o.x + 2 * u * e * c.x + e * e * end.x, y: u * u * o.y + 2 * u * e * c.y + e * e * end.y }, box);
-        });
-        const p = new Pointer(t.x, t.y, i);
-        d.remove();
-        await p.arrow();
-        return p;
-      }),
-    );
-    blob.remove();
-    goo.hidden = true;
-    return list;
-  },
-
-  /** Every pointer turns back into a drop and they all run together into one ball at `at` */
-  async merge(list: Pointer[], at: Pt) {
-    await Promise.all(list.map((p) => p.drop()));
-    const box = gooBox([at, ...list.map((p) => ({ x: p.x + DROP_AT.x, y: p.y + DROP_AT.y }))]);
-    const blob = gooDot("goo-blob", at, box);
-    blob.style.scale = "0";
-    await Promise.all(
-      list.map(async (p, i) => {
-        const s = { x: p.x + DROP_AT.x, y: p.y + DROP_AT.y };
-        const d = gooDot("goo-drop", s, box, `var(--ptr-${(i % 4) + 1})`);
-        p.remove();
-        await beat(i * 70);
-        const ms = Math.min(560, Math.max(320, Math.hypot(at.x - s.x, at.y - s.y) * 0.6));
-        await tween(ms, (e) => {
-          moveDot(d, { x: s.x + (at.x - s.x) * e, y: s.y + (at.y - s.y) * e }, box);
-          blob.style.scale = String(Math.max(Number(blob.style.scale) || 0, Math.min(1, (i + e) / list.length)));
-        });
-        d.remove();
-      }),
-    );
-    this.place({ cx: at.x, cy: at.y, ...BALL });
-    this.mode("ball");
-    root.style.visibility = "";
-    blob.remove();
-    goo.hidden = true;
-    this.kick("w", 260);
-    this.kick("h", -200);
-  },
 };
-
-function gooBox(pts: Pt[]): R {
-  const pad = 40;
-  const x = Math.min(...pts.map((p) => p.x)) - pad;
-  const y = Math.min(...pts.map((p) => p.y)) - pad;
-  const r = { x, y, w: Math.max(...pts.map((p) => p.x)) + pad - x, h: Math.max(...pts.map((p) => p.y)) + pad - y };
-  Object.assign(goo.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
-  goo.hidden = false;
-  return r;
-}
-
-function gooDot(cls: string, p: Pt, box: R, color?: string) {
-  const d = document.createElement("i");
-  d.className = cls;
-  if (color) d.style.background = color;
-  goo.append(d);
-  moveDot(d, p, box);
-  return d;
-}
-
-function moveDot(d: HTMLElement, p: Pt, box: R) {
-  d.style.transform = `translate(${(p.x - box.x).toFixed(1)}px, ${(p.y - box.y).toFixed(1)}px)`;
-}
 
 // ---- The lane: one body, so one job at a time ----
 // Jobs run in the order the tools ran. A job that holds its shape until a result comes back gives way as soon

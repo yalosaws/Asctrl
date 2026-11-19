@@ -140,6 +140,39 @@ fn sniff_enc(path: &Path) -> Option<Enc> {
     }
 }
 
+/// Write `bytes` to `path` without ever leaving it half written: into a new file beside it first, then swapped
+/// in, keeping the old file's attributes and permissions. A file that is never written whole (the disk is
+/// full) leaves the old one as it was. Only when the swap itself is refused (another program holds the file
+/// open) is it written in place.
+pub fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use windows::Win32::Storage::FileSystem::{REPLACE_FILE_FLAGS, ReplaceFileW};
+    use windows::core::{HSTRING, PCWSTR};
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.asctrl-{}.tmp", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        // No room for a copy beside it, or the folder can't take new files: the file itself may still take it
+        return match e.kind() {
+            std::io::ErrorKind::PermissionDenied => std::fs::write(path, bytes).map_err(|e| format!("Failed to write {}: {e}", path.display())),
+            _ => Err(format!("Failed to write {} (it was left as it was): {e}", path.display())),
+        };
+    }
+    let swapped = if path.exists() {
+        // REPLACEFILE_IGNORE_MERGE_ERRORS
+        unsafe { ReplaceFileW(&HSTRING::from(path.as_os_str()), &HSTRING::from(tmp.as_os_str()), PCWSTR::null(), REPLACE_FILE_FLAGS(2), None, None) }.is_ok()
+    } else {
+        std::fs::rename(&tmp, path).is_ok()
+    };
+    if swapped {
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::write(path, bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+}
+
 fn read_text(path: &Path) -> Result<(String, Enc), String> {
     let m = std::fs::metadata(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     if m.is_dir() {
@@ -185,10 +218,7 @@ pub fn write(path: &Path, content: &str, enc: Option<Enc>) -> Result<String, Str
         None => sniff_enc(path).unwrap_or(Enc::Utf8),
     };
     let bytes = encode(content, enc)?;
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    std::fs::write(path, &bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    write_whole(path, &bytes)?;
     Ok(format!("Wrote {} ({}, {} bytes)", path.display(), enc.name(), bytes.len()))
 }
 
@@ -212,7 +242,7 @@ pub fn edit(path: &Path, old: &str, new: &str, replace_all: bool) -> Result<Stri
         return Err(format!("oldText appears {n} times in the file. Include more context to make it unique, or pass replaceAll: true"));
     }
     let out = if replace_all { text.replace(&old, &new) } else { text.replacen(&old, &new, 1) };
-    std::fs::write(path, encode(&out, enc)?).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    write_whole(path, &encode(&out, enc)?)?;
     Ok(format!("Edited {}: {} replacement(s) ({})", path.display(), if replace_all { n } else { 1 }, enc.name()))
 }
 
@@ -617,6 +647,18 @@ mod tests {
         assert_eq!(sniff_enc(&p), Some(Enc::Utf8));
         std::fs::write(&p, [0x61, 0xD6, 0xD0, 0xCE, 0xC4]).unwrap(); // GBK bytes, invalid as UTF-8
         assert_eq!(sniff_enc(&p), Some(Enc::Ansi));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_whole_write_replaces_the_file_and_leaves_nothing_beside_it() {
+        let dir = std::env::temp_dir().join(format!("asctrl-whole-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("f.txt");
+        write_whole(&p, b"one").unwrap();
+        write_whole(&p, b"two, longer").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"two, longer");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temporary file left");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -747,7 +747,7 @@ pub(super) async fn open(ctx: &Ctx, url: &str, theirs: bool) -> Output {
         Ok(s) => s,
         Err(e) => return fail(e),
     };
-    let tab = Tab { id: id.clone(), session, title: String::new(), url: url.into() };
+    let tab = Tab { id: id.clone(), session };
     // Loaded: the document says so (its load event may have come before the session was there to hear it)
     let deadline = Instant::now() + LOAD_MAX;
     let mut loaded = false;

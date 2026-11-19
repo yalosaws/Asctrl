@@ -19,7 +19,7 @@ import path from "node:path";
 import { TechClient } from "../../src/console/tech-client.ts";
 import type { ObserveData } from "../../src/shared/protocol.ts";
 import { site } from "./site.ts";
-import { TASKS, prepare, ps, type Area, type Task } from "./tasks.ts";
+import { TASKS, prepare, ps, type Area } from "./tasks.ts";
 
 const here = path.resolve(import.meta.dirname, "../..");
 const arg = (name: string) => {
@@ -72,7 +72,7 @@ interface Result {
 }
 
 /** Runs one task in headless Claude Code and reads its stream of events */
-function agentRun(claude: string, t: Task, prompt: string, cwd: string, mcpConfig: string): Promise<Omit<Result, "id" | "area" | "ok" | "why">> {
+function agentRun(claude: string, prompt: string, cwd: string, mcpConfig: string): Promise<Omit<Result, "id" | "area" | "ok" | "why">> {
   // The tools that let it skip the apps are not offered at all (ASCTRL_TOOLS_DENY in the MCP config); an older
   // checkout (--root) without that still has them refused here by name
   const tools = surface === "full"
@@ -214,7 +214,7 @@ try {
     const popup = popupEvery > 0 && !dry && n % popupEvery === popupEvery - 1 ? popupDuring(8000 + ((n * 2900) % 9000)) : null;
     const r = dry
       ? { answer: "", reply: "", ms: 0, calls: 0, turns: 0, tokens: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 }, cost: 0, tools: {}, model: "", stop: "dry" }
-      : await agentRun(claude, t, prompt, c.work, mcpConfig);
+      : await agentRun(claude, prompt, c.work, mcpConfig);
     const pop = popup?.();
     // Checked once what the task opened is closed again: the programs let go of the files they saved
     await cleanUp(before).catch((e) => console.error(`  clean-up: ${(e as Error).message}`));

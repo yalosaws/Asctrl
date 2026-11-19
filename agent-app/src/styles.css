@@ -11,7 +11,6 @@
   --g5: #5be0c8;
   --aurora: linear-gradient(90deg, var(--g1), var(--g2), var(--g3), var(--g4));
   --loop: var(--g1), var(--g2), var(--g3), var(--g4), var(--g5), var(--g1);
-  --green: #5be0c8;
   --red: #ff5a6e;
   --amber: #ffb86b;
   /* The pointers: solid colours, one per pointer, taken in turn. Four hues of the aurora (blue, violet, pink,
@@ -615,33 +614,6 @@ body.demo .fake-taskbar {
 .ptr-body.c3 {
   fill: var(--ptr-4);
 }
-#goo {
-  position: fixed;
-  z-index: 21;
-  pointer-events: none;
-  filter: url(#goo-f);
-}
-#goo[hidden] {
-  display: none;
-}
-.goo-blob,
-.goo-drop {
-  position: absolute;
-  left: 0;
-  top: 0;
-  border-radius: 50%;
-}
-.goo-blob {
-  width: 32px;
-  height: 32px;
-  margin: -16px 0 0 -16px;
-  background: conic-gradient(var(--loop));
-}
-.goo-drop {
-  width: 20px;
-  height: 20px;
-  margin: -10px 0 0 -10px;
-}
 
 #orb-hit {
   position: absolute;
@@ -798,81 +770,6 @@ body:not([data-state="connected"]) #btn-end {
   display: none;
 }
 
-/* ---------------- Consent ---------------- */
-
-.ask {
-  width: 400px;
-  padding: 24px 24px 20px;
-}
-.ask h2 {
-  margin: 0 0 6px;
-  font-size: 20px;
-  line-height: 1.35;
-}
-.ask h2 b {
-  color: var(--amber);
-}
-.sheet-sub {
-  margin: 0 0 6px;
-  color: var(--ink-2);
-  font-size: 14px;
-}
-.perm {
-  margin: 0 0 8px;
-  padding: 0;
-  list-style: none;
-}
-.perm li {
-  position: relative;
-  padding: 5px 0 5px 22px;
-  font-size: 15px;
-}
-.perm li::before {
-  content: "";
-  position: absolute;
-  left: 4px;
-  top: 12px;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--g3), var(--g4));
-}
-.sheet-note {
-  margin: 6px 0 10px;
-  padding: 9px 12px;
-  border-radius: 10px;
-  font-size: 13px;
-  color: #ffe0ad;
-  background: rgba(255, 184, 107, 0.1);
-}
-.timer {
-  height: 4px;
-  margin-top: 10px;
-  border-radius: 4px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.08);
-}
-.timer-bar {
-  height: 100%;
-  background: linear-gradient(90deg, var(--g3), var(--g4));
-  transform-origin: left;
-  transition: transform 0.2s linear;
-}
-.timer-text {
-  margin: 6px 0 14px;
-  font-size: 12px;
-  color: var(--ink-3);
-}
-.actions {
-  display: flex;
-  gap: 10px;
-}
-.actions .btn {
-  flex: 1;
-  padding: 13px;
-  font-size: 16px;
-}
-
 /* ---------------- Light primitives ---------------- */
 
 .t-aurora {
@@ -947,16 +844,6 @@ body:not([data-state="connected"]) #btn-end {
   height: 120%;
   background: linear-gradient(90deg, transparent, rgba(91, 140, 255, 0.2), rgba(179, 107, 255, 0.3), rgba(255, 122, 182, 0.3), rgba(255, 184, 107, 0.2), transparent);
   will-change: transform;
-}
-.photo {
-  position: absolute;
-  border-radius: 12px;
-  opacity: 0;
-  background: linear-gradient(135deg, rgba(91, 140, 255, 0.22), rgba(179, 107, 255, 0.16) 45%, rgba(255, 122, 182, 0.22));
-  box-shadow:
-    inset 0 0 0 2px rgba(255, 255, 255, 0.86),
-    0 0 30px rgba(150, 120, 255, 0.45);
-  will-change: transform, opacity;
 }
 /* A band of light that crosses a panel once as it opens */
 .sheen {
@@ -1066,12 +953,6 @@ body:not([data-state="connected"]) #btn-end {
 }
 .ol.thin .ol-glow {
   opacity: 0.3;
-}
-.ol.bad .ol-ring {
-  background: var(--red);
-}
-.ol.bad .ol-glow {
-  box-shadow: 0 0 22px 1px rgba(255, 90, 110, 0.7);
 }
 .ol-comet {
   position: absolute;

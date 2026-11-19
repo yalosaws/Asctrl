@@ -18,6 +18,14 @@ const PING_MS = 30_000;
 const DEAD_MS = 90_000;
 /** Names are shown to the person on the consent card; keep them short */
 const MAX_NAME = 64;
+/**
+ * Codes are 6 digits, and a driver lets in whoever has its code: wrong guesses are limited, from one address
+ * and from everyone together, so a million codes can't be tried. Over the limit a technician is turned away
+ * before its code is even looked at.
+ */
+const MISS_WINDOW_MS = 10 * 60_000;
+const MISSES_PER_ADDRESS = 5;
+const MISSES_ALL = 60;
 
 interface Room {
   agent: WebSocket;
@@ -47,8 +55,24 @@ export function startRelay(port = PORT) {
   const lastSeen = new WeakMap<WebSocket, number>();
   const wss = new WebSocketServer({ port, maxPayload: 32 * 1024 * 1024 });
 
+  // Wrong codes and tokens: when, by address, and all of them
+  const misses = new Map<string, number[]>();
+  let allMisses: number[] = [];
+  const recent = (ts: number[]) => ts.filter((t) => t > Date.now() - MISS_WINDOW_MS);
+  const turnedAway = (addr: string) => recent(misses.get(addr) ?? []).length >= MISSES_PER_ADDRESS || recent(allMisses).length >= MISSES_ALL;
+  const missed = (addr: string) => {
+    misses.set(addr, [...recent(misses.get(addr) ?? []), Date.now()]);
+    allMisses = [...recent(allMisses), Date.now()];
+  };
+
   const heartbeat = setInterval(() => {
     const now = Date.now();
+    for (const [addr, ts] of misses) {
+      const left = recent(ts);
+      if (left.length) misses.set(addr, left);
+      else misses.delete(addr);
+    }
+    allMisses = recent(allMisses);
     for (const ws of wss.clients) {
       if (now - (lastSeen.get(ws) ?? now) > DEAD_MS) ws.terminate();
       else if (ws.readyState === WebSocket.OPEN) ws.ping();
@@ -56,7 +80,11 @@ export function startRelay(port = PORT) {
   }, PING_MS);
   wss.on("close", () => clearInterval(heartbeat));
 
-  wss.on("connection", (ws) => {
+  wss.on("connection", (ws, req) => {
+    // Behind a TLS proxy on this machine (wss://), the address is the one the proxy passes on
+    const direct = req.socket.remoteAddress ?? "";
+    const forwarded = String(req.headers["x-forwarded-for"] ?? "").split(",")[0].trim();
+    const addr = forwarded && /^(127\.|::1$|::ffff:127\.)/.test(direct) ? forwarded : direct;
     let role: "agent" | "tech" | null = null;
     let code = "";
     const seen = () => lastSeen.set(ws, Date.now());
@@ -86,12 +114,19 @@ export function startRelay(port = PORT) {
           return;
         }
         if (msg.type === "tech_hello") {
+          if (turnedAway(addr)) {
+            send(ws, { type: "error", message: "Too many wrong codes lately; try again in a few minutes" });
+            log(`technician from ${addr} turned away: too many wrong codes`);
+            return ws.close();
+          }
           if (RELAY_TOKEN && !tokenMatches(msg.token)) {
+            missed(addr);
             send(ws, { type: "error", message: "Invalid token" });
             return ws.close();
           }
           const room = typeof msg.code === "string" ? rooms.get(msg.code) : undefined;
           if (!room) {
+            missed(addr);
             send(ws, { type: "error", message: "No agent with this code; make sure the app is open on their computer" });
             return ws.close();
           }

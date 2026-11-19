@@ -14,8 +14,6 @@ const SPIN: Record<Mood, number> = { idle: 0.6, ready: 1, work: 2.8, focus: 1.7,
 
 /** One turn of the colour wheel at speed 1 */
 const SPIN_MS = 5200;
-/** Spin speed while flinging cursors out (about 0.4 s a turn) */
-const WHIRL = 12;
 /** Spin speed while thinking: the colour wheel winds up as the next step is worked out */
 const MUSE = 3.2;
 
@@ -32,9 +30,8 @@ class Orb {
     duration: SPIN_MS,
     iterations: Infinity,
   });
-  /** Spin speed right now; eases toward the mood's speed, or toward WHIRL while whirling */
+  /** Spin speed right now; eases toward the mood's speed */
   private rate = SPIN.idle;
-  private whirlUntil = 0;
   private ramping = false;
   private thinking = false;
 
@@ -43,8 +40,6 @@ class Orb {
   private target: Pt = { x: -200, y: -200 };
   private stiffness = 70;
   private damping = 0.78;
-  /** Positioned directly by another animation (e.g. while dragging) */
-  private pinned = false;
   private running = false;
   private shown = false;
   private mood: Mood = "idle";
@@ -105,25 +100,9 @@ class Orb {
   }
 
   goTo(p: Pt, speed: "slow" | "normal" | "fast" = "normal") {
-    this.pinned = false;
     this.target = { ...p };
     this.stiffness = speed === "fast" ? 170 : speed === "slow" ? 34 : 80;
     this.damping = speed === "slow" ? 0.92 : 0.8;
-    this.wake();
-  }
-
-  /** Position set externally per frame (velocity kept, trail and stretch still work) */
-  pin(p: Pt, dt: number) {
-    this.pinned = true;
-    if (dt > 0) this.vel = { x: (p.x - this.pos.x) / dt, y: (p.y - this.pos.y) / dt };
-    this.pos = { ...p };
-    this.target = { ...p };
-    this.apply();
-  }
-
-  unpin() {
-    if (!this.pinned) return;
-    this.pinned = false;
     this.wake();
   }
 
@@ -134,30 +113,16 @@ class Orb {
     play(this.halo, [{ opacity: 1, transform: `scale(${1 + 0.45 * strength})` }, { opacity: 0.55, transform: "scale(1)" }], { duration: 620, fill: "none" });
   }
 
-  /** Spin up hard for a while (to fling something out), then wind back down to the mood's speed */
-  whirl(ms = 900) {
-    this.whirlUntil = Math.max(this.whirlUntil, performance.now() + ms);
-    this.ramp();
-  }
-
-  /** Where the colour wheel is turned to, in degrees clockwise */
-  get turn(): number {
-    const t = Number(this.spin.currentTime ?? 0);
-    return (((t / SPIN_MS) % 1) + 1) % 1 * 360;
-  }
-
   /** Ease the spin speed toward its goal; only runs while the speed is changing */
   private ramp() {
     if (this.ramping) return;
     this.ramping = true;
     onFrame((dt) => {
-      const whirling = performance.now() < this.whirlUntil;
-      const goal = whirling ? WHIRL : this.thinking ? Math.max(MUSE, SPIN[this.mood]) : SPIN[this.mood];
-      // Quick to spin up, slower to wind down
-      this.rate += (goal - this.rate) * Math.min(1, dt * (whirling ? 9 : 3.5));
-      if (!whirling && Math.abs(goal - this.rate) < 0.02) this.rate = goal;
+      const goal = this.thinking ? Math.max(MUSE, SPIN[this.mood]) : SPIN[this.mood];
+      this.rate += (goal - this.rate) * Math.min(1, dt * 3.5);
+      if (Math.abs(goal - this.rate) < 0.02) this.rate = goal;
       this.spin.updatePlaybackRate(this.rate);
-      if (!whirling && this.rate === goal) {
+      if (this.rate === goal) {
         this.ramping = false;
         return false;
       }
@@ -197,7 +162,6 @@ class Orb {
   }
 
   private tick(dt: number) {
-    if (this.pinned) return true;
     const k = this.stiffness;
     const c = 2 * Math.sqrt(k) * this.damping;
     this.vel.x += (k * (this.target.x - this.pos.x) - c * this.vel.x) * dt;

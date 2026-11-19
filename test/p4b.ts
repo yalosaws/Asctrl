@@ -36,7 +36,6 @@ const say = (ok: boolean, line: string) => {
 type Reply = { content: { type: string; text?: string }[]; structuredContent?: { program?: { id: number; state: string } }; isError?: boolean };
 const text = (r: Reply) => r.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
 const call = async (name: string, args: Record<string, unknown>) => (await mcp.callTool({ name, arguments: args }, undefined, { timeout: 180_000 })) as Reply;
-const state = (r: Reply) => /"state":\s*"(\w+)"|state: (\w+)|\b(done|stuck|failed|asking)\b/.exec(text(r))?.slice(1).find(Boolean);
 
 try {
   await mcp.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(root, "src/console/mcp-server.ts")], env, stderr: "inherit" }));

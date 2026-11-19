@@ -220,6 +220,8 @@ impl Ctx {
     /// Called when the controller disconnects: ends the PowerShell session, all background jobs and programs,
     /// and forgets what the last controller saw
     pub async fn reset(&self) {
+        // Work the leaving controller started (a long plan) stops before its next input
+        SESSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         program::stop_all(self);
         self.reset_shell().await;
         *self.frame.lock().unwrap() = None;
@@ -299,6 +301,21 @@ async fn blocking(f: impl FnOnce() -> Result<String, String> + Send + 'static) -
     }
 }
 
+/// Which session it is: bumped each time a controller leaves or is sent away
+static SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Run `f` as work of the session going on now: once that session ends, it puts no more input in
+pub async fn in_session<F: std::future::Future>(f: F) -> F::Output {
+    CALL_SESSION.scope(SESSION.load(std::sync::atomic::Ordering::SeqCst), f).await
+}
+
+/// The session this work belongs to has ended (the person pressed End session, or the controller left)
+fn session_over() -> bool {
+    CALL_SESSION.try_with(|s| *s != SESSION.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(false)
+}
+
+const SESSION_OVER: &str = "Not done: the session ended (the person at the computer ended it, or the connection dropped), so nothing more is done";
+
 /// There is one real mouse, keyboard and focus: actions run one at a time, so two sent in parallel can't
 /// interleave (one moving the pointer while the other presses, or typing into the other's window)
 static ACTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -326,6 +343,9 @@ static YIELDED: Mutex<Vec<(String, Duration)>> = Mutex::new(Vec::new());
 #[allow(clippy::result_large_err)]
 async fn acting() -> Result<tokio::sync::MutexGuard<'static, ()>, Output> {
     let turn = ACTING.lock().await;
+    if session_over() {
+        return Err(fail(SESSION_OVER));
+    }
     let start = std::time::Instant::now();
     let max = yield_max();
     while let Some(ago) = crate::presence::others_ago().filter(|a| *a < PERSON_IDLE) {
@@ -338,6 +358,9 @@ async fn acting() -> Result<tokio::sync::MutexGuard<'static, ()>, Output> {
             return Err(out);
         }
         tokio::time::sleep((PERSON_IDLE - ago).min(Duration::from_millis(200)).max(Duration::from_millis(20))).await;
+        if session_over() {
+            return Err(fail(SESSION_OVER));
+        }
     }
     let waited = start.elapsed();
     if waited >= Duration::from_millis(100) {
@@ -381,6 +404,8 @@ const SETTLE_MAX: Duration = Duration::from_millis(1500);
 const FAST_GAP: Duration = Duration::from_millis(25);
 
 tokio::task_local! {
+    /// The session a call was made in (see `in_session`)
+    static CALL_SESSION: u64;
     /// Set by batch fast: input steps don't wait for the screen to settle, only for the program to take the input
     static FAST: bool;
     /// Set by a watch argument: the region (screen pixels) whose changes count after an input step
@@ -482,18 +507,15 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
 /// Boxed so batch can run tools from inside a tool. A watch argument frames the region input steps wait on.
 fn run_tool<'a>(ctx: &'a Ctx, tool: &'a str, args: &'a Value) -> BoxedRun<'a> {
     Box::pin(async move {
-        // What it does to the world: the person at the computer says yes first to what can't be taken back
-        let (level, aimed, asked, refused) = crate::safety::gate(tool, args).await;
-        let mut out = match refused {
-            Some(o) => o,
-            None => match watch_arg(ctx, args) {
-                Err(e) => fail(e),
-                Ok(Some(area)) => WATCH.scope(area, dispatch(ctx, tool, args)).await,
-                Ok(None) => dispatch(ctx, tool, args).await,
-            },
+        // What it does to the world, for the action log
+        let (level, aimed) = crate::safety::level(tool, args);
+        let mut out = match watch_arg(ctx, args) {
+            Err(e) => fail(e),
+            Ok(Some(area)) => WATCH.scope(area, dispatch(ctx, tool, args)).await,
+            Ok(None) => dispatch(ctx, tool, args).await,
         };
         note_yield(&mut out);
-        crate::safety::record(tool, args, level, &aimed, asked, &out);
+        crate::safety::record(tool, args, level, &aimed, &out);
         out
     })
 }

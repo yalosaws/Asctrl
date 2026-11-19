@@ -264,17 +264,17 @@ body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--
 main{width:min(420px,100% - 32px);background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px}
 h1{font-size:20px;margin:0 0 8px}p{margin:0 0 16px;color:var(--muted)}b{color:var(--fg)}
 input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit;font:14px ui-monospace,monospace}
-.row{display:flex;gap:8px;margin-top:16px}button{flex:1;padding:10px;border-radius:8px;border:1px solid var(--line);background:transparent;color:inherit;font:inherit;cursor:pointer}
+.row{display:flex;flex-direction:row-reverse;gap:8px;margin-top:16px}button{flex:1;padding:10px;border-radius:8px;border:1px solid var(--line);background:transparent;color:inherit;font:inherit;cursor:pointer}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}.err{color:var(--err);margin:12px 0 0}
 </style></head><body><main>
 <h1>Connect to Asctrl</h1>
-${p ? `<p><b>${who}</b> wants to see and operate computers through Asctrl${dest ? ` and will be signed in at <b>${dest}</b>` : ""}. Each computer still asks its user to allow the connection.</p>
+${p ? `<p><b>${who}</b> wants to see and operate computers through Asctrl${dest ? ` and will be signed in at <b>${dest}</b>` : ""}. With this access key and a computer's 6-digit code it can operate that computer at once, without its user being asked.</p>
 <form method="post" action="${escapeHtml(this.approvePath)}">
 <input type="hidden" name="request" value="${escapeHtml(id)}">
 <label for="key">Access key</label>
 <input id="key" name="key" type="password" autocomplete="off" placeholder="asc_…" autofocus>
 ${error ? `<p class="err">${escapeHtml(error)}</p>` : ""}
-<div class="row"><button name="action" value="deny">Cancel</button><button class="primary" name="action" value="allow">Allow</button></div>
+<div class="row"><button class="primary" name="action" value="allow">Allow</button><button name="action" value="deny">Cancel</button></div>
 </form>` : `<p class="err">This sign-in link has expired. Start connecting again from your app.</p>`}
 </main></body></html>`;
   }

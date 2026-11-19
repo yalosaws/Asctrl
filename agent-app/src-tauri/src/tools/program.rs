@@ -165,6 +165,9 @@ pub struct Program {
     marks: Mutex<Vec<(isize, String, Vec<String>)>>,
     /// Kept as a skill by itself when it ends well (no learn, and not learn: false)
     auto: bool,
+    /// It typed text written into the script itself (not one of its args): a password or other private words
+    /// may be in it, so it is not kept as a skill by itself
+    typed_own_text: AtomicBool,
     /// Its first actions, as words (the name and description of a skill kept by itself)
     trail: Mutex<Vec<String>>,
     /// Actions put right with instead, aimed at another control: (line, the words it aimed at, the new words)
@@ -216,6 +219,8 @@ fn as_js(out: &Output) -> Value {
 /// What the program's host calls do. Blocking: they run on the program's own thread.
 struct Host {
     p: Arc<Program>,
+    /// The words the program was given (its args), to tell typed args from text written into the script
+    given: std::collections::HashSet<String>,
     tools: tokio::sync::mpsc::UnboundedSender<Req>,
     decisions: smpsc::Receiver<Decision>,
     deadline: Instant,
@@ -299,6 +304,12 @@ impl Host {
                 return json!({ "__error": format!("a program can't call {name}") });
             }
             self.p.set(|s| s.line = line);
+            if matches!(name.as_str(), "type_text" | "set_value") {
+                let typed = args.get("text").or_else(|| args.get("value")).and_then(Value::as_str).unwrap_or("");
+                if !typed.trim().is_empty() && !self.given.contains(typed) {
+                    self.p.typed_own_text.store(true, Ordering::SeqCst);
+                }
+            }
             {
                 let mut t = self.p.trail.lock().unwrap();
                 if t.len() < 6 {
@@ -435,6 +446,23 @@ pub fn run_js(src: &str, input: &Value, deadline: Instant, stop: Arc<AtomicBool>
     }
 }
 
+/// Every string in `v`, at any depth
+fn strings_in(v: &Value) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut todo = vec![v];
+    while let Some(v) = todo.pop() {
+        match v {
+            Value::String(s) => {
+                out.insert(s.clone());
+            }
+            Value::Array(a) => todo.extend(a),
+            Value::Object(o) => todo.extend(o.values()),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The program's line an error's stack points at
 fn line_of(stack: &str) -> Option<u64> {
     let i = stack.find("program:")?;
@@ -518,6 +546,7 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
             stop: Arc::new(AtomicBool::new(false)),
             skill: skill.as_ref().map(|s| s.name.clone()),
             auto: !no_learn && learn.is_none() && skill.is_none(),
+            typed_own_text: AtomicBool::new(false),
             learn,
             marks: Mutex::default(),
             trail: Mutex::default(),
@@ -534,7 +563,7 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
     // The program's actions, run on the session as the AI's are
     {
         let p = p.clone();
-        tokio::spawn(async move {
+        tokio::spawn(in_session(async move {
             let mut n = 0;
             while let Some(r) = trx.recv().await {
                 n += 1;
@@ -554,7 +583,7 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
                 let out = batch::run_step(&me, &r.tool, &r.args, format!("p{}-{n}", p.id), false).await;
                 let _ = r.reply.send(as_js(&out));
             }
-        });
+        }));
     }
     {
         let p = p.clone();
@@ -566,7 +595,7 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
                 skills::record(sk, skills::Outcome::Began);
             }
             let params: Vec<String> = input.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
-            let host = Host { p: p.clone(), tools: ttx, decisions: drx, deadline };
+            let host = Host { p: p.clone(), given: strings_in(&input), tools: ttx, decisions: drx, deadline };
             let stop = p.stop.clone();
             let end = run_js(&src, &input, deadline, stop, move |op, a| host.call(op, a));
             let timed_out = Instant::now() > deadline;
@@ -586,7 +615,7 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
                     }
                 }
                 // Kept by itself: worth it when it did a few things
-                if p.auto && p.status.lock().unwrap().actions >= 3 {
+                if p.auto && p.status.lock().unwrap().actions >= 3 && !p.typed_own_text.load(Ordering::SeqCst) {
                     let marks = p.marks.lock().unwrap().clone();
                     let mut apps: Vec<String> = vec![];
                     for (_, a, _) in &marks {

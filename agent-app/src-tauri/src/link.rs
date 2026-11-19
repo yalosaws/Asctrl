@@ -88,12 +88,6 @@ pub fn reply_text(tx: &mpsc::UnboundedSender<String>, id: &str, ok: bool, msg: &
     reply(tx, id, out);
 }
 
-/// False once the controller who asked has left or its connection ended while a question was on screen.
-/// Nobody is waiting for the result; carrying on would restart the computer for no one.
-pub fn still_paired(app: &AppHandle, tx: &mpsc::UnboundedSender<String>) -> bool {
-    !tx.is_closed() && app.state::<AgentState>().controller.lock().unwrap().is_some()
-}
-
 /// Run one tool call from a controller; the result goes back on `tx`
 fn dispatch(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: &Value) {
     let s = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -121,14 +115,14 @@ fn dispatch(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: &Value) {
                 let driving = moves_mouse(&tool).then(|| ov.driving(Duration::from_millis(1200)));
                 // A plan's own look round (to find candidates) is not work to show
                 if args.get("silent").and_then(Value::as_bool).unwrap_or(false) {
-                    let out = fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args)).await;
+                    let out = tools::in_session(fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args))).await;
                     drop(driving);
                     reply(&tx, &id, out);
                     return;
                 }
                 let before = tools::fx_before(&st.ctx, &tool, &args);
                 crate::fx::emit(json!({ "phase": "start", "id": id, "tool": tool, "args": fx_args(&args), "geo": before }));
-                let out = fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args)).await;
+                let out = tools::in_session(fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args))).await;
                 drop(driving);
                 let after = tools::fx_after(&st.ctx, &tool, &before, &out);
                 let shown: String = out.body().chars().take(6000).collect();
@@ -221,8 +215,7 @@ async fn relay_message(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg:
     match msg.get("type").and_then(Value::as_str) {
         Some("consent_request") => {
             // Having the code is enough to connect: the person handed it out on purpose, and the session
-            // is shown on their screen the whole time. Only administrator access and restarts still ask.
-            // Refused while someone else is driving (an AI on this machine).
+            // is shown on their screen the whole time. Refused while someone else is driving (an AI on this machine).
             let allow = attach(app, &s("techName"), Via::Relay).is_ok();
             let _ = tx.send(json!({ "type": "consent_reply", "allow": allow }).to_string());
         }
@@ -231,7 +224,7 @@ async fn relay_message(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg:
         Some("peer_left") => detach(app, Via::Relay).await,
         Some("error") => {
             // Most likely a code collision: pick a new random code; with a fixed code (just restarted elevated), wait for the old process to exit and retry
-            if !st.fixed_code {
+            if !st.fixed_code.load(std::sync::atomic::Ordering::SeqCst) {
                 *st.code.lock().unwrap() = random_code();
             }
             return Err(s("message"));

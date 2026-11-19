@@ -77,12 +77,9 @@ pub struct Conn {
 
 /// A tab
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct Tab {
     pub id: String,
     pub session: String,
-    pub title: String,
-    pub url: String,
 }
 
 static CONN: Mutex<Option<Arc<Conn>>> = Mutex::new(None);
@@ -179,8 +176,8 @@ impl Conn {
         Ok(s)
     }
 
-    pub async fn tab(&self, id: &str, title: &str, url: &str) -> Result<Tab, String> {
-        Ok(Tab { id: id.into(), session: self.session(id).await?, title: title.into(), url: url.into() })
+    pub async fn tab(&self, id: &str) -> Result<Tab, String> {
+        Ok(Tab { id: id.into(), session: self.session(id).await? })
     }
 
     /// The frames of other sites in the tab whose session is `session`
@@ -501,7 +498,7 @@ pub async fn tab_in(hwnd: isize) -> Option<(Arc<Conn>, Tab)> {
         .max_by_key(|(_, t, _)| t.len())
         .or_else(|| (pages.len() == 1).then(|| &pages[0]))?
         .clone();
-    let tab = c.tab(&pick.0, &pick.1, &pick.2).await.ok()?;
+    let tab = c.tab(&pick.0).await.ok()?;
     Some((c, tab))
 }
 

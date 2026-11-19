@@ -26,12 +26,8 @@ mod wgc;
 
 use serde_json::{Value, json};
 use std::sync::Mutex;
-use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{Notify, oneshot};
-
-/// How long to wait for the user to click "Allow"
-const CONSENT_TIMEOUT: Duration = Duration::from_secs(120);
+use tokio::sync::Notify;
 
 /// How a controller reached us
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -59,14 +55,10 @@ enum RelayState {
 struct AgentState {
     code: Mutex<String>,
     /// The code was given on the command line (e.g. after an elevated restart); on a collision, retry instead of picking a new one
-    fixed_code: bool,
+    fixed_code: std::sync::atomic::AtomicBool,
     /// Who is driving. One at a time: there is one mouse and one keyboard.
     controller: Mutex<Option<Controller>>,
     relay: Mutex<RelayState>,
-    /// The question on screen (administrator access, restart), as the status the UI shows for it
-    question: Mutex<Option<Value>>,
-    /// Where the answer to it goes
-    answer: Mutex<Option<oneshot::Sender<bool>>>,
     /// The user clicked "End session": each link drops its controller
     kick_relay: Notify,
     kick_local: Notify,
@@ -88,11 +80,26 @@ fn is_elevated() -> bool {
     unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() }
 }
 
-/// What the UI should show right now: a question if one is up, else who is connected, else how the relay is doing
-fn current_status(st: &AgentState) -> Value {
-    if let Some(q) = st.question.lock().unwrap().clone() {
-        return q;
+/// One line in %LOCALAPPDATA%\Asctrl\driver.log: when the driver started, and why it stopped. The driver used to
+/// disappear with nothing to say why; every way out now writes its reason here first.
+pub fn note_exit(reason: &str) {
+    use std::io::Write;
+    let Some(base) = std::env::var_os("LOCALAPPDATA") else { return };
+    let dir = std::path::PathBuf::from(base).join("Asctrl");
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join("driver.log");
+    // Kept small: the older half moves aside
+    if std::fs::metadata(&file).map(|m| m.len() > 1 << 20).unwrap_or(false) {
+        let _ = std::fs::rename(&file, file.with_extension("log.1"));
     }
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+        let _ = writeln!(f, "{secs} pid {} {reason}", std::process::id());
+    }
+}
+
+/// What the UI should show right now: who is connected, else how the relay is doing
+fn current_status(st: &AgentState) -> Value {
     let code = st.code.lock().unwrap().clone();
     if let Some(c) = &*st.controller.lock().unwrap() {
         return json!({ "state": "connected", "techName": c.name, "code": code });
@@ -145,39 +152,18 @@ async fn detach(app: &AppHandle, via: Via) {
         }
         *c = None;
     }
-    // A question from the controller that just left can no longer be answered
-    st.question.lock().unwrap().take();
-    st.answer.lock().unwrap().take();
+    // Nothing it pressed stays held down: a button left down turns the person's mouse into a drag
+    crate::input::release_all();
     publish(app);
     st.ctx.reset().await;
 }
 
-/// The app, for what is asked of the person from inside the tools
+/// The app, for the action log
 static APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
 
 /// Who is driving, for the action log
 pub fn controller_name() -> String {
     APP.get().and_then(|a| a.state::<AgentState>().controller.lock().unwrap().as_ref().map(|c| c.name.clone())).unwrap_or_default()
-}
-
-/// Ask the person at the computer whether the AI may do `what` (`level`: irreversible or external), on the overlay
-pub async fn confirm_act(what: &str, level: &str) -> bool {
-    let Some(app) = APP.get() else { return false };
-    ask_user(app, json!({ "state": "act", "techName": controller_name(), "timeoutSec": CONSENT_TIMEOUT.as_secs(), "what": what, "level": level })).await
-}
-
-/// Ask the user a question; a timeout counts as a refusal
-async fn ask_user(app: &AppHandle, status: Value) -> bool {
-    let st = app.state::<AgentState>();
-    let (otx, orx) = oneshot::channel::<bool>();
-    *st.answer.lock().unwrap() = Some(otx);
-    *st.question.lock().unwrap() = Some(status);
-    publish(app);
-    bring_to_front(app);
-    let allow = matches!(tokio::time::timeout(CONSENT_TIMEOUT, orx).await, Ok(Ok(true)));
-    st.question.lock().unwrap().take();
-    publish(app);
-    allow
 }
 
 // ---- Commands called by the UI ----
@@ -193,16 +179,14 @@ fn is_admin() -> bool {
 }
 
 #[tauri::command]
-fn respond(st: State<AgentState>, allow: bool) {
-    if let Some(tx) = st.answer.lock().unwrap().take() {
-        let _ = tx.send(allow);
-    }
-}
-
-#[tauri::command]
 fn disconnect(st: State<AgentState>) {
     match st.controller.lock().unwrap().as_ref().map(|c| c.via) {
-        Some(Via::Relay) => st.kick_relay.notify_one(),
+        Some(Via::Relay) => {
+            // The person sent them away: a new code, so the old one can't bring them straight back
+            *st.code.lock().unwrap() = random_code();
+            st.fixed_code.store(false, std::sync::atomic::Ordering::SeqCst);
+            st.kick_relay.notify_one()
+        }
         Some(Via::Local) => st.kick_local.notify_one(),
         None => {}
     }
@@ -210,6 +194,7 @@ fn disconnect(st: State<AgentState>) {
 
 #[tauri::command]
 fn quit(app: AppHandle) {
+    note_exit("quitting: Quit was clicked twice in the orb's menu");
     app.exit(0);
 }
 
@@ -218,10 +203,13 @@ pub fn run() {
     if browser_ext::relay_if_asked() {
         return;
     }
+    // panic = "abort" ends the process at once: say what went wrong first
+    std::panic::set_hook(Box::new(|p| note_exit(&format!("crashed: {p}"))));
+    note_exit(&format!("started {}", env!("CARGO_PKG_VERSION")));
     let fixed = arg("--code")
         .filter(|c| c.len() == 6 && c.bytes().all(|b| b.is_ascii_digit()))
         .or_else(|| if cfg!(debug_assertions) { std::env::var("ASCTRL_CODE").ok() } else { None });
-    let state = AgentState { fixed_code: fixed.is_some(), ctx: tools::Ctx::shared(), ..Default::default() };
+    let state = AgentState { fixed_code: fixed.is_some().into(), ctx: tools::Ctx::shared(), ..Default::default() };
     *state.code.lock().unwrap() = fixed.unwrap_or_else(random_code);
     *state.status.lock().unwrap() = json!({ "state": "connecting" });
 
@@ -231,7 +219,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             is_admin,
-            respond,
             disconnect,
             quit,
             overlay::overlay_info,
@@ -251,11 +238,28 @@ pub fn run() {
             tauri::async_runtime::spawn(browser_ext::serve());
             Ok(())
         })
+        // The overlay is the only window, and Tauri ends the program when the last window closes: an Alt+F4 that
+        // reached it while it held the focus, or Windows closing it, took the whole driver down without a word.
+        // It is never closed; the driver quits only from its menu, the Alt keys, or a restart as administrator.
+        .on_window_event(|_, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                note_exit("kept running: something asked the overlay window to close");
+            }
+        })
         .build(tauri::generate_context!())
         .expect("failed to start")
-        .run(|_, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|_, event| match event {
+            // No code: the last window went, not a quit the driver asked for
+            tauri::RunEvent::ExitRequested { code: None, api, .. } => {
+                api.prevent_exit();
+                note_exit("kept running: the overlay window went away");
+            }
+            tauri::RunEvent::Exit => {
+                note_exit("exited");
+                crate::input::release_all();
                 link::forget_local();
             }
+            _ => {}
         });
 }
