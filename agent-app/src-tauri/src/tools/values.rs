@@ -91,6 +91,8 @@ fn set_one(ask: &Ask, value: &str, call: &str, part: &str, watch: &mut dyn FnMut
         Some(l) => match l.set(value) {
             Ok(s) => Ok(s),
             Err(Some(e)) => Err(e),
+            // A drop-down list took no such value; typing would pick whatever item starts with those letters
+            Err(None) if l.is_drop_down_list() => Err(format!("{} has no item \"{}\"", loc.desc, uia::clip(value, 60))),
             // Takes no value directly (or ignored it, as many web pages do): type it in
             Err(None) => type_into(&loc, value, call, &format!("{part}t"), prior),
         },

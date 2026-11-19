@@ -1101,9 +1101,27 @@ impl Live {
         Err(None)
     }
 
+    /// A Windows combo box made a drop-down list: it takes no text, though some (WinForms) say their value is
+    /// writable, and typing into one picks items by their first letters, changing it to something else
+    pub fn is_drop_down_list(&self) -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::{GWL_STYLE, GetClassNameW, GetWindowLongW};
+        const CBS_DROPDOWNLIST: i32 = 3;
+        if self.role() != "ComboBox" {
+            return false;
+        }
+        let Ok(h) = (unsafe { self.el.CurrentNativeWindowHandle() }) else { return false };
+        if h.is_invalid() {
+            return false;
+        }
+        let mut buf = [0u16; 128];
+        let n = unsafe { GetClassNameW(h, &mut buf) } as usize;
+        let class = String::from_utf16_lossy(&buf[..n]).to_ascii_uppercase();
+        (class == "COMBOBOX" || class.contains(".COMBOBOX.")) && unsafe { GetWindowLongW(h, GWL_STYLE) } & 3 == CBS_DROPDOWNLIST
+    }
+
     /// A combo box you can type into: it holds a writable value itself, or has a text box inside
     fn combo_takes_text(&self) -> bool {
-        if self.role() != "ComboBox" {
+        if self.role() != "ComboBox" || self.is_drop_down_list() {
             return false;
         }
         if let Some(p) = pattern::<IUIAutomationValuePattern>(&self.el, UIA_ValuePatternId)
@@ -1159,6 +1177,8 @@ impl Live {
             if self.combo_takes_text() {
                 return None;
             }
+            // A combo box that shows no items until it is opened and can't be opened through UI Automation (a
+            // WinForms one) may still take its value set directly: let that be tried
             return (expander.is_some() || self.role() != "ComboBox").then(|| Err(format!("{label} has no item \"{name}\"")));
         };
         let r = if let Some(p) = pattern::<IUIAutomationSelectionItemPattern>(&item, UIA_SelectionItemPatternId) {
