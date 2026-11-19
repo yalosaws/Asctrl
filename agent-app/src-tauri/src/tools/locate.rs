@@ -441,6 +441,23 @@ fn window_area(hwnd: isize) -> Option<capture::Area> {
     (r.2 - r.0 >= 16 && r.3 - r.1 >= 16).then_some(capture::Area { left: r.0, top: r.1, width: r.2 - r.0, height: r.3 - r.1 })
 }
 
+/// When the last action that did not wait for the screen to settle (fast mode) was done
+static UNSETTLED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+/// How long after such an action what it brings up may still be arriving
+const ARRIVING: Duration = Duration::from_millis(2000);
+
+/// An action was just done without waiting for its effect: what the next one looks for may not be there yet
+pub fn unsettled() {
+    *UNSETTLED.lock().unwrap() = Some(Instant::now());
+}
+
+/// What a fast action brought up (a dialog, a panel) may still be on its way: until it is, text can match
+/// several things on the screen as it was, and the one meant is not among them. Counted from the action, not
+/// from the step's own wait, which a fast step does not have.
+fn may_be_arriving() -> bool {
+    UNSETTLED.lock().unwrap().is_some_and(|t| t.elapsed() < ARRIVING)
+}
+
 fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
     let start = Instant::now();
     let f = ask.frame;
@@ -468,6 +485,10 @@ fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
                             uia::remember(&scene);
                         }
                         return from_live(uia::live(rf)?, ask.anywhere);
+                    }
+                    Pick::Many(_) if may_be_arriving() => {
+                        crate::events::wait(seen, Duration::from_millis(50));
+                        continue;
                     }
                     Pick::Many(c) => {
                         let lines: Vec<String> = c.iter().take(8).enumerate().map(|(i, n)| format!("{}. {}", i + 1, n.line(&at))).collect();
@@ -499,6 +520,10 @@ fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
                         (1, None | Some(1)) => Some(pool[0]),
                         (n, Some(k)) if k <= n => Some(pool[k - 1]),
                         (n, Some(k)) => return Err(Miss::new(MissKind::Absent, format!("\"{q}\" is on screen only {n} time(s), so there is no match {k}"))),
+                        (_, None) if may_be_arriving() => {
+                            crate::events::wait(seen, Duration::from_millis(50));
+                            continue;
+                        }
                         (n, None) => {
                             let lines: Vec<String> = pool.iter().take(8).enumerate().map(|(i, h)| format!("{}. {} in \"{}\"", i + 1, f.at(center(h.rect).0, center(h.rect).1), uia::clip(&h.line, 60))).collect();
                             return Err(format!("\"{q}\" is on screen in {n} places. Pass nth, or click the one you mean by x and y:\n{}", lines.join("\n")).into());
@@ -647,6 +672,14 @@ pub fn uncover(loc: &Located) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fast_action_gives_what_it_brings_up_time_to_arrive() {
+        unsettled();
+        assert!(may_be_arriving());
+        *UNSETTLED.lock().unwrap() = Instant::now().checked_sub(ARRIVING + Duration::from_millis(1));
+        assert!(!may_be_arriving());
+    }
     use crate::winmgr::Slot;
 
     fn node(rf: u32, depth: usize, role: &'static str, name: &str, flags: u32, x: i32, y: i32) -> Node {

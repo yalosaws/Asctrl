@@ -205,6 +205,8 @@ pub(super) async fn batch(ctx: &Ctx, args: &Value) -> Output {
             let quiet = out.ok && fg == fg0 && wins.is_subset(&wins0) && !popups::busy();
             if fast {
                 fast_count += 1;
+                // What it brings up may still be on its way when the next step looks for its target
+                locate::unsettled();
                 if out.data.as_ref().and_then(|d| d.get("channel")).and_then(Value::as_str) == Some("page") {
                     page_unsettled = Some(step.clone());
                 } else {

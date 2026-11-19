@@ -487,6 +487,7 @@ impl Pace {
             Some(b) => Some(screen::settle(&b, quiet, SETTLE_MAX)),
             None => {
                 std::thread::sleep(FAST_GAP);
+                locate::unsettled();
                 None
             }
         }
