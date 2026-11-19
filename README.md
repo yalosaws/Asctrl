@@ -294,6 +294,12 @@ End-to-end, against the release build (starts a local relay and the driver; exer
 npm test
 ```
 
+The same in Windows Sandbox, so it never takes your mouse, keyboard or windows (`node test/sandbox.ts <suite> [args]` runs another suite; the sandbox sees the repository and Node read-only, has no network, and writes its log to `test/out/sandbox-<stamp>/`). Windows Sandbox is turned on once, in an administrator PowerShell, then a restart: `Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All`.
+
+```bash
+npm run test:sandbox
+```
+
 The HTTP connector, with no driver needed (a local relay and a fake computer): both sign-in ways, the OAuth flow step by step, sessions kept to their key, revoking, the icons, and the stdio server keeping its local tools:
 
 ```bash
