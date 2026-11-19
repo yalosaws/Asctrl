@@ -53,7 +53,6 @@ fn type_into(loc: &Located, value: &str, call: &str, part: &str, prior: Option<S
     }
     if value.is_empty() { keys::focus_target(loc, call, part)?; } else { keys::focus_for_typing(loc, call)?; }
     input::press_keys("ctrl+a")?;
-    std::thread::sleep(Duration::from_millis(20));
     if value.is_empty() {
         input::press_keys("delete")?;
     } else {

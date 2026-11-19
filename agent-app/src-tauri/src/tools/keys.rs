@@ -4,6 +4,7 @@
 use super::locate::{Ask, Located, Miss};
 use super::report::Did;
 use super::*;
+use crate::until;
 
 /// type_text pastes text longer than this (method auto)
 const PASTE_OVER: usize = 200;
@@ -116,6 +117,11 @@ impl LineSync {
     }
 }
 
+/// How long a control given the focus directly may take to say it has it, before it is clicked instead
+const FOCUS_DIRECT: Duration = Duration::from_millis(100);
+/// How long a clicked control (a page's, often) may take to say it has the focus
+const FOCUS_CLICK: Duration = Duration::from_millis(300);
+
 /// Put the keyboard focus on a located target: a control of an ordinary program takes it directly; anything
 /// else (a web page's field, a spot on a canvas, a control that won't take it) is clicked.
 pub(super) fn focus_target(loc: &Located, call: &str, part: &str) -> Result<(), String> {
@@ -124,18 +130,19 @@ pub(super) fn focus_target(loc: &Located, call: &str, part: &str) -> Result<(), 
             return Err(format!("{} is disabled", loc.desc));
         }
         pointer::activate_for(loc);
-        if !l.is_web() && l.focus().is_ok() {
-            std::thread::sleep(Duration::from_millis(30));
-            if l.has_focus() {
-                return Ok(());
-            }
+        if !l.is_web() && l.focus().is_ok() && until::holds(FOCUS_DIRECT, || l.has_focus()) {
+            return Ok(());
         }
     }
     locate::uncover(loc)?;
     let r = input::click(loc.point.0, loc.point.1, "", 1, "");
     fx::click(call, part, loc.point, 1, r.is_ok());
     r?;
-    std::thread::sleep(Duration::from_millis(50));
+    // Keys sent next queue up behind the click, so nothing needs waiting for — except to know where the focus
+    // went, for a control that says (a page handles the click a moment later, in its own process)
+    if let Some(l) = &loc.live {
+        until::holds(FOCUS_CLICK, || l.has_focus());
+    }
     Ok(())
 }
 
@@ -163,8 +170,7 @@ pub(super) fn focus_for_typing(loc: &Located, call: &str) -> Result<(), String> 
     }
     // The click may have landed on a field's dropdown drawn over the target (a page's own popup, which
     // UI Automation doesn't see as covering it): give the target the focus directly instead
-    std::thread::sleep(Duration::from_millis(150));
-    if !loc.live.as_ref().is_some_and(|l| l.focus().is_ok() && { std::thread::sleep(Duration::from_millis(50)); l.has_focus() }) {
+    if !loc.live.as_ref().is_some_and(|l| l.focus().is_ok() && until::holds(FOCUS_CLICK, || l.has_focus())) {
         focus_target(loc, call, "f")?;
     }
     match other_field_focused(loc) {
@@ -259,9 +265,9 @@ pub(super) async fn type_text(ctx: &Ctx, args: &Value) -> Output {
         }
         let fg = winmgr::real_foreground();
         let before = pace.before(at);
+        // Keys go to the program in the order they are sent: none of them needs a pause before the next
         if replace {
             input::press_keys("ctrl+a")?;
-            std::thread::sleep(Duration::from_millis(20));
             if t.is_empty() {
                 input::press_keys("delete")?;
             }
@@ -282,10 +288,11 @@ pub(super) async fn type_text(ctx: &Ctx, args: &Value) -> Output {
             clipboard_release();
         }
         if enter {
-            std::thread::sleep(Duration::from_millis(30));
             input::press_keys("enter")?;
         }
-        let change = pace.after(before);
+        // The text was seen in the field, and nothing else was sent: that was the point, so the screen needn't be
+        // watched until it stops moving (Enter can set off anything, so then it is)
+        let change = if verified == Some(true) && !enter && pace.watch.is_none() { None } else { pace.after(before) };
         let n = t.chars().count();
         let what = match (n, replace) {
             (0, true) => "Cleared".to_string(),
