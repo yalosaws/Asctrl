@@ -178,6 +178,7 @@ pub struct View {
 }
 
 pub struct Ctx {
+    pub calls: Arc<tokio::sync::RwLock<()>>,
     frame: Mutex<Option<Frame>>,
     view: Mutex<View>,
     /// The windows as they were stacked when the AI last looked (a screenshot, a listing, a reply that
@@ -198,6 +199,7 @@ pub struct Ctx {
 impl Default for Ctx {
     fn default() -> Self {
         Ctx {
+            calls: Default::default(),
             frame: Mutex::new(None),
             view: Mutex::new(View { scope: Scope::Screen, max_width: 1600 }),
             seen: Mutex::new(Arc::new(vec![])),
@@ -222,8 +224,15 @@ impl Ctx {
     pub async fn reset(&self) {
         // Work the leaving controller started (a long plan) stops before its next input
         SESSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        program::stop_all(self);
+        program::stop_all(self).await;
+        popups::stop("");
         self.reset_shell().await;
+        let _drained = self.calls.write().await;
+        // Catch any work that was already inside a tool when the connection closed.
+        program::stop_all(self).await;
+        self.reset_shell().await;
+        crate::input::release_all();
+        *self.opened.lock().unwrap() = None;
         *self.frame.lock().unwrap() = None;
         *self.view.lock().unwrap() = View { scope: Scope::Screen, max_width: 1600 };
         *self.seen.lock().unwrap() = Arc::new(vec![]);
@@ -305,12 +314,13 @@ async fn blocking(f: impl FnOnce() -> Result<String, String> + Send + 'static) -
 static SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Run `f` as work of the session going on now: once that session ends, it puts no more input in
-pub async fn in_session<F: std::future::Future>(f: F) -> F::Output {
-    CALL_SESSION.scope(SESSION.load(std::sync::atomic::Ordering::SeqCst), f).await
+pub fn in_session<F: std::future::Future>(f: F) -> impl std::future::Future<Output = F::Output> {
+    let generation = CALL_SESSION.try_with(|s| *s).unwrap_or_else(|_| SESSION.load(std::sync::atomic::Ordering::SeqCst));
+    CALL_SESSION.scope(generation, f)
 }
 
 /// The session this work belongs to has ended (the person pressed End session, or the controller left)
-fn session_over() -> bool {
+pub fn session_over() -> bool {
     CALL_SESSION.try_with(|s| *s != SESSION.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(false)
 }
 
@@ -372,7 +382,13 @@ async fn acting() -> Result<tokio::sync::MutexGuard<'static, ()>, Output> {
         y.push((fx::call_id(), waited));
     }
     let _ = tokio::task::spawn_blocking(keys::clipboard_settled).await;
+    if session_over() { return Err(fail(SESSION_OVER)); }
+    if program_expired() { return Err(fail("The program timed out before input could be sent")); }
     Ok(turn)
+}
+
+fn program_expired() -> bool {
+    PROGRAM_DEADLINE.try_with(|t| std::time::Instant::now() >= *t).unwrap_or(false)
 }
 
 /// A call's reply says when it waited for the person at the computer
@@ -406,6 +422,7 @@ const FAST_GAP: Duration = Duration::from_millis(25);
 tokio::task_local! {
     /// The session a call was made in (see `in_session`)
     static CALL_SESSION: u64;
+    static PROGRAM_DEADLINE: std::time::Instant;
     /// Set by batch fast: input steps don't wait for the screen to settle, only for the program to take the input
     static FAST: bool;
     /// Set by a watch argument: the region (screen pixels) whose changes count after an input step
@@ -492,7 +509,17 @@ fn path_arg(args: &Value, key: &str) -> Result<std::path::PathBuf, String> {
 
 /// Capture on a blocking thread and wrap the result as a tool image
 async fn shoot(area: capture::Area, max_width: i32) -> Result<(capture::Shot, Image), String> {
-    let shot = tokio::task::spawn_blocking(move || capture::grab(area, max_width)).await.map_err(|e| e.to_string())??;
+    shoot_in(None, area, max_width).await
+}
+
+async fn shoot_in(hwnd: Option<isize>, area: capture::Area, max_width: i32) -> Result<(capture::Shot, Image), String> {
+    let shot = tokio::task::spawn_blocking(move || {
+        let Some(hwnd) = hwnd else { return capture::grab(area, max_width) };
+        let picture = crate::wgc::capture(hwnd)?;
+        let (scale, width, height) = capture::scaled(area, max_width);
+        let jpeg = capture::jpeg(&picture.cut(area, width, height)?, width, height)?;
+        Ok(capture::Shot { jpeg, scale, width, height })
+    }).await.map_err(|e| e.to_string())??;
     let image = Image { data: base64::engine::general_purpose::STANDARD.encode(&shot.jpeg), mime_type: "image/jpeg".into() };
     Ok((shot, image))
 }
@@ -508,14 +535,17 @@ pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
 fn run_tool<'a>(ctx: &'a Ctx, tool: &'a str, args: &'a Value) -> BoxedRun<'a> {
     Box::pin(async move {
         // What it does to the world, for the action log
-        let (level, aimed) = crate::safety::level(tool, args);
+        if session_over() { return fail(SESSION_OVER); }
+        if program_expired() { return fail("The program timed out"); }
+        let started = std::time::Instant::now();
+        let (level, _) = crate::safety::level(tool, args);
         let mut out = match watch_arg(ctx, args) {
             Err(e) => fail(e),
             Ok(Some(area)) => WATCH.scope(area, dispatch(ctx, tool, args)).await,
             Ok(None) => dispatch(ctx, tool, args).await,
         };
         note_yield(&mut out);
-        crate::safety::record(tool, args, level, &aimed, &out);
+        crate::safety::record(tool, args, level, &out, started.elapsed());
         out
     })
 }
@@ -569,6 +599,7 @@ async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         // In Asctrl's own browser, text targets go through the page first (see web)
         "click" => match web::click(ctx, args).await {
             Some(o) => o,
+            None if str_arg(args, "mode") == "page" => fail("Cannot resolve this click through the page. Check the window and target, or specify nth for a duplicate."),
             None => pointer::click(ctx, args).await,
         },
         "scroll" => pointer::scroll(ctx, args).await,

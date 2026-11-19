@@ -380,7 +380,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
         button: z.enum(["left", "right", "middle"]).optional().describe("Default left"),
         count: z.number().int().min(1).max(3).optional().describe("2 = double-click, 3 = triple-click (selects a line); default 1"),
         modifiers: z.string().optional().describe("Keys held while clicking, e.g. ctrl, shift, ctrl+shift"),
-        mode: z.enum(["auto", "mouse", "direct"]).optional().describe("auto (default) as described; mouse: always a real mouse click; direct: always through UI Automation, never the mouse"),
+        mode: z.enum(["auto", "mouse", "direct", "page"]).optional().describe("auto (default) as described; mouse: always a real mouse click; direct: always through UI Automation, never the mouse; page: only through the browser or Electron page"),
         after,
         watch,
       },
@@ -971,19 +971,25 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
         server.registerTool(name, { description: k.description, inputSchema: k.schema, annotations: k.annotations as never }, k.handler as never);
       }
       const LOOK = ["observe", "screenshot", "read_text", "wait_for", "timeline", "progress", "skills", "list_files", "read_file", "search_files", "disk_usage"].filter((n) => kept.has(n));
-      const DO = [...kept.keys()].filter((n) => !LOOK.includes(n) && !["connect", "exec", "resume"].includes(n));
+      const DO = [...kept.keys()].filter((n) => (n === "skills" || !LOOK.includes(n)) && !["connect", "exec", "resume"].includes(n));
       // Each tool in a line: what it does (its first sentence) and its args
-      const line = (n: string) => {
-        const k = kept.get(n)!;
-        const what = (/^[^.]*\./.exec(k.description)?.[0] ?? k.description).slice(0, 200);
-        const args = Object.entries(k.schema).map(([a, t]) => (t.isOptional() ? a : `${a}*`)).join(", ");
+      const entries = (n: string, readOnly = false) => Object.entries(kept.get(n)!.schema)
+        .filter(([a]) => !(readOnly && n === "skills" && ["import", "forget"].includes(a)));
+      const description = (n: string, readOnly = false) => readOnly && n === "skills"
+        ? "Find skills for a task or window, show a saved skill, or export skills."
+        : kept.get(n)!.description;
+      const line = (n: string, readOnly = false) => {
+        const desc = description(n, readOnly);
+        const what = (/^[^.]*\./.exec(desc)?.[0] ?? desc).slice(0, 200);
+        const args = entries(n, readOnly).map(([a, t]) => (t.isOptional() ? a : `${a}*`)).join(", ");
         return `- ${n}: ${what}${args ? ` Args: ${args}` : ""}`;
       };
-      const through = async (n: string, args: unknown): Promise<Reply> => {
+      const through = async (n: string, args: unknown, readOnly = false): Promise<Reply> => {
         const k = kept.get(n);
         if (!k) return say(`No such tool: ${n}`, true);
         const parsed = z.object(k.schema).safeParse(args ?? {});
         if (!parsed.success) return say(`${n}: ${parsed.error.issues.map((i) => `${i.path.join(".") || "args"}: ${i.message}`).join("; ")}\n${k.description}`, true);
+        if (readOnly && n === "skills" && (parsed.data.import != null || parsed.data.forget != null)) return say("Use act with do: skills to import or forget a skill.", true);
         return k.handler(parsed.data as Record<string, unknown>);
       };
       server.registerTool(
@@ -992,7 +998,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
           description:
             "Look at the computer: what: the kind of look, args: its arguments (* = needed). Reading the screen as controls (observe) is cheaper and more exact than a screenshot. " +
             "help: a kind's full description.\n" +
-            LOOK.map(line).join("\n"),
+            "Use act for skills import and forget.\n" + LOOK.map((n) => line(n, true)).join("\n"),
           inputSchema: {
             what: z.enum(LOOK as [string, ...string[]]).describe("The kind of look"),
             args: z.record(z.string(), z.unknown()).optional().describe("Its arguments"),
@@ -1000,7 +1006,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
           },
           annotations: { readOnlyHint: true },
         },
-        async ({ what, args, help }) => (help ? say(`${what}: ${kept.get(what)?.description}\nArgs:\n${Object.entries(kept.get(what)?.schema ?? {}).map(([a, t]) => `- ${a}: ${t.description ?? ""}`).join("\n")}`) : through(what, args)),
+        async ({ what, args, help }) => (help ? say(`${what}: ${description(what, true)}\nArgs:\n${entries(what, true).map(([a, t]) => `- ${a}: ${t.description ?? ""}`).join("\n")}`) : through(what, args, true)),
       );
       server.registerTool(
         "act",
@@ -1008,7 +1014,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
           description:
             "Do something on the computer: do: the action, args: its arguments (* = needed). run carries out a whole plan in one call; the others are single actions for corrections, " +
             "and the computer's own work (shell, files, admin). help: an action's full description.\n" +
-            DO.map(line).join("\n"),
+            DO.map((n) => line(n)).join("\n"),
           inputSchema: {
             do: z.enum(DO as [string, ...string[]]).describe("The action"),
             args: z.record(z.string(), z.unknown()).optional().describe("Its arguments"),

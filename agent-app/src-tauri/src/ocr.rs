@@ -72,8 +72,8 @@ pub fn read(area: Area) -> Result<Vec<Line>, String> {
 }
 
 /// Read `area`, where what matters is a number
-pub fn read_numbers(area: Area) -> Result<Vec<Line>, String> {
-    read_with(area, number_engine()?)
+pub fn read_numbers(hwnd: isize, area: Area) -> Result<Vec<Line>, String> {
+    read_scoped(hwnd, area, number_engine()?)
 }
 
 /// How large to hand `area` to the engine: (enlargement, width, height)
@@ -95,8 +95,14 @@ fn read_with(area: Area, engine: OcrEngine) -> Result<Vec<Line>, String> {
 /// off the window's own picture (Windows Graphics Capture), so what is read is this window's text and not what
 /// covers it. Positions are screen pixels either way.
 pub fn read_in(hwnd: isize, area: Area) -> Result<Vec<Line>, String> {
+    read_scoped(hwnd, area, engine()?)
+}
+
+fn read_scoped(hwnd: isize, area: Area, engine: OcrEngine) -> Result<Vec<Line>, String> {
+    if hwnd != 0 && !crate::winmgr::exists(hwnd) {
+        return Err("The specified window has closed".into());
+    }
     if hwnd != 0 && crate::winmgr::covered(hwnd, area) {
-        let engine = engine()?;
         if let Ok(p) = crate::wgc::capture(hwnd) {
             let (l, t) = (area.left.max(p.area.left), area.top.max(p.area.top));
             let (r, b) = ((area.left + area.width).min(p.area.left + p.area.width), (area.top + area.height).min(p.area.top + p.area.height));
@@ -108,8 +114,9 @@ pub fn read_in(hwnd: isize, area: Area) -> Result<Vec<Line>, String> {
                 }
             }
         }
+        return Err("Cannot read the covered window from its own pixels".into());
     }
-    read(area)
+    read_with(area, engine)
 }
 
 /// Read every line of text in an image (top-down BGRA rows, `w` x `h`), in that image's own pixels

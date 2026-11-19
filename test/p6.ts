@@ -8,6 +8,7 @@
 // 4. Two programs at once, one in the browser and one in the bench window, take less time than one after another.
 // 5. A button UI Automation can press goes ahead in the background while the person moves the mouse.
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,15 +18,15 @@ import { TechClient } from "../src/console/tech-client.ts";
 import type { ObserveData, ProgramData } from "../src/shared/protocol.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const localFile = path.join(tmpdir(), `asctrl-p6-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
 // Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
 process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
 // Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
 process.env.ASCTRL_CONFIRM ??= "off";
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_YIELD_MAX: "4" } });
-const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_YIELD_MAX: "4" } }));
+const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
 const tech = new TechClient("ws://127.0.0.1:1", "P6Test");
 let failures = 0;
 const say = (ok: boolean, line: string) => {
@@ -40,7 +41,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  *  (inside an object: an async function returning the promise itself would wait for it) */
 async function person(seconds: number): Promise<{ stopped: Promise<void> }> {
   const signal = path.join(tmpdir(), `asctrl-p6-person-${process.pid}-${Date.now()}`);
-  const p = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/jiggle.ps1"), "-Seconds", String(seconds), "-Signal", signal], { stdio: "ignore", windowsHide: true });
+  const p = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/jiggle.ps1"), "-Seconds", String(seconds), "-Signal", signal], { stdio: "ignore", windowsHide: true }));
   const done = new Promise<void>((r) => p.on("exit", () => r()));
   while (!existsSync(signal)) await sleep(20);
   rmSync(signal, { force: true });

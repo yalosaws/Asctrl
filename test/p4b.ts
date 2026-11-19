@@ -8,6 +8,7 @@
 // 2. "Erase all records" fits nothing there: the model is not sure (or names something that can't be undone):
 //    the program stays stuck for the AI to decide.
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,7 +17,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const localFile = path.join(tmpdir(), `asctrl-p4b-local-${process.pid}.json`);
 const cache = path.join(tmpdir(), `asctrl-p4b-drex-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
@@ -24,8 +25,8 @@ process.env.ASCTRL_LOCAL_FILE = localFile;
 process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
 // Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
 process.env.ASCTRL_CONFIRM ??= "off";
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] });
-const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] }));
+const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
 const env = { ...process.env, RELAY_URL: "ws://127.0.0.1:1", ASCTRL_LOCAL_FILE: localFile, ASCTRL_DREX_CACHE: cache, TECH_NAME: "P4bTest", ASCTRL_NO_LAUNCH: "1", ASCTRL_TOOLS: "full" } as Record<string, string>;
 const mcp = new Client({ name: "p4b-test", version: "1" });
 let failures = 0;

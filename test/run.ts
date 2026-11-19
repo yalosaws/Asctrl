@@ -2,6 +2,7 @@
 // Usage: node test/run.ts [--gmail]   (opens the bench window and Calculator; leave the computer alone ~30 s)
 //   --gmail also composes a mail in the browser's Gmail and discards it (never sends)
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,7 +12,7 @@ import { Runner, type Plan } from "../src/console/run.ts";
 import type { ObserveData } from "../src/shared/protocol.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const localFile = path.join(tmpdir(), `asctrl-run-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
 // Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
@@ -21,8 +22,8 @@ process.env.ASCTRL_CONFIRM ??= "off";
 // A cache of its own, empty: the checks count decision-model calls
 const cacheFile = path.join(tmpdir(), `asctrl-run-cache-${process.pid}.json`);
 process.env.ASCTRL_DREX_CACHE = cacheFile;
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] });
-const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] }));
+const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
 const tech = new TechClient("ws://127.0.0.1:1", "RunTest");
 const runner = new Runner(tech);
 let failures = 0;
@@ -111,8 +112,8 @@ try {
   await tech.call("wait_for", { appears: "计算器|Calculator", timeoutSec: 10 });
   const C = await windowNamed(/^(计算器|Calculator)$/);
   const t0 = performance.now();
-  const q1 = await runner.run({ window: C, steps: [{ keys: "escape" }, { click: "一" }, { click: "二" }, { click: "×" }, { click: "七" }, { click: "等于" }, { expect: "84" }], goal: "compute 12 × 7" }, false);
-  const q2 = await runner.run({ window: C, when: "84", steps: [{ click: "除以" }, { click: "四" }, { click: "等于" }, { expect: "21" }] }, false);
+  const q1 = await runner.run({ window: C, steps: [{ keys: "escape" }, { click: "一" }, { click: "二" }, { keys: "shift+8" }, { click: "七" }, { keys: "enter" }, { expect: "84" }], goal: "compute 12 × 7" }, false);
+  const q2 = await runner.run({ window: C, when: "84", steps: [{ keys: "/" }, { click: "四" }, { keys: "enter" }, { expect: "21" }] }, false);
   const queuedMs = performance.now() - t0;
   const rep = await runner.progress(60);
   const okQ = (rep.text.match(/^r\d+ ✓ done/gm) ?? []).length === 2;

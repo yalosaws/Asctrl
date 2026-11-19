@@ -240,7 +240,7 @@ export function parse(raw: unknown): Message | null {
   }
 }
 
-export const DEFAULT_RELAY_URL = "ws://localhost:8787";
+export const DEFAULT_RELAY_URL = "ws://127.0.0.1:8787";
 
 /** Where a program (exec / resume) stands: `data.program` of their replies */
 export interface ProgramData {

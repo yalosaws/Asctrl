@@ -30,7 +30,7 @@ const FIND: &str = r#"((want, nth, kind) => {
   const norm = s => (s || '').replace(/[\s\u200b-\u200f\u202a-\u202e]+/g, ' ').trim().toLowerCase();
   const w = norm(want);
   const FIELD = 'input:not([type=button]):not([type=submit]):not([type=reset]):not([type=image]):not([type=hidden]),textarea,select,[contenteditable=""],[contenteditable=true],[role=textbox],[role=combobox],[role=searchbox]';
-  const INTER = FIELD + ',a[href],button,summary,[role=button],[role=link],[role=menuitem],[role=tab],[role=checkbox],[role=radio],[role=option],[role=switch],[onclick],[tabindex]:not([tabindex="-1"])';
+  const INTER = FIELD + ',a[href],a[aria-label],button,summary,[role=button],[role=link],[role=menuitem],[role=tab],[role=checkbox],[role=radio],[role=option],[role=switch],[onclick],[tabindex]:not([tabindex="-1"])';
   const all = [];
   const walk = root => { for (const el of root.querySelectorAll('*')) {
     all.push(el);

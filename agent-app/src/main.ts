@@ -153,7 +153,10 @@ $("btn-end").addEventListener("click", () => {
 // ---------------- State machine ----------------
 
 function render(s: Status) {
+  const enteredController = state !== "connected" && s.state === "connected";
+  const leftController = state === "connected" && s.state !== "connected";
   state = s.state;
+  if (leftController && state !== "ready") void collapse();
   document.body.dataset.state = s.state;
   setSession(s.state);
   if (s.state !== "connected") workAbandoned();
@@ -171,7 +174,7 @@ function render(s: Status) {
       break;
     case "ready":
       renderCode(s.code);
-      if (isShown()) {
+      if (leftController || isShown()) {
         void collapse().then(() => {
           orb.goTo(home(), "slow");
           if (state === "ready") showPanel(codeCard, true);
@@ -184,7 +187,7 @@ function render(s: Status) {
       break;
     case "connected":
       showPanel(codeCard, false);
-      if (!isShown()) void expand().then(() => orb.setMood("idle"));
+      if (enteredController || !isShown()) void expand().then(() => { if (state === "connected") orb.setMood("idle"); });
       else {
         orb.goTo(home(), "slow");
         orb.setMood("idle");

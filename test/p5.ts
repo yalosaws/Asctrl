@@ -10,6 +10,7 @@
 //    replaces it, keeping its record, and the new one works.
 // 6. show and forget.
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,14 +19,14 @@ import { TechClient } from "../src/console/tech-client.ts";
 import type { ObserveData, ProgramData } from "../src/shared/protocol.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const localFile = path.join(tmpdir(), `asctrl-p5-local-${process.pid}.json`);
 const skillsFile = path.join(tmpdir(), `asctrl-p5-skills-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
 // Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
 process.env.ASCTRL_CONFIRM ??= "off";
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_SKILLS_FILE: skillsFile } });
-const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_SKILLS_FILE: skillsFile } }));
+const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
 const tech = new TechClient("ws://127.0.0.1:1", "P5Test");
 let failures = 0;
 const say = (ok: boolean, line: string) => {
@@ -37,9 +38,9 @@ const brief = (s?: string) => (s ?? "").split("\n").slice(0, 3).join(" | ");
 type Found = { skills?: { name: string; fits: number; stuck: number; problem: string | null; runs: number }[] };
 
 const SUBMIT = `
-fill({ Name: args.name });
-click('Submit');
-return look({ query: 'Submitted:' }).text.match(/Submitted: \\w+/)[0];`;
+fill({ Name: args.name }, { window: "Asctrl Bench" });
+click('Submit', { window: "Asctrl Bench" });
+return look({ query: 'Submitted:', window: "Asctrl Bench" }).text.match(/Submitted: \\w+/)[0];`;
 
 try {
   await tech.connectLocalDriver({ launch: false, waitMs: 30_000 });
@@ -52,7 +53,7 @@ try {
   say(prog(r1)?.state === "done" && /Kept as the skill "bench-submit"/.test(r1.text ?? ""), `kept as a skill: ${brief(r1.text ?? r1.error)}`);
 
   // 2. Found by the window in front, and by words
-  const byWindow = (await tech.call("skills", {})).data as Found;
+  const byWindow = (await tech.call("skills", { window: B })).data as Found;
   const top = byWindow.skills?.[0];
   say(top?.name === "bench-submit" && top.fits >= 0.8, `with the bench in front and no query, it comes first, fitting ${Math.round((top?.fits ?? 0) * 100)}%`);
   const byWords = (await tech.call("skills", { query: "submit a name in the bench form" })).data as Found;
@@ -69,7 +70,7 @@ try {
   say(!r4.ok && /missing name/.test(r4.error ?? r4.text ?? ""), `refused without its args: ${brief(r4.error ?? r4.text)}`);
 
   // 5. A skill that no longer fits: stuck, then learned again
-  await tech.call("exec", { script: SUBMIT.replace("click('Submit')", "click(args.button)"), args: { name: "Bo", button: "Submit" }, learn: { name: "bench-old", description: "Submit the bench form, the old way" } });
+  await tech.call("exec", { script: SUBMIT.replace("'Submit'", "args.button"), args: { name: "Bo", button: "Submit" }, learn: { name: "bench-old", description: "Submit the bench form, the old way" } });
   const r5 = await tech.call("exec", { skill: "bench-old", args: { name: "Cy", button: "Send now", timeoutSec: 0 } });
   const p5 = prog(r5);
   await tech.call("resume", { id: p5?.id, abort: true });
@@ -84,7 +85,7 @@ try {
   const shown = await tech.call("skills", { show: "bench-submit" });
   const gone = await tech.call("skills", { forget: "bench-old" });
   const left = ((await tech.call("skills", { query: "bench" })).data as Found).skills?.map((s) => s.name);
-  say(/fill\(\{ Name: args.name \}\)/.test(shown.text ?? "") && /Takes args: name/.test(shown.text ?? "") && gone.ok && JSON.stringify(left) === '["bench-submit"]', `show gives its script and args; forget drops one (left: ${JSON.stringify(left)})`);
+  say(/fill\(\{ Name: args.name \}/.test(shown.text ?? "") && /Takes args: name/.test(shown.text ?? "") && gone.ok && JSON.stringify(left) === '["bench-submit"]', `show gives its script and args; forget drops one (left: ${JSON.stringify(left)})`);
 } catch (e) {
   console.error(e);
   failures++;

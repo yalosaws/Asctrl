@@ -58,6 +58,7 @@ struct AgentState {
     fixed_code: std::sync::atomic::AtomicBool,
     /// Who is driving. One at a time: there is one mouse and one keyboard.
     controller: Mutex<Option<Controller>>,
+    handoff: tokio::sync::Mutex<()>,
     relay: Mutex<RelayState>,
     /// The user clicked "End session": each link drops its controller
     kick_relay: Notify,
@@ -128,8 +129,9 @@ fn bring_to_front(app: &AppHandle) {
 }
 
 /// A controller asks to take over. Refused while another one is driving.
-fn attach(app: &AppHandle, name: &str, via: Via) -> Result<(), String> {
+async fn attach(app: &AppHandle, name: &str, via: Via) -> Result<(), String> {
     let st = app.state::<AgentState>();
+    let _handoff = st.handoff.lock().await;
     {
         let mut c = st.controller.lock().unwrap();
         if let Some(cur) = &*c {
@@ -145,6 +147,7 @@ fn attach(app: &AppHandle, name: &str, via: Via) -> Result<(), String> {
 /// The controller that came in over `via` has left (or its link dropped): end what it started
 async fn detach(app: &AppHandle, via: Via) {
     let st = app.state::<AgentState>();
+    let _handoff = st.handoff.lock().await;
     {
         let mut c = st.controller.lock().unwrap();
         if c.as_ref().is_none_or(|c| c.via != via) {

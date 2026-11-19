@@ -30,7 +30,7 @@ fn ws_config() -> WebSocketConfig {
 }
 
 /// Relay URL: command-line flag > environment variable > relay.txt next to the exe > compile-time value >
-/// hosted relay (release) / localhost (debug)
+/// local relay
 pub fn relay_url() -> String {
     if let Some(u) = crate::arg("--relay").or_else(|| std::env::var("ASCTRL_RELAY_URL").ok()) {
         return u;
@@ -43,10 +43,17 @@ pub fn relay_url() -> String {
     {
         return u;
     }
-    // A release exe built without ASCTRL_RELAY_URL used to fall back to localhost and silently
-    // register its code with a relay the console never sees, so release builds default to the hosted one.
-    let fallback = if cfg!(debug_assertions) { "ws://localhost:8787" } else { "ws://124.222.182.40:8787" };
-    option_env!("ASCTRL_RELAY_URL").unwrap_or(fallback).to_string()
+    option_env!("ASCTRL_RELAY_URL").unwrap_or("ws://127.0.0.1:8787").to_string()
+}
+
+fn checked_relay_url(raw: String) -> Result<String, String> {
+    let url = tauri::Url::parse(&raw).map_err(|_| "Invalid relay URL")?;
+    let loopback = url.host_str().is_some_and(|h| h == "localhost" || h.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
+    if url.scheme() == "wss" || (url.scheme() == "ws" && loopback) {
+        Ok(raw)
+    } else {
+        Err("Remote relays require wss:// with a trusted certificate".into())
+    }
 }
 
 // ---- Running a call ----
@@ -94,44 +101,46 @@ fn dispatch(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: &Value) {
     let (id, tool) = (s("id"), s("tool"));
     let args = msg.get("args").cloned().unwrap_or(json!({}));
     let (app, tx) = (app.clone(), tx.clone());
-    match tool.as_str() {
-        "request_admin" => {
-            tauri::async_runtime::spawn(admin::request_admin(app, tx, id));
+    if tool == "plan_mark" {
+        reply_text(&tx, &id, true, &tools::popups::plan_mark(&args));
+        return;
+    }
+    let Ok(call) = app.state::<AgentState>().ctx.calls.clone().try_read_owned() else {
+        reply_text(&tx, &id, false, "The controller session is ending");
+        return;
+    };
+    tauri::async_runtime::spawn(tools::in_session(async move {
+        let _call = call;
+        if tools::session_over() {
+            return;
         }
-        "restart_computer" => {
-            tauri::async_runtime::spawn(admin::restart_computer(app, tx, id, args));
-        }
-        // A plan (run) starts or ends: to the overlay it is one piece of work, so the pauses between its steps
-        // (a decision being made) are not taken for the AI thinking
-        "plan_mark" => {
-            let said = tools::popups::plan_mark(&args);
-            reply_text(&tx, &id, true, &said);
-        }
-        _ => {
-            tauri::async_runtime::spawn(async move {
-                let st = app.state::<AgentState>();
+        let st = app.state::<AgentState>();
+        match tool.as_str() {
+            "request_admin" => admin::request_admin(app.clone(), tx, id).await,
+            "restart_computer" => admin::restart_computer(app.clone(), tx, id, args).await,
+            _ => {
                 let ov = app.state::<overlay::Overlay>();
                 // The orb can't catch the pointer for the whole call, however long it runs, and 1.2 s after
                 let driving = moves_mouse(&tool).then(|| ov.driving(Duration::from_millis(1200)));
                 // A plan's own look round (to find candidates) is not work to show
                 if args.get("silent").and_then(Value::as_bool).unwrap_or(false) {
-                    let out = tools::in_session(fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args))).await;
+                    let out = fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args)).await;
                     drop(driving);
                     reply(&tx, &id, out);
                     return;
                 }
                 let before = tools::fx_before(&st.ctx, &tool, &args);
                 crate::fx::emit(json!({ "phase": "start", "id": id, "tool": tool, "args": fx_args(&args), "geo": before }));
-                let out = tools::in_session(fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args))).await;
+                let out = fx::CALL_ID.scope(id.clone(), tools::run(&st.ctx, &tool, &args)).await;
                 drop(driving);
                 let after = tools::fx_after(&st.ctx, &tool, &before, &out);
                 let shown: String = out.body().chars().take(6000).collect();
                 let quiet = tools::probe_missed(&args, &out);
                 crate::fx::emit(json!({ "phase": "end", "id": id, "tool": tool, "ok": out.ok, "quiet": quiet, "text": shown, "geo": after }));
                 reply(&tx, &id, out);
-            });
+            }
         }
-    }
+    }));
 }
 
 // ---- Relay ----
@@ -154,7 +163,7 @@ fn set_relay(app: &AppHandle, s: RelayState) {
 
 async fn relay_once(app: &AppHandle) -> Result<(), String> {
     let st = app.state::<AgentState>();
-    let (ws, _) = tokio_tungstenite::connect_async_with_config(relay_url(), Some(ws_config()), true).await.map_err(|e| e.to_string())?;
+    let (ws, _) = tokio_tungstenite::connect_async_with_config(checked_relay_url(relay_url())?, Some(ws_config()), true).await.map_err(|e| e.to_string())?;
     let (mut sink, mut stream) = ws.split();
 
     // Every outgoing message goes through this channel so reads and writes never block each other.
@@ -216,7 +225,7 @@ async fn relay_message(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg:
         Some("consent_request") => {
             // Having the code is enough to connect: the person handed it out on purpose, and the session
             // is shown on their screen the whole time. Refused while someone else is driving (an AI on this machine).
-            let allow = attach(app, &s("techName"), Via::Relay).is_ok();
+            let allow = attach(app, &s("techName"), Via::Relay).await.is_ok();
             let _ = tx.send(json!({ "type": "consent_reply", "allow": allow }).to_string());
         }
         // Only the controller that is attached through the relay may call
@@ -314,7 +323,7 @@ async fn local_session(app: AppHandle, stream: tokio::net::TcpStream, token: Str
         Some("Wrong token".to_string())
     } else {
         let name = hello.get("name").and_then(Value::as_str).unwrap_or("").trim().chars().take(64).collect::<String>();
-        attach(&app, if name.is_empty() { "Local AI" } else { &name }, Via::Local).err()
+        attach(&app, if name.is_empty() { "Local AI" } else { &name }, Via::Local).await.err()
     };
     if let Some(message) = refuse {
         let _ = sink.send(WsMsg::text(json!({ "type": "error", "message": message }).to_string())).await;
@@ -363,4 +372,19 @@ async fn local_session(app: AppHandle, stream: tokio::net::TcpStream, token: Str
     let _ = stop.send(());
     let _ = writer.await;
     detach(&app, Via::Local).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_relays_require_tls() {
+        for url in ["wss://relay.example/relay", "ws://127.0.0.1:8787", "ws://[::1]:8787", "ws://localhost:8787"] {
+            assert!(checked_relay_url(url.into()).is_ok());
+        }
+        for url in ["ws://relay.example", "ws://192.0.2.1", "https://relay.example", "not an address"] {
+            assert!(checked_relay_url(url.into()).is_err());
+        }
+    }
 }

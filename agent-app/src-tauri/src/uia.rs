@@ -1292,6 +1292,8 @@ pub struct Focus {
     pub label: String,
     pub value: Option<String>,
     pub password: bool,
+    /// Where it is on the screen, when it says
+    pub rect: Option<Rect>,
 }
 
 /// The `n` characters just before the caret in the control with the keyboard focus, when it is a text control
@@ -1326,7 +1328,8 @@ pub fn focused() -> Option<Focus> {
     let vp = pattern::<IUIAutomationValuePattern>(&el, UIA_ValuePatternId);
     let value = if password { None } else { vp.as_ref().and_then(|p| unsafe { p.CurrentValue() }.ok()).map(|b| b.to_string()) };
     let label = if name.trim().is_empty() { role.to_string() } else { format!("{role} \"{}\"", clip(&name, 60)) };
-    Some(Focus { role, label, value, password })
+    let rect = unsafe { el.CurrentBoundingRectangle() }.ok().filter(|r| r.right > r.left && r.bottom > r.top).map(|r| (r.left, r.top, r.right, r.bottom));
+    Some(Focus { role, label, value, password, rect })
 }
 
 #[cfg(test)]

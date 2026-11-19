@@ -33,7 +33,7 @@ const DESTRUCTIVE: [&str; 22] = [
 ];
 
 struct Watch {
-    plan: String,
+    revision: u64,
     /// The plan's own: {text a popup shows: the button to press}
     on: Vec<(String, String)>,
     /// Text the plan works with: a window showing any of it belongs to the plan
@@ -44,10 +44,11 @@ struct Watch {
     log: Vec<String>,
 }
 
-static WATCH: Mutex<Option<Watch>> = Mutex::new(None);
+static WATCHES: Mutex<std::collections::BTreeMap<String, Watch>> = Mutex::new(std::collections::BTreeMap::new());
+static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 /// A popup is being judged or dismissed: the plan's next step waits for it (see `clear`)
 static BUSY: AtomicBool = AtomicBool::new(false);
-/// Bumped by every start, so a watcher left from an earlier plan stops
+/// Distinguishes a current rule set from a stale decision awaiting the input lock.
 static GEN: AtomicU64 = AtomicU64::new(0);
 
 fn lower(v: &Value) -> Vec<String> {
@@ -79,51 +80,58 @@ pub fn start(args: &Value) {
         .unwrap_or_default();
     let known = winmgr::list().into_iter().map(|w| w.handle).collect();
     let plan = str_arg(args, "plan").to_string();
-    *WATCH.lock().unwrap() = Some(Watch { plan, on, keep: lower(args.get("keep").unwrap_or(&Value::Null)), known, log: vec![] });
-    let mine = GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    tauri::async_runtime::spawn(async move {
-        let mut last = crate::events::seq();
-        while GEN.load(Ordering::SeqCst) == mine && WATCH.lock().unwrap().is_some() {
-            if crate::events::live() {
-                let before = last;
-                crate::events::wait_async(before, IDLE).await;
-                last = crate::events::seq();
-                if last != before {
-                    // Woken: only a window coming up is worth a look
-                    if !crate::events::since(before).is_none_or(|v| v.iter().any(|e| e.kind.arrival())) {
-                        continue;
-                    }
-                    tokio::time::sleep(GRACE).await;
-                }
-            } else {
-                tokio::time::sleep(POLL).await;
-            }
-            let Ok(Some(found)) = tokio::task::spawn_blocking(look).await else { continue };
-            BUSY.store(true, Ordering::SeqCst);
-            // Its turn among the plan's actions: after the step in progress, before the next
-            let Ok(turn) = acting().await else {
-                BUSY.store(false, Ordering::SeqCst);
-                continue;
-            };
-            let line = tokio::task::spawn_blocking(move || dismiss(found)).await.unwrap_or_else(|e| e.to_string());
-            drop(turn);
-            if let Some(w) = WATCH.lock().unwrap().as_mut() {
-                w.log.push(line);
-            }
-            BUSY.store(false, Ordering::SeqCst);
-        }
-    });
+    let revision = GEN.fetch_add(1, Ordering::SeqCst);
+    let mut watches = WATCHES.lock().unwrap();
+    let watch = watches.entry(plan).or_insert_with(|| Watch { revision, on: vec![], keep: vec![], known, log: vec![] });
+    watch.revision = revision;
+    watch.on = on;
+    watch.keep = lower(args.get("keep").unwrap_or(&Value::Null));
+    drop(watches);
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| { tauri::async_runtime::spawn(watch_popups()); });
+    WAKE.notify_one();
 }
 
-/// The plan ended: stop watching, and say what was done
-pub fn stop(plan: &str) -> String {
-    let mut g = WATCH.lock().unwrap();
-    if g.as_ref().is_some_and(|w| w.plan == plan || plan.is_empty()) {
-        GEN.fetch_add(1, Ordering::SeqCst);
+async fn watch_popups() {
+    loop {
+        if WATCHES.lock().unwrap().is_empty() {
+            WAKE.notified().await;
+            continue;
+        }
+        if crate::events::live() {
+            let before = crate::events::seq();
+            crate::events::wait_async(before, IDLE).await;
+            if crate::events::seq() != before {
+                if crate::events::since(before).is_some_and(|events| !events.iter().any(|e| e.kind.arrival())) { continue; }
+                tokio::time::sleep(GRACE).await;
+            }
+        } else {
+            tokio::time::sleep(POLL).await;
+        }
+        if let Ok(Some((owner, revision, found))) = tokio::task::spawn_blocking(look).await
+            && let Ok(_turn) = acting().await
+        {
+            let _ = tokio::task::spawn_blocking(move || {
+                let mut watches = WATCHES.lock().unwrap();
+                if let Some(w) = watches.get_mut(&owner)
+                    && w.revision == revision && winmgr::exists(found.hwnd)
+                {
+                    w.log.push(dismiss(found));
+                }
+            }).await;
+        }
         BUSY.store(false, Ordering::SeqCst);
-        return g.take().map(|w| w.log.join("\n")).unwrap_or_default();
     }
-    String::new()
+}
+
+/// Stop only this plan. An empty name clears every watch during session teardown.
+pub fn stop(plan: &str) -> String {
+    let mut watches = WATCHES.lock().unwrap();
+    if plan.is_empty() {
+        watches.clear();
+        return String::new();
+    }
+    watches.remove(plan).map(|w| w.log.join("\n")).unwrap_or_default()
 }
 
 /// Wait while a popup is being dealt with (at most `max`), so a step does not act on a screen it covers
@@ -140,6 +148,7 @@ pub fn busy() -> bool {
 }
 
 struct Found {
+    hwnd: isize,
     title: String,
     point: (i32, i32),
     /// Pressed directly (UI Automation) unless it is part of a web page
@@ -149,32 +158,29 @@ struct Found {
 }
 
 /// A new window to dismiss, if there is one. Every new window is judged once.
-fn look() -> Option<Found> {
-    let (fresh, on, keep) = {
-        let mut g = WATCH.lock().unwrap();
-        let w = g.as_mut()?;
-        // Titled windows, and whatever is in front (a popup often has no title)
-        let mut all: Vec<isize> = winmgr::list().into_iter().map(|x| x.handle).collect();
-        let fg = winmgr::foreground();
-        if fg != 0 && winmgr::pid_of(fg) != std::process::id() {
-            all.push(fg);
+fn look() -> Option<(String, u64, Found)> {
+    let mut all: HashSet<_> = winmgr::list().into_iter().map(|w| w.handle).collect();
+    let fg = winmgr::foreground();
+    if fg != 0 && winmgr::pid_of(fg) != std::process::id() { all.insert(fg); }
+    let mut watches = WATCHES.lock().unwrap();
+    let single = watches.len() == 1;
+    for hwnd in all {
+        let mut chosen = None;
+        let mut conflict = false;
+        for (owner, watch) in watches.iter_mut() {
+            if !watch.known.insert(hwnd) { continue; }
+            BUSY.store(true, Ordering::SeqCst);
+            if let Some(found) = judge(hwnd, &watch.on, &watch.keep, single) {
+                if chosen.is_some() { conflict = true; }
+                chosen = Some((owner.clone(), watch.revision, found));
+            }
         }
-        let fresh: Vec<isize> = all.into_iter().filter(|h| !w.known.contains(h)).collect::<HashSet<_>>().into_iter().collect();
-        if fresh.is_empty() {
-            return None;
-        }
-        w.known.extend(&fresh);
-        (fresh, w.on.clone(), w.keep.clone())
-    };
-    BUSY.store(true, Ordering::SeqCst);
-    let found = fresh.into_iter().find_map(|h| judge(h, &on, &keep));
-    if found.is_none() {
-        BUSY.store(false, Ordering::SeqCst);
+        if chosen.is_some() && !conflict { return chosen; }
     }
-    found
+    None
 }
 
-fn judge(h: isize, on: &[(String, String)], keep: &[String]) -> Option<Found> {
+fn judge(h: isize, on: &[(String, String)], keep: &[String], allow_default: bool) -> Option<Found> {
     let scene = uia::snapshot(h, false).ok()?;
     let title = scene.title.to_lowercase();
     let shows = |t: &str| title.contains(t) || scene.nodes.iter().any(|n| n.name.to_lowercase().contains(t));
@@ -186,6 +192,7 @@ fn judge(h: isize, on: &[(String, String)], keep: &[String]) -> Option<Found> {
             .filter(|n| n.has(flag::ACTIONABLE) && n.rect.2 > n.rect.0)
             .find(|n| n.name.trim().to_lowercase() == name)
             .map(|n| Found {
+                hwnd: h,
                 title: scene.title.clone(),
                 point: ((n.rect.0 + n.rect.2) / 2, (n.rect.1 + n.rect.3) / 2),
                 rf: (!n.has(flag::WEB)).then_some(n.rf),
@@ -198,7 +205,7 @@ fn judge(h: isize, on: &[(String, String)], keep: &[String]) -> Option<Found> {
         return Some(Found { why: "the plan's rule", ..f });
     }
     // A window with what the plan works with is the plan's, not a popup
-    if keep.iter().any(|t| shows(t)) {
+    if !allow_default || keep.iter().any(|t| shows(t)) {
         return None;
     }
     let f = DISMISS.iter().find_map(|b| press_of(b))?;
@@ -213,7 +220,8 @@ fn dismiss(f: Found) -> String {
     let call = format!("popup-{}", GEN.load(Ordering::SeqCst));
     let pressed = match f.rf.map(uia::live) {
         Some(Ok(l)) => l.press().map(|_| ()),
-        _ => input::click(f.point.0, f.point.1, "", 1, ""),
+        _ if winmgr::foreground() == f.hwnd => input::click(f.point.0, f.point.1, "", 1, ""),
+        _ => Err("Popup is no longer in front".into()),
     };
     let ok = pressed.is_ok();
     fx::click(&call, "a", f.point, 1, ok);

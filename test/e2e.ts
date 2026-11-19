@@ -2,6 +2,7 @@
 // Usage: npm test                      the release build (agent-app/src-tauri/target/release/asctrl-agent.exe)
 //        npm test -- --app <exe path>  another build of the driver
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,7 +24,7 @@ const DISK_FULL = "磁盘已满";
 const UPLOAD_NAME = "上传.txt";
 
 const appIdx = process.argv.indexOf("--app");
-const appExe = appIdx >= 0 ? process.argv[appIdx + 1] : path.resolve(import.meta.dirname, "../agent-app/src-tauri/target/release/asctrl-agent.exe");
+const appExe = appIdx >= 0 ? process.argv[appIdx + 1] : driverExecutable(path.resolve(import.meta.dirname, ".."));
 
 // This run's driver writes its address to its own file, so a driver the user already has running is left alone
 const localFile = path.join(tmpdir(), `asctrl-e2e-local-${process.pid}.json`);
@@ -33,7 +34,18 @@ process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${pro
 // Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
 process.env.ASCTRL_CONFIRM ??= "off";
 
-const agent = spawn(appExe, ["--code", CODE, "--relay", `ws://localhost:${PORT}`], { stdio: ["ignore", "pipe", "inherit"] });
+// Wait for this fixture's actual handshake before attempting to pair.
+const registered = new Promise<void>((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error("Test driver did not register with the relay")), 30_000);
+  relay.on("connection", (socket) => socket.once("message", (raw) => {
+    const hello = JSON.parse(raw.toString());
+    if (hello.type === "agent_hello" && hello.code === CODE) {
+      clearTimeout(timer);
+      resolve();
+    }
+  }));
+});
+const agent = owned(() => spawn(appExe, ["--code", CODE, "--relay", `ws://127.0.0.1:${PORT}`], { stdio: ["ignore", "pipe", "inherit"] }));
 agent.stdout.on("data", (d) => process.stdout.write(`  [agent] ${d}`));
 
 let failed = 0;
@@ -43,20 +55,20 @@ function check(name: string, cond: boolean, detail = "") {
 }
 
 try {
-  await new Promise((r) => setTimeout(r, 1500)); // wait for the agent to register
+  await registered;
 
-  const bad = new TechClient(`ws://localhost:${PORT}`);
+  const bad = new TechClient(`ws://127.0.0.1:${PORT}`);
   await bad.connect("000000").then(
     () => check("wrong code is rejected", false),
     (e) => check("wrong code is rejected", true, e.message),
   );
 
-  const tech = new TechClient(`ws://localhost:${PORT}`, "Tester");
+  const tech = new TechClient(`ws://127.0.0.1:${PORT}`, "Tester");
   const host = await tech.connect(CODE);
   check("paired", !!host, host);
 
   // A second technician is turned away, and its leaving must not end the first one's session
-  await new TechClient(`ws://localhost:${PORT}`, "Intruder").connect(CODE).then(
+  await new TechClient(`ws://127.0.0.1:${PORT}`, "Intruder").connect(CODE).then(
     () => check("second technician is rejected", false),
     (e) => check("second technician is rejected", /already connected/.test(e.message), e.message),
   );
@@ -77,7 +89,7 @@ try {
 
   await tech.call("run_powershell", { script: "Set-Location $env:TEMP; $asctrlVar = 'kept'" });
   const keep = await tech.call("run_powershell", { script: "\"$((Get-Location).Path)|$asctrlVar\"" });
-  check("session keeps directory and variables", keep.ok && /Temp\|kept/i.test(keep.text ?? ""), keep.text);
+  check("session keeps directory and variables", keep.ok && (keep.text ?? "").trim().toLowerCase() === (tmpdir() + "|kept").toLowerCase(), keep.text);
 
   await tech.call("run_powershell", { reset: true });
   const fresh = await tech.call("run_powershell", { script: "\"[$asctrlVar]\"" });
@@ -242,12 +254,29 @@ try {
       () => check("a wrong local token is refused", false),
       (e) => check("a wrong local token is refused", /Wrong token/.test(e.message), e.message),
     );
+    const paused = await tech.call("exec", { script: "return ask('Session fixture?');", learn: false });
+    const oldId = (paused.data as { program?: { id: number } } | undefined)?.program?.id;
+    const oldCall = tech.call("run_powershell", { script: "$oldSessionOnly = 1; Start-Sleep -Seconds 30" }).catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 150));
     tech.disconnect();
-    await new Promise((r) => setTimeout(r, 500));
-    const host = await local.connectLocal(info).catch((e) => String(e));
+    const deadline = Date.now() + 8000;
+    let host = "";
+    while (!local.connected) {
+      try { host = await local.connectLocal(info); }
+      catch (e) {
+        if (Date.now() >= deadline || !/already controlling/.test(String(e))) throw e;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    await oldCall;
     check("local link connects once the relay controller has left", local.connected && local.local, host);
     const viaLocal = await local.call("run_powershell", { script: "'over the local link'" });
     check("a tool call over the local link", viaLocal.ok && !!viaLocal.text?.includes("over the local link"), viaLocal.text ?? viaLocal.error);
+    const clean = await local.call("run_powershell", { script: "'old=[' + $oldSessionOnly + ']'; $newSessionOnly = 42" });
+    const kept = await local.call("run_powershell", { script: "$newSessionOnly" });
+    check("handoff isolates the cancelled shell and preserves the new one", clean.ok && !!clean.text?.includes("old=[]") && kept.text?.trim() === "42");
+    const oldProgram = await local.call("resume", { id: oldId });
+    check("a new controller cannot resume the previous controller's program", !!oldId && !oldProgram.ok);
     local.disconnect();
     await new Promise((r) => setTimeout(r, 500));
     await tech.connect(CODE);

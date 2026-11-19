@@ -15,8 +15,9 @@
 // 7. A form in an iframe from another site (run by the browser in a process of its own): in this browser and in
 //    Asctrl's own, through the page, the mouse not moving.
 
+import { driverExecutable, owned, fixtureDirectory } from "./fixtures.ts";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -25,7 +26,7 @@ import { TechClient } from "../src/console/tech-client.ts";
 import type { ObserveData } from "../src/shared/protocol.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const localFile = path.join(tmpdir(), `asctrl-ext-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
 // Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
@@ -57,23 +58,25 @@ const base = `http://127.0.0.1:${(web.address() as AddressInfo).port}`;
 // extensions in developer mode: it is used only when asked for (node test/ext.ts --edge)
 const useEdge = process.argv.includes("--edge");
 const browsers = [
+  ...(process.env.ASCTRL_EXT_TEST_EXE ? [[process.env.ASCTRL_EXT_TEST_EXE, "Test browser"]] : []),
   [`${process.env.ProgramFiles}\\Google\\Chrome\\Application\\chrome.exe`, "Chrome"],
   [`${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`, "Chrome"],
   ...(useEdge ? [[`${process.env["ProgramFiles(x86)"]}\\Microsoft\\Edge\\Application\\msedge.exe`, "Edge"]] : []),
 ].filter(([p]) => existsSync(p));
-const profile = mkdtempSync(path.join(tmpdir(), "asctrl-ext-profile-"));
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] });
+const profile = fixtureDirectory(path.join(tmpdir(), "asctrl-ext-profile-"));
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] }));
 const tech = new TechClient("ws://127.0.0.1:1", "ExtTest");
 let browser: ReturnType<typeof spawn> | undefined;
 let C: number | undefined;
+let debug = "";
 try {
   await tech.connectLocalDriver({ launch: false, waitMs: 30_000 });
   // 1. Start a browser with the extension; the driver registered the relay when it started
   let opened: Awaited<ReturnType<typeof tech.call>> | undefined;
   let name = "";
   for (const [bin, n] of browsers) {
-    browser = spawn(bin, [`--user-data-dir=${profile}`, `--load-extension=${path.join(root, "browser-extension")}`, "--disable-features=DisableLoadExtensionCommandLineSwitch",
-      "--no-first-run", "--no-default-browser-check", "--new-window", `${base}/p3b.html`], { stdio: "ignore" });
+    browser = owned(() => spawn(bin, [`--user-data-dir=${profile}`, `--load-extension=${path.join(root, "browser-extension")}`, "--disable-features=DisableLoadExtensionCommandLineSwitch",
+      "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1", "--no-first-run", "--no-default-browser-check", "--new-window", "about:blank"], { stdio: "ignore" }));
     const t0 = performance.now();
     while (performance.now() - t0 < 20_000) {
       opened = await tech.call("open_app", { target: `${base}/p3.html`, browser: "user", after: "none" });
@@ -86,6 +89,21 @@ try {
       // A fresh profile opens a tab of its own some seconds in (Edge: a welcome page) and puts it in front:
       // let that happen, then open the test page again, in front
       await sleep(Math.max(0, 18_000 - (performance.now() - t0)));
+      // Create the user's existing tab independently of Asctrl, after first-run startup has completed.
+      const port = Number(readFileSync(path.join(profile, "DevToolsActivePort"), "utf8").split(/\r?\n/)[0]);
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error("Missing fixture debugging port");
+      debug = `http://127.0.0.1:${port}`;
+      const created = await fetch(debug + "/json/new?" + encodeURIComponent(base + "/p3b.html"), { method: "PUT" });
+      if (!created.ok) throw new Error("Could not open existing fixture tab");
+      const { id } = await created.json() as { id: string };
+      let ready = false;
+      for (let i = 0; i < 40 && !ready; i++) {
+        const tabs = await (await fetch(debug + "/json/list")).json() as { id: string; title: string }[];
+        ready = tabs.some((t) => t.id === id && t.title === "Second Page");
+        if (!ready) await sleep(200);
+      }
+      if (!ready) throw new Error("Existing fixture tab did not finish loading");
+
       opened = await tech.call("open_app", { target: `${base}/p3.html`, browser: "user", after: "none" });
       break;
     }
@@ -93,7 +111,7 @@ try {
   }
   if (!opened?.ok) throw new Error(`no browser connected through the extension: ${opened?.error}`);
   // 2.
-  const W = (opened.data as { handle?: number } | undefined)?.handle;
+  let W = (opened.data as { handle?: number } | undefined)?.handle;
   say(!!W && /person's own browser/.test(opened.text ?? ""), `browser: "user" opened the page in a new tab of ${name}: ${first(opened.text)}`);
 
   // 3. Through the page, in front
@@ -128,19 +146,30 @@ try {
   await tech.call("focus_window", { window: C, action: "close", after: "none" });
   C = undefined;
 
-  // 5. The person switches to the tab the browser started with: the window now shows it, and that is the one worked
-  await tech.call("focus_window", { window: W, after: "none" });
-  await tech.call("press_keys", { keys: "ctrl+1", window: W, after: "none" });
-  await sleep(800);
+  // Activate the existing fixture tab independently. The reads still go through the driver's extension.
+  const selectTab = async (file: string, title: string) => {
+    const tabs = await (await fetch(debug + "/json/list")).json() as { id: string; url: string }[];
+    const tab = tabs.find((t) => t.url === base + "/" + file);
+    if (!tab) throw new Error("Missing browser fixture tab: " + file);
+    const activated = await fetch(`${debug}/json/activate/${encodeURIComponent(tab.id)}`);
+    if (!activated.ok) throw new Error("Could not activate browser fixture: " + file);
+    for (let i = 0; i < 20; i++) {
+      const windows = ((await tech.call("observe", { max: 1 })).data as ObserveData).windows;
+      const selected = windows.filter((w) => w.title.startsWith(title));
+      if (selected.length === 1) return selected[0].handle;
+      await sleep(200);
+    }
+    throw new Error("Missing fixture window: " + title);
+  };
+  W = await selectTab("p3b.html", "Second Page");
   const r = await tech.call("read_text", { window: W });
-  say(r.ok && /Second Page/.test(r.text ?? "") && (r.data as { channel?: string } | undefined)?.channel === "page", `the tab the person switched to (one Asctrl did not open) is read through the page: ${first(r.text ?? r.error)}`);
-  await tech.call("press_keys", { keys: "ctrl+2", window: W, after: "none" });
-  await sleep(800);
+  say(r.ok && /You arrived/.test(r.text ?? "") && (r.data as { channel?: string } | undefined)?.channel === "page", "the extension read the body of the existing tab after the user switched to it");
+  W = await selectTab("p3.html", "Asctrl Page Test");
 
   // 6. Let go after 15 s without work: the extension says which tabs it holds
   await sleep(22_000);
   const held = await tech.call("read_text", { window: W });
-  say(held.ok && (held.data as { channel?: string } | undefined)?.channel === "page", `after a pause the tab is worked again (attached anew): ${first(held.text ?? held.error)}`);
+  say(held.ok && /END-OF-PAGE-MARKER/.test(held.text ?? "") && (held.data as { channel?: string } | undefined)?.channel === "page", `after a pause the tab is worked again (attached anew): ${first(held.text ?? held.error)}`);
 
   // 7. A form in an iframe from another site (its own process), in this browser and in Asctrl's own
   for (const which of ["user", "asctrl"] as const) {

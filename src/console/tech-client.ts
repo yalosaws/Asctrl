@@ -76,7 +76,12 @@ export class TechClient {
   }
 
   /** Connect through the relay to the computer showing `code` */
-  connect(code: string, timeoutMs = 120_000): Promise<string> {
+  async connect(code: string, timeoutMs = 120_000): Promise<string> {
+    const url = new URL(this.relayUrl);
+    const loopback = url.hostname === "localhost" || url.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
+    if (url.protocol !== "wss:" && !(url.protocol === "ws:" && loopback)) {
+      throw new Error("Remote relays require wss:// with a trusted certificate");
+    }
     return this.open(this.relayUrl, { type: "tech_hello", code, techName: this.techName, token: this.token }, timeoutMs, false);
   }
 

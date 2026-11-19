@@ -44,26 +44,13 @@ pub(super) fn clipboard_release() {
 /// handles the keystroke, a moment later, so it is put back after a pause (or as soon as the text is seen to
 /// have arrived) — in the background: the reply does not wait for it, and the next action does (see `acting`).
 /// If someone else put something new on the clipboard in the meantime, it is theirs and is left alone.
-fn paste(t: &str, saved: Option<String>) -> Result<(), String> {
-    clipboard_settled();
-    winmgr::set_clipboard_text(t)?;
-    let serial = winmgr::clipboard_serial();
+fn paste(t: &str, saved: Option<String>, previous: u32) -> Result<(), String> {
+    let serial = winmgr::replace_clipboard(Some(t), Some(previous))?;
     let r = input::press_keys("ctrl+v");
     let (now, wait) = std::sync::mpsc::channel::<()>();
-    let pasted = t.to_string();
     let thread = std::thread::spawn(move || {
         let _ = wait.recv_timeout(PASTE_GRACE);
-        // Still what we put there? The serial moves on any change; some tools re-publish the same text
-        let ours = winmgr::clipboard_serial() == serial || winmgr::clipboard_text().ok().flatten().is_some_and(|c| c == pasted);
-        if !ours {
-            return;
-        }
-        match saved {
-            Some(s) => {
-                let _ = winmgr::set_clipboard_text(&s);
-            }
-            None => winmgr::clear_clipboard(),
-        }
+        let _ = winmgr::replace_clipboard(saved.as_deref(), Some(serial));
     });
     *RESTORING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Restore { thread, now });
     r
@@ -77,12 +64,13 @@ fn pastes(t: &str, method: &str) -> bool {
 /// Type or paste, by method and length. Says how it went in.
 pub(super) fn enter_text(t: &str, method: &str) -> Result<&'static str, String> {
     if pastes(t, method) {
+        clipboard_settled();
         match winmgr::clipboard_text() {
-            Ok(saved) => {
-                paste(t, saved)?;
+            Ok((saved, serial)) => {
+                paste(t, saved, serial)?;
                 return Ok(" (pasted; the clipboard was put back)");
             }
-            Err(_) if method == "paste" => return Err("The clipboard holds an image or files, which pasting would lose; use method keys".into()),
+            Err(_) if method == "paste" => return Err("The clipboard contains formats that pasting would lose; use method keys".into()),
             // Something on the clipboard that couldn't be put back: type instead
             Err(_) => {}
         }
@@ -149,6 +137,40 @@ pub(super) fn focus_target(loc: &Located, call: &str, part: &str) -> Result<(), 
     r?;
     std::thread::sleep(Duration::from_millis(50));
     Ok(())
+}
+
+/// Another text field kept the keyboard focus after `loc` was focused (a dropdown or a field's own
+/// autocomplete took the click): the field that has it, else None. A focus inside or around the target (its
+/// label, the box wrapping it) counts as the target's.
+fn other_field_focused(loc: &Located) -> Option<String> {
+    let live = loc.live.as_ref()?;
+    if live.has_focus() {
+        return None;
+    }
+    let target = live.rect()?;
+    let fo = uia::focused()?;
+    let r = fo.rect?;
+    let overlaps = r.0 < target.2 && target.0 < r.2 && r.1 < target.3 && target.1 < r.3;
+    (matches!(fo.role, "Edit" | "ComboBox" | "Document") && !overlaps).then_some(fo.label)
+}
+
+/// Focus `loc` for typing, and make sure the keys will go there: once more if another field kept the focus,
+/// then refuse rather than type into the wrong one
+fn focus_for_typing(loc: &Located, call: &str) -> Result<(), String> {
+    focus_target(loc, call, "f")?;
+    if other_field_focused(loc).is_none() {
+        return Ok(());
+    }
+    // The click may have landed on a field's dropdown drawn over the target (a page's own popup, which
+    // UI Automation doesn't see as covering it): give the target the focus directly instead
+    std::thread::sleep(Duration::from_millis(150));
+    if !loc.live.as_ref().is_some_and(|l| l.focus().is_ok() && { std::thread::sleep(Duration::from_millis(50)); l.has_focus() }) {
+        focus_target(loc, call, "f")?;
+    }
+    match other_field_focused(loc) {
+        None => Ok(()),
+        Some(other) => Err(format!("Nothing typed: {} did not take the keyboard focus, which stayed on {other}", loc.desc)),
+    }
 }
 
 /// What the focused field holds after typing `typed`: (what has the focus, a note for the reply, the
@@ -228,7 +250,7 @@ pub(super) async fn type_text(ctx: &Ctx, args: &Value) -> Output {
         let mut scene = None;
         if let Some(a) = &ask {
             let loc = locate::resolve(a)?;
-            focus_target(&loc, &call, "f")?;
+            if t.is_empty() { focus_target(&loc, &call, "f")?; } else { focus_for_typing(&loc, &call)?; }
             at = Some(loc.point);
             scene = loc.scene;
         } else if let Some(h) = window {

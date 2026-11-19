@@ -245,13 +245,14 @@ impl Host {
     }
 
     fn call(&self, op: &str, a: Value) -> Value {
+        if self.p.stop.load(Ordering::SeqCst) || Instant::now() >= self.deadline { return json!({ "__error": "the program was stopped" }); }
         match op {
             "log" => {
                 self.p.log(a.as_str().unwrap_or("").chars().take(2000).collect());
                 Value::Null
             }
             "sleep" => {
-                let end = Instant::now() + Duration::from_millis(a.as_u64().unwrap_or(0).min(3_600_000));
+                let end = self.deadline.min(Instant::now() + Duration::from_millis(a.as_u64().unwrap_or(0).min(3_600_000)));
                 while Instant::now() < end && !self.p.stop.load(Ordering::SeqCst) {
                     std::thread::sleep(end.saturating_duration_since(Instant::now()).min(Duration::from_millis(50)));
                 }
@@ -297,7 +298,7 @@ impl Host {
 
     fn tool(&self, mut name: String, mut args: Value, line: Option<u64>, lenient: bool) -> Value {
         loop {
-            if self.p.stop.load(Ordering::SeqCst) {
+            if Instant::now() >= self.deadline || self.p.stop.load(Ordering::SeqCst) {
                 return json!({ "__error": "the program was stopped" });
             }
             if matches!(name.as_str(), "exec" | "resume") {
@@ -321,7 +322,17 @@ impl Host {
             if self.tools.send(Req { tool: name.clone(), args: args.clone(), reply: tx }).is_err() {
                 return json!({ "__error": "the session has ended" });
             }
-            let Ok(out) = rx.recv() else { return json!({ "__error": "the session has ended" }) };
+            let out = loop {
+                let left = self.deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() || self.p.stop.load(Ordering::SeqCst) {
+                    return json!({ "__error": "the program was stopped" });
+                }
+                match rx.recv_timeout(left.min(Duration::from_millis(100))) {
+                    Ok(out) => break out,
+                    Err(smpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(_) => return json!({ "__error": "the session has ended" }),
+                }
+            };
             self.p.set(|s| s.actions += 1);
             if out["ok"] == true || lenient {
                 return out;
@@ -560,12 +571,15 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
     let (dtx, drx) = smpsc::channel();
     *p.decide.lock().unwrap() = Some(dtx);
     let (ttx, mut trx) = tokio::sync::mpsc::unbounded_channel::<Req>();
+    let deadline = Instant::now() + life;
     // The program's actions, run on the session as the AI's are
     {
         let p = p.clone();
         tokio::spawn(in_session(async move {
             let mut n = 0;
             while let Some(r) = trx.recv().await {
+                let Ok(_call) = me.calls.try_read() else { break };
+                if session_over() || p.stop.load(Ordering::SeqCst) || Instant::now() >= deadline { break; }
                 n += 1;
                 // Learning: the make-up of each window it acts in, as it is before the first action there
                 if p.learn.is_some() || p.auto {
@@ -580,14 +594,15 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
                 }
                 // A popup being dismissed goes first
                 popups::clear(Duration::from_secs(2)).await;
-                let out = batch::run_step(&me, &r.tool, &r.args, format!("p{}-{n}", p.id), false).await;
+                if session_over() || p.stop.load(Ordering::SeqCst) || Instant::now() >= deadline { break; }
+                let step = batch::run_step(&me, &r.tool, &r.args, format!("p{}-{n}", p.id), false);
+                let out = PROGRAM_DEADLINE.scope(deadline, step).await;
                 let _ = r.reply.send(as_js(&out));
             }
         }));
     }
     {
         let p = p.clone();
-        let deadline = Instant::now() + life;
         let pt = p.clone();
         let spawned = std::thread::Builder::new().name(format!("asctrl-program-{}", p.id)).stack_size(8 << 20).spawn(move || {
             let p = pt;
@@ -598,7 +613,8 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
             let host = Host { p: p.clone(), given: strings_in(&input), tools: ttx, decisions: drx, deadline };
             let stop = p.stop.clone();
             let end = run_js(&src, &input, deadline, stop, move |op, a| host.call(op, a));
-            let timed_out = Instant::now() > deadline;
+            let timed_out = Instant::now() >= deadline;
+            let end = if timed_out || p.stop.load(Ordering::SeqCst) { p.stop.store(true, Ordering::SeqCst); End::Interrupted } else { end };
             // Ended well: count it for its skill, and keep it as one when asked
             let mut note = None;
             if matches!(end, End::Done(_)) {
@@ -826,11 +842,21 @@ async fn report(p: &Program, wait: Duration) -> Output {
 }
 
 /// Stop every program (the controller left)
-pub(super) fn stop_all(ctx: &Ctx) {
-    for p in ctx.programs.lock().unwrap().map.values() {
+pub(super) async fn stop_all(ctx: &Ctx) {
+    let programs = std::mem::take(&mut ctx.programs.lock().unwrap().map);
+    for p in programs.values() {
         p.stop.store(true, Ordering::SeqCst);
         if let Some(tx) = p.decide.lock().unwrap().as_ref() {
             let _ = tx.send(Decision::Abort("the session ended".into()));
+        }
+    }
+    for p in programs.into_values() {
+        loop {
+            let changed = p.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if p.phase().over() { break; }
+            changed.await;
         }
     }
 }

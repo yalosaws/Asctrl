@@ -647,7 +647,7 @@ unsafe fn clipboard_unicode() -> Result<String, String> {
         let h = GetClipboardData(CF_UNICODETEXT).map_err(|e| e.to_string())?;
         let p = GlobalLock(HGLOBAL(h.0)) as *const u16;
         if p.is_null() {
-            return Ok(String::new());
+            return Err("Could not lock the clipboard text".into());
         }
         // Never read past the block, even when the text is not terminated
         let max = GlobalSize(HGLOBAL(h.0)) / 2;
@@ -661,17 +661,38 @@ unsafe fn clipboard_unicode() -> Result<String, String> {
     }
 }
 
-/// What the clipboard holds, so it can be put back: Ok(Some(text)), Ok(None) when empty,
-/// Err when it holds something other than text (an image, copied files), which can't be restored
-pub fn clipboard_text() -> Result<Option<String>, String> {
+/// Windows may synthesize ANSI/OEM text and a locale alongside Unicode text.
+fn restorable_text_format(format: u32) -> bool {
+    matches!(format, 1 | 7 | CF_UNICODETEXT | 16)
+}
+
+fn clipboard_has_only_text_formats() -> bool {
+    use windows::Win32::System::DataExchange::{CountClipboardFormats, EnumClipboardFormats};
+    unsafe {
+        let count = CountClipboardFormats();
+        let mut format = 0;
+        for _ in 0..count {
+            format = EnumClipboardFormats(format);
+            if !restorable_text_format(format) {
+                return false;
+            }
+        }
+        count > 0
+    }
+}
+
+/// Read the text and its sequence number under the same clipboard lock. Reject formats a paste cannot restore.
+pub fn clipboard_text() -> Result<(Option<String>, u32), String> {
     use windows::Win32::System::DataExchange::{CloseClipboard, CountClipboardFormats, IsClipboardFormatAvailable};
     open_clipboard()?;
     let r = unsafe {
         if IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() {
             if CountClipboardFormats() == 0 { Ok(None) } else { Err("The clipboard holds something other than text".to_string()) }
+        } else if !clipboard_has_only_text_formats() {
+            Err("The clipboard also holds formatted or non-text data".into())
         } else {
             clipboard_unicode().map(Some)
-        }
+        }.map(|text| (text, clipboard_serial()))
     };
     unsafe {
         let _ = CloseClipboard();
@@ -720,41 +741,41 @@ pub fn clipboard_serial() -> u32 {
     unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() }
 }
 
-/// Empty the clipboard
-pub fn clear_clipboard() {
-    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard};
-    if open_clipboard().is_ok() {
-        unsafe {
-            let _ = EmptyClipboard();
-            let _ = CloseClipboard();
-        }
-    }
+/// Put text on the clipboard, unconditionally for the explicit clipboard tool.
+pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+    replace_clipboard(Some(text), None).map(|_| ())
 }
 
-/// Put text on the clipboard
-pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+/// Compare and replace while holding the clipboard open, including restoration after a paste.
+pub fn replace_clipboard(text: Option<&str>, expected: Option<u32>) -> Result<u32, String> {
     use windows::Win32::Foundation::{GlobalFree, HANDLE};
     use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, SetClipboardData};
     use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-    let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
     open_clipboard()?;
     unsafe {
         let result = (|| {
-            EmptyClipboard().map_err(|e| e.to_string())?;
+            if expected.is_some_and(|n| n != clipboard_serial()) {
+                return Err("The clipboard changed before it could be replaced".to_string());
+            }
+            let Some(text) = text else {
+                EmptyClipboard().map_err(|e| e.to_string())?;
+                return Ok(clipboard_serial());
+            };
+            let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
             let mem = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).map_err(|e| e.to_string())?;
             let p = GlobalLock(mem) as *mut u16;
             if p.is_null() {
                 let _ = GlobalFree(Some(mem));
-                return Err("Out of memory".to_string());
+                return Err("Out of memory".into());
             }
             std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
             let _ = GlobalUnlock(mem);
-            // On success the clipboard owns the memory; on failure it is still ours to free
-            if let Err(e) = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(mem.0))) {
+            // Prepare the replacement before clearing the current contents.
+            if let Err(e) = EmptyClipboard().and_then(|_| SetClipboardData(CF_UNICODETEXT, Some(HANDLE(mem.0)))) {
                 let _ = GlobalFree(Some(mem));
                 return Err(e.to_string());
             }
-            Ok(())
+            Ok(clipboard_serial())
         })();
         let _ = CloseClipboard();
         result.map_err(|e| format!("Failed to write the clipboard: {e}"))
@@ -764,6 +785,58 @@ pub fn set_clipboard_text(text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rich_clipboard_formats_are_not_restorable_as_plain_text() {
+        assert!([1, 7, CF_UNICODETEXT, 16].into_iter().all(restorable_text_format));
+        assert!(![CF_UNICODETEXT, 0xc001].into_iter().all(restorable_text_format));
+        assert!(!restorable_text_format(CF_BITMAP));
+        assert!(!restorable_text_format(CF_HDROP));
+    }
+
+    #[test]
+    #[ignore = "requires permission to create a private Windows window station"]
+    fn paste_preserves_rich_formats_and_newer_clipboard_contents() {
+        // A window station owns its clipboard. Only the isolated child ever reads or writes it.
+        const WORKER: &str = "ASCTRL_PRIVATE_CLIPBOARD_TEST";
+        if std::env::var_os(WORKER).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", "--exact", "winmgr::tests::paste_preserves_rich_formats_and_newer_clipboard_contents"])
+                .env(WORKER, "1").output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stdout));
+            return;
+        }
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::DataExchange::{CloseClipboard, RegisterClipboardFormatW, SetClipboardData};
+        use windows::Win32::System::Memory::{GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc};
+        use windows::Win32::System::StationsAndDesktops::*;
+        use windows::core::{HSTRING, PCWSTR, w};
+        unsafe {
+            let name = HSTRING::from(format!("AsctrlClipboardTest-{}", rand::random::<u64>()));
+            let station = CreateWindowStationW(&name, 0, 0x02000000, None).unwrap();
+            SetProcessWindowStation(station).unwrap();
+            let desktop = CreateDesktopW(w!("Fixture"), PCWSTR::null(), None, DESKTOP_CONTROL_FLAGS(0), 0x02000000, None).unwrap();
+            SetThreadDesktop(desktop).unwrap();
+            assert_eq!(GetProcessWindowStation().unwrap(), station);
+
+            set_clipboard_text("original").unwrap();
+            let (saved, before) = clipboard_text().unwrap();
+            let ours = replace_clipboard(Some("paste"), Some(before)).unwrap();
+            replace_clipboard(saved.as_deref(), Some(ours)).unwrap();
+            assert_eq!(clipboard_text().unwrap().0.as_deref(), Some("original"));
+            set_clipboard_text("new content").unwrap();
+            assert!(replace_clipboard(saved.as_deref(), Some(ours)).is_err());
+            assert_eq!(clipboard_text().unwrap().0.as_deref(), Some("new content"));
+            open_clipboard().unwrap();
+            let html = RegisterClipboardFormatW(w!("HTML Format"));
+            let data = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 32).unwrap();
+            SetClipboardData(html, Some(HANDLE(data.0))).unwrap();
+            CloseClipboard().unwrap();
+            let rich = clipboard_serial();
+            assert!(clipboard_text().is_err());
+            assert_eq!(clipboard_serial(), rich);
+        }
+    }
 
     #[test]
     fn the_front_most_window_covering_a_point_wins() {

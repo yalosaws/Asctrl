@@ -1,24 +1,35 @@
-# Closes what desktop tests leave behind when they are cut short (stopped mid-run, so their own clean-up never ran):
-# their drivers, bench windows, mouse-moving helpers, browsers with a test profile and copies of VS Code, and the
-# temporary profiles. Only processes started by the tests are touched (matched by what only tests put on their
-# command lines); the person's own browsers, editors and driver are left alone.
-# Usage: powershell -ExecutionPolicy Bypass -File test/cleanup.ps1
-$stopped = @()
-foreach ($p in Get-CimInstance Win32_Process) {
-    $c = [string]$p.CommandLine
-    $test =
-        ($p.Name -eq 'node.exe' -and $c -match 'test[\\/][\w\\/]+\.ts') -or
-        ($p.Name -in 'msedge.exe', 'chrome.exe' -and $c -match 'asctrl-(ext|probe)-profile|occl-') -or
-        ($p.Name -eq 'asctrl-agent.exe' -and $c -match 'ws://127\.0\.0\.1:1') -or
-        ($p.Name -eq 'powershell.exe' -and $c -match 'bench-app\.ps1|jiggle\.ps1|answer\.ps1|popup\.ps1') -or
-        ($p.Name -eq 'Code.exe' -and $c -match 'asctrl-electron')
-    if ($test) {
-        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
-        $stopped += $p.Name
+# Recover fixtures recorded by interrupted test runners in this checkout.
+[CmdletBinding(SupportsShouldProcess)]
+param()
+$journal = Join-Path $PSScriptRoot 'out\owners'
+if (!(Test-Path -LiteralPath $journal -PathType Container)) { return }
+$tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+foreach ($file in Get-ChildItem -LiteralPath $journal -File -Filter '*.json') {
+    $id = [guid]::Empty
+    if (![guid]::TryParseExact($file.BaseName, 'D', [ref]$id)) { continue }
+    $item = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+    if (Get-Process -Id $item.owner -ErrorAction SilentlyContinue) { continue }
+    if ($item.pid) {
+        $child = Get-Process -Id $item.pid -ErrorAction SilentlyContinue
+        if ($child) {
+            try {
+                $null = $child.Handle
+                $created = ([DateTimeOffset]$child.StartTime).ToUnixTimeMilliseconds()
+                $parent = (Get-CimInstance Win32_Process -Filter "ProcessId=$($child.Id)").ParentProcessId
+                if ($parent -eq $item.owner -and $created -ge $item.before -and $created -le $item.after) {
+                    if (!$PSCmdlet.ShouldProcess($child.ProcessName, 'Stop orphaned test child')) { continue }
+                    $child.Kill()
+                    $child.WaitForExit()
+                }
+            } finally { $child.Dispose() }
+        }
+    } elseif ($item.directory -and (Test-Path -LiteralPath $item.directory -PathType Container)) {
+        $dir = Get-Item -LiteralPath $item.directory
+        if ($dir.Parent.FullName -ine $tempRoot -or $dir.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) { continue }
+        $marker = Join-Path $dir.FullName '.asctrl-test-owner'
+        if (!(Test-Path -LiteralPath $marker -PathType Leaf) -or (Get-Content -LiteralPath $marker -Raw) -ne $file.BaseName) { continue }
+        if (!$PSCmdlet.ShouldProcess($dir.FullName, 'Remove owned test profile')) { continue }
+        Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
     }
+    if ($PSCmdlet.ShouldProcess($file.FullName, 'Retire test record')) { Remove-Item -LiteralPath $file.FullName }
 }
-Start-Sleep -Milliseconds 800
-foreach ($pattern in 'asctrl-ext-profile-*', 'asctrl-electron-*', 'asctrl-probe-profile-*', 'occl-*') {
-    Get-ChildItem $env:TEMP -Directory -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
-}
-if ($stopped) { "Stopped: " + (($stopped | Group-Object | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', ') } else { "Nothing was left" }

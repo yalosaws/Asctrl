@@ -1,6 +1,7 @@
 // Where the time goes: the same few actions with and without the report, several times each.
 // Usage: node test/prof.ts [--app <exe>]     (moves the mouse for a few seconds)
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,7 +13,7 @@ import type { ToolName } from "../src/shared/protocol.ts";
 const PORT = 18790;
 const root = path.resolve(import.meta.dirname, "..");
 const appIdx = process.argv.indexOf("--app");
-const exe = appIdx >= 0 ? process.argv[appIdx + 1] : path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = appIdx >= 0 ? process.argv[appIdx + 1] : driverExecutable(root);
 const WIN = "Asctrl Bench";
 const localFile = path.join(tmpdir(), `asctrl-prof-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
@@ -22,9 +23,9 @@ process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${pro
 process.env.ASCTRL_CONFIRM ??= "off";
 
 const relay = startRelay(PORT);
-const agent = spawn(exe, ["--code", "135790", "--relay", `ws://localhost:${PORT}`], { stdio: ["ignore", "ignore", "inherit"] });
-const app = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
-const tech = new TechClient(`ws://localhost:${PORT}`, "Prof");
+const agent = owned(() => spawn(exe, ["--code", "135790", "--relay", `ws://127.0.0.1:${PORT}`], { stdio: ["ignore", "ignore", "inherit"] }));
+const app = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
+const tech = new TechClient(`ws://127.0.0.1:${PORT}`, "Prof");
 
 async function time(label: string, tool: ToolName, args: Record<string, unknown>, n = 3) {
   const ms: number[] = [];

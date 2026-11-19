@@ -82,7 +82,7 @@ function fill(v: unknown, row: Row): unknown {
 /** Tools a `{tool: …}` step may name: the ones the driver's batch runs */
 export const STEP_TOOLS = [
   "click", "type_text", "press_keys", "scroll", "drag", "mouse", "set_value", "element_action", "focus_window", "open_app", "wait_for",
-  "clipboard", "read_text", "observe", "read_grid", "watch",
+  "clipboard", "read_text", "observe", "read_grid", "watch", "timeline",
 ] as const;
 
 /** Every kind of step: the key that names it, and the other keys it takes (besides window) */
@@ -103,6 +103,45 @@ const KINDS: Record<string, string[]> = {
 
 const GRID_CELL = /^(\w+)\[\s*(\d+)\s*,\s*(\d+)\s*\]$/;
 const placeholder = (v: unknown) => typeof v === "string" && /\$(\{\w+\}|\d+)/.test(v);
+
+const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * A step written the way the single actions take their arguments, read as the plan's own kind of step:
+ * {type: field, text} or {type, target} → {type: text, into: field}; {click: {x, y}} → {tool: "click", x, y};
+ * {wait: …} → await (or a pause of seconds). Anything that doesn't fit one of these is left for validate to name.
+ */
+export function normalizeStep(s: Step): Step {
+  if (!isRecord(s) || typeof s.tool === "string") return s;
+  const { window } = s;
+  const scoped = (step: Step) => (window === undefined ? step : { ...step, window });
+  if (s.type !== undefined && s.into === undefined) {
+    const { text, target, ...rest } = s;
+    if (typeof text === "string" && target === undefined) return { ...rest, type: text, into: s.type };
+    if (target !== undefined && text === undefined) return { ...rest, into: target };
+  }
+  for (const kind of ["click", "press"] as const) {
+    const v = s[kind];
+    if (isRecord(v) && typeof v.x === "number" && typeof v.y === "number") {
+      const { [kind]: _, ...rest } = s;
+      return { ...rest, ...v, tool: "click" };
+    }
+  }
+  if (s.wait !== undefined && s.await === undefined) {
+    const { wait, ...rest } = s;
+    if (typeof wait === "string") return { ...rest, await: wait };
+    if (typeof wait === "number") return scoped({ tool: "wait_for", seconds: wait });
+    if (isRecord(wait)) {
+      const { text, appears, gone, timeoutSec, seconds } = wait;
+      if (typeof seconds === "number") return scoped({ tool: "wait_for", seconds });
+      const what = typeof gone === "string" ? gone : (text ?? appears);
+      if (typeof what === "string") {
+        return { ...rest, await: what, ...(gone !== undefined && gone !== false ? { gone: true } : {}), ...(timeoutSec !== undefined ? { timeoutSec } : {}) };
+      }
+    }
+  }
+  return s;
+}
 
 /** Everything wrong with a plan, before any of it runs (empty when nothing is) */
 export function validate(plan: Plan): string[] {
@@ -344,6 +383,7 @@ export class Runner {
   /** Queue a plan. wait: return when it has run, with its report; else return at once, with the reports of
    *  plans that finished since the AI was last told */
   async run(plan: Plan, wait: boolean): Promise<{ text: string; ok: boolean }> {
+    if (Array.isArray(plan.steps)) plan = { ...plan, steps: plan.steps.map(normalizeStep) };
     const errs = validate(plan);
     if (errs.length) return { ok: false, text: `Not queued: the plan has mistakes, and nothing of it ran.\n${errs.map((e) => `- ${e}`).join("\n")}` };
     if (this.unreported) {
@@ -423,6 +463,7 @@ export class Runner {
     }
     job.status = "running";
     const t0 = performance.now();
+    let completed = false;
     const p = job.plan;
     // To the overlay the whole plan is one piece of work; to the driver, the time to watch for popups. It goes
     // with the plan's first batch, unless something comes before that
@@ -518,12 +559,11 @@ export class Runner {
         job.lines.splice(firstRowEnd, 0, `✓ row 1 of ${rows.length} ${JSON.stringify(rows[0]).slice(0, 80)}`);
         job.lines.push(`✓ rows 2–${rows.length} the same way`);
       }
-      job.status = "done";
       // The plan worked, its checks included: what the decision model chose in it can be relied on next time
       for (const [k, v] of job.pending) await this.drex.remember(k, v);
+      completed = true;
     } catch (e) {
       job.lines.push(`✗ ${(e as Error).message}`);
-      job.status = "failed";
     } finally {
       if (job.marked && !job.ended) {
         const end = await this.call("plan_mark", { plan: job.id, end: true }).catch(() => undefined);
@@ -532,7 +572,8 @@ export class Runner {
       job.ms = performance.now() - t0;
       // Told only now that its report is whole: a plan sent while the failure was still being written up (the look at
       // where things stand) used to get a report with no time, no such look, and no word of the plans cancelled
-      if (job.status === "failed") {
+      job.status = completed ? "done" : "failed";
+      if (!completed) {
         for (const j of this.jobs) if (j.status === "queued") j.status = "cancelled";
         this.unreported = job;
       }
@@ -544,7 +585,6 @@ export class Runner {
     // Two entries per choice (the candidates it chose among, and the wording)
     const n = job.pending.size / 2;
     if (n) job.lines.push(`(${n === 1 ? "the decision model's choice in this plan was" : `the decision model's ${n} choices in this plan were`} not remembered, since the plan failed)`);
-    job.status = "failed";
     // A short look at where things stand, so the AI can re-plan without a separate look: the one the driver took
     // when the batch failed, if nothing has been done since
     if (job.where && job.where.at === this.calls) {

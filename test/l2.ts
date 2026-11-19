@@ -7,6 +7,7 @@
 // 3. Stuck on a button that isn't there: the report lists what windows came and went; the AI answers with code,
 //    which does several steps in the stuck one's place, and the program goes on with what that code returned.
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,11 +16,11 @@ import { TechClient } from "../src/console/tech-client.ts";
 import type { ObserveData, ProgramData } from "../src/shared/protocol.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const localFile = path.join(tmpdir(), `asctrl-l2-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_CONFIRM: "off", ASCTRL_SKILLS_FILE: path.join(tmpdir(), `asctrl-l2-skills-${process.pid}.json`) } });
-const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_CONFIRM: "off", ASCTRL_SKILLS_FILE: path.join(tmpdir(), `asctrl-l2-skills-${process.pid}.json`) } }));
+const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
 const tech = new TechClient("ws://127.0.0.1:1", "L2Test");
 let failures = 0;
 const say = (ok: boolean, line: string) => {
@@ -43,6 +44,18 @@ try {
   });
   const wins = ((await tech.call("observe", { max: 1 })).data as ObserveData).windows.map((w) => w.title);
   say(prog(r1)?.state === "done" && (await submitted()) === "Submitted: onward" && !wins.includes("Bench Dialog") && /Popups dismissed/.test((prog(r1)?.log ?? []).join("\n")), `on(): the dialog that came up was closed between steps, and the program went on: ${brief(prog(r1)?.log.join(" "))}`);
+
+  // Ending another paused program must leave this program's dialog rule active.
+  const a = prog(await tech.call("exec", { script: "on('Close me', 'Close me'); return ask('Continue A?');", learn: false }));
+  const b = prog(await tech.call("exec", { script: "on('Separate fixture', 'Dismiss'); return ask('Continue B?');", learn: false }));
+  if (!a?.id || !b?.id || a.state !== "asking" || b.state !== "asking") throw new Error("Popup fixtures did not reach their questions");
+  const finishedB = prog(await tech.call("resume", { id: b.id, answer: "B", waitSec: 5 }));
+  await tech.call("click", { target: "Open dialog", window: "Asctrl Bench", after: "none" });
+  await new Promise((r) => setTimeout(r, 1500));
+  const finishedA = prog(await tech.call("resume", { id: a.id, answer: "A", waitSec: 5 }));
+  const openDialogs = ((await tech.call("observe", { max: 1 })).data as ObserveData).windows;
+  say(finishedA?.state === "done" && finishedB?.state === "done" && !openDialogs.some((w) => w.title === "Bench Dialog")
+    && /Popups dismissed/.test(finishedA.log.join(" ")) && !/Popups dismissed/.test(finishedB.log.join(" ")), "ending a second program preserves the first program's popup rule and log");
 
   // 2.
   const r2 = await tech.call("exec", { script: `fill({ Name: 'later' }, { window: 'Asctrl Bench' }); click('Submit', { window: 'Asctrl Bench' }); return until(() => read('Asctrl Bench').match(/Submitted: later/), { timeoutSec: 5 })[0];`, learn: false, waitSec: 30 });

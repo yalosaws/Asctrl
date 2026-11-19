@@ -6,6 +6,7 @@
 // 3. On the bench window, only through the five: a plan (act run), a look (query observe), a single action
 //    (act set_value), a program (exec).
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,7 +15,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const localFile = path.join(tmpdir(), `asctrl-tools-local-${process.pid}.json`);
 const env = { ...process.env, RELAY_URL: "ws://127.0.0.1:1", ASCTRL_LOCAL_FILE: localFile, TECH_NAME: "ToolsTest", ASCTRL_NO_LAUNCH: "1", ASCTRL_CONFIRM: "off", ASCTRL_SKILLS_FILE: path.join(tmpdir(), `asctrl-tools-skills-${process.pid}.json`) } as Record<string, string>;
 let failures = 0;
@@ -48,11 +49,15 @@ try {
   say(!!bad.isError && /count/.test(text(bad)) && /Carry out a plan/.test(text(help)), `wrong args are refused with what the action takes; help describes it: ${text(bad).split("\n")[0]}`);
 
   // 3.
-  agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env });
-  bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
+  agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env }));
+  bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
   const conn = await call("connect", { waitSec: 30 });
   say(!conn.isError, `connected: ${text(conn).split("\n")[0]}`);
   await call("query", { what: "wait_for", args: { appears: "Asctrl Bench", timeoutSec: 15 } });
+  const denied = await call("query", { what: "skills", args: { forget: "fixture" } });
+  say(!!denied.isError && /Use act/.test(text(denied)), "read-only query refuses skill writes");
+  const writable = await call("act", { do: "skills", help: true });
+  say(!writable.isError && /forget/.test(text(writable)), "skill writes are available through act");
   const plan = await call("act", { do: "run", args: { window: "Asctrl Bench", steps: [{ fill: { Name: "five" } }, { click: "Submit" }, { expect: "Submitted: five" }], wait: true } });
   say(!plan.isError && /✓/.test(text(plan)), `a plan through act: ${text(plan).split("\n")[0]}`);
   const look = await call("query", { what: "observe", args: { window: "Asctrl Bench", query: "Submitted" } });

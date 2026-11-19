@@ -7,8 +7,9 @@
 // the whole page's text, two controls with the same name (left to the usual lookup), and a link to another
 // page (waited for until it has loaded). The mouse must not move and Calculator must stay in front.
 
+import { driverExecutable, owned, fixtureDirectory } from "./fixtures.ts";
 import { execFileSync, spawn } from "node:child_process";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,14 +17,16 @@ import { TechClient } from "../src/console/tech-client.ts";
 import type { ObserveData } from "../src/shared/protocol.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
+const pagesDir = fixtureDirectory(path.join(tmpdir(), "asctrl-duplicate-pages-"));
 const localFile = path.join(tmpdir(), `asctrl-p3-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
+process.env.ASCTRL_BROWSER_PROFILE = path.join(pagesDir, "browser");
 // Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
 process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
 // Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
 process.env.ASCTRL_CONFIRM ??= "off";
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] }));
 const tech = new TechClient("ws://127.0.0.1:1", "P3Test");
 let failures = 0;
 const say = (ok: boolean, line: string) => {
@@ -38,6 +41,13 @@ let W: number | undefined;
 try {
   await tech.connectLocalDriver({ launch: false, waitMs: 30_000 });
   const url = pathToFileURL(path.join(root, "test/web/p3.html")).href;
+  const coldPages = ["ColdOne", "ColdTwo"].map((marker) => {
+    const file = path.join(pagesDir, marker + ".html");
+    writeFileSync(file, "<title>" + marker + "</title><p>" + marker + "</p>");
+    return pathToFileURL(file).href;
+  });
+  const cold = await Promise.all(coldPages.map((target) => tech.call("open_app", { target, browser: "asctrl", after: "none" })));
+  say(cold.every((r, i) => r.ok && r.text?.includes(coldPages[i])), "both requests to a cold browser returned their own page");
   const t0 = performance.now();
   const o = await tech.call("open_app", { target: url, browser: "asctrl", after: "none" });
   W = (o.data as { handle?: number } | undefined)?.handle;
@@ -93,6 +103,23 @@ try {
 
   const n = await tech.call("click", { window: W, target: "Next page", after: "none" });
   say(n.ok && /It loaded "Second Page"/.test(n.text ?? ""), `a link, waited for until the next page loaded: ${first(n.text ?? n.error)}`);
+  for (const marker of ["Alpha", "Beta"]) {
+    const file = path.join(pagesDir, marker + ".html");
+    writeFileSync(file, "<title>Duplicate fixture title</title><p>Fixture" + marker + "</p><label>Marker <input oninput='document.querySelector(\"output\").textContent=this.value'></label><output></output>");
+    const opened = await tech.call("open_app", { target: pathToFileURL(file).href, browser: "asctrl", after: "none" });
+    if (!opened.ok) throw new Error("duplicate tab fixture failed to open");
+  }
+  say(/FixtureBeta/.test(await page()), "newly active tab supplies its own text");
+  await tech.call("press_keys", { window: W, keys: "ctrl+shift+tab", after: "none" });
+  await new Promise((r) => setTimeout(r, 300));
+  const switched = await tech.call("read_text", { window: W });
+  const set = await tech.call("set_value", { window: W, target: "Marker", value: "OnlyOnAlpha", after: "none" });
+  const alpha = await page();
+  await tech.call("press_keys", { window: W, keys: "ctrl+tab", after: "none" });
+  await new Promise((r) => setTimeout(r, 300));
+  const beta = await page();
+  say(set.ok && /FixtureAlpha/.test(alpha) && /OnlyOnAlpha/.test(alpha) && /FixtureBeta/.test(beta) && !/OnlyOnAlpha/.test(beta), "an edit affected only the active same-title form");
+  say(/FixtureAlpha/.test(switched.text ?? "") && (switched.data as { channel?: string })?.channel === "page", "switching between equal titles reads the visible tab");
 } catch (e) {
   console.error(e);
   failures++;
@@ -106,5 +133,6 @@ try {
   tech.disconnect();
   agent.kill();
   rmSync(localFile, { force: true });
+  rmSync(pagesDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
   setTimeout(() => process.exit(), 300);
 }

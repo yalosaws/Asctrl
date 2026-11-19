@@ -87,6 +87,7 @@ static CONN: Mutex<Option<Arc<Conn>>> = Mutex::new(None);
 static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub fn profile_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("ASCTRL_BROWSER_PROFILE") { return dir.into(); }
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| std::env::var("USERPROFILE").unwrap_or_default());
     std::path::Path::new(&base).join("Asctrl").join("browser")
 }
@@ -115,6 +116,17 @@ fn browser_exe() -> Option<(std::path::PathBuf, String)> {
         (format!("{}\\Microsoft\\Edge\\Application\\msedge.exe", env("ProgramFiles")), "Edge"),
     ];
     tries.into_iter().find(|(p, _)| std::path::Path::new(p).is_file()).map(|(p, n)| (p.into(), n.to_string()))
+}
+
+struct Page {
+    id: String,
+    title: String,
+    url: String,
+    active: Option<bool>,
+}
+
+fn shows_title(window: &str, page: &str) -> bool {
+    !page.is_empty() && window.strip_prefix(page).is_some_and(|rest| rest.is_empty() || rest.starts_with(" - ") || rest.starts_with(" — "))
 }
 
 impl Conn {
@@ -149,14 +161,19 @@ impl Conn {
     }
 
     /// The page tabs, in the browser's order
-    pub async fn pages(&self) -> Result<Vec<(String, String, String)>, String> {
+    async fn pages(&self) -> Result<Vec<Page>, String> {
         let r = self.call(None, "Target.getTargets", json!({})).await?;
         Ok(r["targetInfos"]
             .as_array()
             .map(|a| {
                 a.iter()
                     .filter(|t| t["type"] == "page")
-                    .map(|t| (t["targetId"].as_str().unwrap_or("").to_string(), t["title"].as_str().unwrap_or("").to_string(), t["url"].as_str().unwrap_or("").to_string()))
+                    .filter_map(|t| Some(Page {
+                        id: t["targetId"].as_str()?.to_string(),
+                        title: t["title"].as_str().unwrap_or("").to_string(),
+                        url: t["url"].as_str().unwrap_or("").to_string(),
+                        active: t["active"].as_bool(),
+                    }))
                     .collect()
             })
             .unwrap_or_default())
@@ -395,6 +412,10 @@ pub async fn current() -> Option<Arc<Conn>> {
         return None;
     }
     let _one = STARTING.lock().await;
+    current_locked().await
+}
+
+async fn current_locked() -> Option<Arc<Conn>> {
     if let Some(c) = CONN.lock().unwrap().as_ref().filter(|c| c.alive()) {
         return Some(c.clone());
     }
@@ -417,13 +438,14 @@ pub async fn current() -> Option<Arc<Conn>> {
 /// Asctrl's browser, started if it isn't running. `url` is opened in it: in a new tab when it was already
 /// running, as its first page when it is started now. Returns the connection and the tab's id.
 pub async fn open(url: &str) -> Result<(Arc<Conn>, String), String> {
-    if let Some(c) = current().await {
+    let one = STARTING.lock().await;
+    if let Some(c) = current_locked().await {
+        drop(one);
         let r = c.call(None, "Target.createTarget", json!({ "url": url })).await?;
         let id = r["targetId"].as_str().ok_or("the browser opened no tab")?.to_string();
         let _ = c.call(None, "Target.activateTarget", json!({ "targetId": id })).await;
         return Ok((c, id));
     }
-    let _one = STARTING.lock().await;
     let (exe, name) = browser_exe().ok_or("Neither Chrome nor Edge is installed (or set ASCTRL_BROWSER to a Chromium-based browser)")?;
     let dir = profile_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not make the browser's profile folder {}: {e}", dir.display()))?;
@@ -465,8 +487,8 @@ pub async fn open(url: &str) -> Result<(Arc<Conn>, String), String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let pages = c.pages().await?;
-        if let Some((id, _, _)) = pages.iter().find(|(_, _, u)| !u.is_empty() && u != "about:blank").or(pages.first()) {
-            return Ok((c, id.clone()));
+        if let Some(page) = pages.iter().find(|p| p.url == url).or_else(|| (pages.len() == 1).then(|| &pages[0])) {
+            return Ok((c, page.id.clone()));
         }
         if Instant::now() > deadline {
             return Err("the browser opened no page".into());
@@ -492,22 +514,35 @@ pub async fn tab_in(hwnd: isize) -> Option<(Arc<Conn>, Tab)> {
     };
     let title = crate::winmgr::title_of(hwnd);
     let pages = c.pages().await.ok()?;
-    let pick = pages
-        .iter()
-        .filter(|(_, t, _)| !t.is_empty() && title.starts_with(t.as_str()))
-        .max_by_key(|(_, t, _)| t.len())
-        .or_else(|| (pages.len() == 1).then(|| &pages[0]))?
-        .clone();
-    let tab = c.tab(&pick.0).await.ok()?;
-    Some((c, tab))
+    let mut candidates: Vec<_> = pages.iter().filter(|p| p.active != Some(false) && shows_title(&title, &p.title)).collect();
+    let longest = candidates.iter().map(|p| p.title.len()).max()?;
+    candidates.retain(|p| p.title.len() == longest);
+    // Native handles and browser window IDs are different namespaces. Ambiguous native windows
+    // must use window-scoped UI Automation instead of guessing which browser window owns a tab.
+    let label = &candidates.first()?.title;
+    if crate::winmgr::list().iter().any(|w| w.handle != hwnd && crate::winmgr::pid_of(w.handle) == pid && shows_title(&w.title, label)) {
+        return None;
+    }
+    let multiple = candidates.len() > 1;
+    let mut selected = None;
+    for page in candidates {
+        let tab = c.tab(&page.id).await.ok()?;
+        if multiple && page.active.is_none() && eval(&c, &tab, "document.visibilityState").await.ok()? != "visible" {
+            continue;
+        }
+        if selected.replace(tab).is_some() {
+            return None;
+        }
+    }
+    Some((c, selected?))
 }
 
-/// The browser window showing tab `id` (by its title), else any window of the browser
+/// Return a handle only when the requested tab matches one window.
 pub async fn window_of(c: &Conn, id: &str) -> Option<isize> {
-    let pages = c.pages().await.ok()?;
-    let title = pages.iter().find(|(i, _, _)| i == id).map(|(_, t, _)| t.clone()).unwrap_or_default();
-    let wins: Vec<_> = crate::winmgr::list().into_iter().filter(|w| crate::winmgr::pid_of(w.handle) == c.pid).collect();
-    wins.iter().find(|w| !title.is_empty() && w.title.starts_with(&title)).or(wins.first()).map(|w| w.handle)
+    let page = c.pages().await.ok()?.into_iter().find(|p| p.id == id && p.active != Some(false))?;
+    let mut wins = crate::winmgr::list().into_iter().filter(|w| crate::winmgr::pid_of(w.handle) == c.pid && shows_title(&w.title, &page.title));
+    let handle = wins.next()?.handle;
+    wins.next().is_none().then_some(handle)
 }
 
 /// Where frame `id`'s viewport starts in its tab's viewport (CSS pixels): the content box of its iframe element

@@ -29,7 +29,28 @@ pub fn note(v: &Value) {
         Some((std::sync::Mutex::new(f), std::time::Instant::now()))
     }) {
         use std::io::Write;
-        let _ = writeln!(f.lock().unwrap(), "{} {}", t0.elapsed().as_millis(), v);
+        // Replays need geometry and timing. Keep screen text, form values and command output in the live UI.
+        let mut event = json!({});
+        for key in ["phase", "id", "tool", "ok", "quiet", "index", "info", "raiseMs", "unbeaten"] {
+            if let Some(value) = v.get(key) { event[key] = value.clone(); }
+        }
+        for key in ["args", "geo"] {
+            if let Some(fields) = v[key].as_object() {
+                let mut safe = json!({});
+                for (name, value) in fields {
+                    let numeric = value.is_number() || value.is_boolean()
+                        || value.as_array().is_some_and(|a| a.iter().all(|x| x.is_number() || x.as_array().is_some_and(|r| r.iter().all(Value::is_number))));
+                    if key == "args" && name == "action" && matches!(value.as_str(), Some("focus" | "minimize" | "maximize" | "restore" | "close" | "move")) {
+                        safe[name] = value.clone();
+                    }
+                    if numeric && matches!(name.as_str(), "win" | "area" | "zoneIsWindow" | "amount" | "horizontal" | "app" | "at" | "from" | "to" | "targets" | "zone" | "rect" | "shot" | "pos" | "hwnd" | "view" | "count" | "x" | "y" | "display" | "moved" | "repeat" | "x0" | "y0" | "x1" | "y1") {
+                        safe[name] = value.clone();
+                    }
+                }
+                event[key] = safe;
+            }
+        }
+        let _ = writeln!(f.lock().unwrap(), "{} {}", t0.elapsed().as_millis(), event);
     }
 }
 

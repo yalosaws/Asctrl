@@ -53,7 +53,8 @@ export function startRelay(port = PORT) {
   // Rooms belong to this server instance, so two relays in one process (tests) never share codes
   const rooms = new Map<string, Room>();
   const lastSeen = new WeakMap<WebSocket, number>();
-  const wss = new WebSocketServer({ port, maxPayload: 32 * 1024 * 1024 });
+  const host = process.env.RELAY_HOST ?? "127.0.0.1";
+  const wss = new WebSocketServer({ port, host, maxPayload: 32 * 1024 * 1024 });
 
   // Wrong codes and tokens: when, by address, and all of them
   const misses = new Map<string, number[]>();
@@ -110,7 +111,7 @@ export function startRelay(port = PORT) {
           code = msg.code;
           const hostname = name(msg.hostname, "unknown");
           rooms.set(code, { agent: ws, hostname, protocol: typeof msg.protocol === "number" ? msg.protocol : undefined });
-          log(`agent online code=${code} host=${hostname}`);
+          log(`agent online`);
           return;
         }
         if (msg.type === "tech_hello") {
@@ -139,7 +140,7 @@ export function startRelay(port = PORT) {
           room.pending = ws;
           const techName = name(msg.techName, "Technician");
           send(room.agent, { type: "consent_request", techName });
-          log(`technician ${techName} requested code=${code}, waiting for consent`);
+          log(`pairing requested, waiting for consent`);
           return;
         }
         return ws.close();
@@ -156,11 +157,11 @@ export function startRelay(port = PORT) {
         if (msg.allow === true) {
           room.tech = tech;
           send(tech, { type: "paired", hostname: room.hostname, protocol: room.protocol });
-          log(`code=${code} user allowed, paired`);
+          log(`user allowed, paired`);
         } else {
           send(tech, { type: "error", message: "The user declined the connection" });
           tech.close();
-          log(`code=${code} user declined`);
+          log(`user declined pairing`);
         }
         return;
       }
@@ -181,17 +182,17 @@ export function startRelay(port = PORT) {
         room.tech?.close();
         room.pending?.close();
         rooms.delete(code);
-        log(`agent offline code=${code}`);
+        log(`agent offline`);
       } else if (role === "tech" && (room.tech === ws || room.pending === ws)) {
         if (room.tech === ws) room.tech = undefined;
         if (room.pending === ws) room.pending = undefined;
         send(room.agent, { type: "peer_left" });
-        log(`technician disconnected code=${code}`);
+        log(`technician disconnected`);
       }
     });
   });
 
-  log(`relay listening on ws://0.0.0.0:${port}${RELAY_TOKEN ? " (token required)" : ""}`);
+  log(`relay listening on ws://${host}:${port}${RELAY_TOKEN ? " (token required)" : ""}`);
   return wss;
 }
 

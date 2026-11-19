@@ -12,12 +12,11 @@
 // Takes the computer over for the whole run (about 40 tasks, a few minutes each): leave it alone.
 // Results: test/out/p0-<time>.jsonl, and a summary per area at the end.
 
+import { driverExecutable, fixtureDirectory, owned } from "../fixtures.ts";
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync, appendFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { TechClient } from "../../src/console/tech-client.ts";
-import type { ObserveData } from "../../src/shared/protocol.ts";
 import { site } from "./site.ts";
 import { TASKS, prepare, ps, type Area } from "./tasks.ts";
 
@@ -84,7 +83,7 @@ function agentRun(claude: string, prompt: string, cwd: string, mcpConfig: string
   if (model) a.push("--model", model);
   return new Promise((resolve) => {
     const t0 = performance.now();
-    const p = spawn(claude, a, { cwd, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ENABLE_TOOL_SEARCH: "false" }, windowsHide: true });
+    const p = owned(() => spawn(claude, a, { cwd, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ENABLE_TOOL_SEARCH: "false" }, windowsHide: true }));
     const ids = new Set<string>();
     const toolCount: Record<string, number> = {};
     let buf = "", last = "", used = "", stop = "", err = "", cost = 0, nTurns = 0;
@@ -132,42 +131,24 @@ function agentRun(claude: string, prompt: string, cwd: string, mcpConfig: string
 }
 
 // ---------- Leaving the desktop as it was between tasks
-const APPS = ["WINWORD", "EXCEL", "POWERPNT", "SystemSettings", "notepad", "Code", "chrome", "msedge"];
-const pids = () => new Set(ps(`Get-Process -Name ${APPS.join(",")} -ErrorAction SilentlyContinue | % { '{0} {1}' -f $_.Name, $_.Id }; exit 0`).split(/\r?\n/).filter(Boolean));
-
-async function windows(tech: TechClient): Promise<Map<number, string>> {
-  const d = (await tech.call("observe", { max: 1 })).data as ObserveData | undefined;
-  return new Map((d?.windows ?? []).map((w) => [w.handle, w.title]));
-}
-async function withDriver<T>(f: (tech: TechClient) => Promise<T>): Promise<T> {
-  const tech = new TechClient("ws://127.0.0.1:1", "P0Bench");
-  await tech.connectLocalDriver({ launch: false, waitMs: 30_000 });
-  try { return await f(tech); } finally { tech.disconnect(); }
-}
-/** Closes what the task opened: its windows first (so apps can shut down cleanly), then any of its app processes left */
-async function cleanUp(before: { wins: Map<number, string>; procs: Set<string> }) {
-  await withDriver(async (tech) => {
-    for (let round = 0; round < 2; round++) {
-      const now = await windows(tech);
-      const added = [...now.keys()].filter((h) => !before.wins.has(h));
-      if (!added.length) break;
-      for (const h of added) await tech.call("focus_window", { window: h, action: "close", after: "none" }).catch(() => undefined);
-      await new Promise((r) => setTimeout(r, 2500));
-    }
-  });
-  const left = [...pids()].filter((p) => !before.procs.has(p));
-  // Multi-process apps the person already had open share processes with new windows: leave those alone
-  const shared = ["Code", "chrome", "msedge"].filter((n) => [...before.procs].some((p) => p.startsWith(`${n} `)));
-  const kill = left.filter((p) => !shared.includes(p.split(" ")[0])).map((p) => p.split(" ")[1]);
-  if (kill.length) ps(`Stop-Process -Id ${kill.join(",")} -Force -ErrorAction SilentlyContinue`);
+// Only the browser launched under this run-specific profile belongs wholly to the benchmark.
+function closeOwnedBrowser(profile: string, parentPid: number) {
+  const expected = profile.replaceAll("'", "''");
+  ps(`$profileArg = '--user-data-dir=${expected}'; Get-CimInstance Win32_Process -Filter "ParentProcessId=${parentPid}" |
+    Where-Object { $_.Name -in 'chrome.exe','msedge.exe' -and $_.CommandLine -match ('(?:^|\\s)"?' + [regex]::Escape($profileArg) + '"?(?:\\s|$)') } |
+    ForEach-Object {
+      $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+      if ($p -and [math]::Abs(($p.StartTime.ToUniversalTime() - $_.CreationDate.ToUniversalTime()).TotalMilliseconds) -lt 1) {
+        if ($p.CloseMainWindow()) { [void]$p.WaitForExit(3000) }
+      }
+    }`);
 }
 
 // ---------- Run
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 if (!existsSync(exe)) throw new Error(`no release driver at ${exe}`);
 const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-const base = path.join(tmpdir(), `asctrl-p0-${stamp}`);
-mkdirSync(base, { recursive: true });
+const base = fixtureDirectory(path.join(tmpdir(), `asctrl-p0-${stamp}-`));
 const localFile = path.join(base, "local.json");
 process.env.ASCTRL_LOCAL_FILE = localFile;
 // Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
@@ -178,7 +159,8 @@ const mcpConfig = path.join(base, "mcp.json");
 writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { asctrl: { command: "node", args: [path.join(root, "src/console/mcp-server.ts")], env: { RELAY_URL: "ws://127.0.0.1:1", ASCTRL_LOCAL_FILE: localFile, TECH_NAME: "P0", ASCTRL_TOOLS: surface, ASCTRL_TOOLS_DENY: NO.join(","), ASCTRL_CONFIRM: "off", ASCTRL_SKILLS_FILE: process.env.ASCTRL_SKILLS_FILE ?? "" } } } }));
 mkdirSync(path.join(here, "test/out"), { recursive: true });
 const out = path.join(here, `test/out/p0-${stamp}.jsonl`);
-const driver = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] });
+const browserProfile = path.join(base, "browser-profile");
+const driver = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_BROWSER_PROFILE: browserProfile } }));
 const web = await site();
 const claude = dry ? "" : findClaude();
 const tasks = TASKS.filter((t) => !only || only.some((o) => t.id.startsWith(o) || t.area === o));
@@ -192,7 +174,7 @@ function popupDuring(ms: number) {
   let gone = false;
   const timer = setTimeout(() => {
     shown = true;
-    proc = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(here, "test/p0/popup.ps1"), "-Seconds", "600"], { stdio: "ignore", windowsHide: true });
+    proc = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(here, "test/p0/popup.ps1"), "-Seconds", "600"], { stdio: "ignore", windowsHide: true }));
     proc.on("exit", () => (gone = true));
   }, ms);
   return () => {
@@ -208,7 +190,6 @@ try {
     const c = { work: path.join(base, t.id), site: web };
     web.got.clear();
     prepare(t, c);
-    const before = { wins: await withDriver(windows), procs: pids() };
     const prompt = t.prompt(c);
     // Every Nth task: a popup a few seconds into the work (at a different moment each time)
     const popup = popupEvery > 0 && !dry && n % popupEvery === popupEvery - 1 ? popupDuring(8000 + ((n * 2900) % 9000)) : null;
@@ -217,7 +198,7 @@ try {
       : await agentRun(claude, prompt, c.work, mcpConfig);
     const pop = popup?.();
     // Checked once what the task opened is closed again: the programs let go of the files they saved
-    await cleanUp(before).catch((e) => console.error(`  clean-up: ${(e as Error).message}`));
+    if (driver.pid) closeOwnedBrowser(browserProfile, driver.pid);
     let why: string;
     try {
       const v = t.check(c, r.answer);

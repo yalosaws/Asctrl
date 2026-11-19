@@ -234,13 +234,13 @@ UI debugging in the browser with demo data (add `?state=ready|connected|offline|
 cd agent-app && npm run dev
 ```
 
-**Relay URL**, in order of precedence: `--relay <url>`; environment variable `ASCTRL_RELAY_URL`; `relay.txt` next to the exe; the compile-time `ASCTRL_RELAY_URL`; the hosted relay `ws://124.222.182.40:8787` in release builds, `ws://localhost:8787` in debug builds. A driver that can't reach its relay still works over the local link.
+**Relay URL**, in order of precedence: `--relay <url>`; environment variable `ASCTRL_RELAY_URL`; `relay.txt` next to the exe; the compile-time `ASCTRL_RELAY_URL`; the local relay on port 8787. Remote URLs require `wss://` and a trusted certificate. A driver that can't reach its relay still works over the local link.
 
 `--code <6 digits>` fixes the code (used to keep it across an elevated restart). `ASCTRL_CODE` only works in debug builds. `ASCTRL_LOCAL_FILE` moves the local link's address file (test runs use their own, so they never disturb a driver already running).
 
 **The overlay** draws what the AI does without ever holding an action back: the orb waits over the program being worked on (over its main window, so the work going into one of its dialogs and back leaves it in place), sends a pointer of its own out to each click, and frames the window in use, one frame per window, kept while the actions stay there. Two programs worked at once each get a frame and pointers of their own, and the orb stays put between them. A frame goes the moment its window closes, hides or moves. The overlay keeps itself above other topmost windows from a thread of its own, so nothing it draws blinks out when a window is brought forward. Clicks and typing through a page (no mouse) are drawn where the element is, when the person can see it.
 
-`ASCTRL_FX_LOG=<file>` writes every animation event the driver sends to the overlay, with the screen layout, to a file; `node test/fxcheck.ts <log>...` plays such logs through the real overlay code in a headless Chrome and measures what the person would see: moves of the orb no change of program called for, frames redrawn within one window, pointers that blink, how late each press is drawn, frames left after their window went (`--check` fails over the limits; `test/fx/*.fxlog` are kept as its regression cases). `test/zorder.ps1` measures how long a window covers the overlay during a test.
+`ASCTRL_FX_LOG=<file>` records timing, screen layout and geometry for replay. `node test/fxcheck.ts <log>...` plays such logs through the real overlay code in a headless Chrome and measures what the person would see: moves of the orb no change of program called for, frames redrawn within one window, pointers that blink, how late each press is drawn, frames left after their window went (`--check` fails over the limits; `test/fx/*.fxlog` are kept as its regression cases). `test/zorder.ps1` measures how long a window covers the overlay during a test.
 
 **Admin mode**: the AI calls `request_admin` → Windows shows UAC and the person clicks "Yes" → the driver restarts as administrator → the console reconnects automatically.
 
@@ -250,7 +250,15 @@ cd agent-app && npm run dev
 
 Both run on `124.222.182.40` (`ssh yalosaws`), as user `ubuntu`.
 
-**Relay** — `ws://124.222.182.40:8787`, systemd service `asctrl-relay`, code in `~/asctrl-relay`. The console's `.mcp.json` and release builds of the driver point at it; it requires a token, read from `ASCTRL_RELAY_TOKEN` (falling back to a gitignored `.env` at the repo root, then the Windows user environment). To update it, copy `src/relay/server.ts` and `src/shared/protocol.ts` to the matching paths under `~/asctrl-relay/src/` and `sudo systemctl restart asctrl-relay`; drivers reconnect by themselves. Last updated 2026-11-19, with the HTTP connector (the compact five tools: connect, query, act, exec, resume); the old files are kept in `~/asctrl-backup/`.
+**Relay** — Release builds default to loopback. To provide remote pairing, route a path in the existing HTTPS site's Caddy block to the local relay, for example:
+
+```caddyfile
+handle /relay {
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+After verifying the WebSocket upgrade and certificate, set the driver's `ASCTRL_RELAY_URL` and the controller's `RELAY_URL` to the same public `wss://<host>/relay` URL. The connector on the relay host can use `ws://127.0.0.1:8787`. The relay binds to loopback by default; a proxy on a different machine needs an explicit `RELAY_HOST` bind address.
 
 **HTTP connector** — `https://asctrl.yalosaws.com/mcp`, systemd service `asctrl-mcp` on `127.0.0.1:8788`, code in `~/asctrl-mcp` (`package.json`, `package-lock.json`, `src/console/`, `src/shared/`, and the PNG and ICO files of `agent-app/src-tauri/icons/`). Its settings (`PUBLIC_URL`, `RELAY_URL`, `RELAY_TOKEN`, `NACE_API_KEY`, `ASCTRL_DATA_DIR`) are in `/etc/asctrl-mcp.env`, readable by root only; keys and tokens in `~/asctrl-mcp/data/auth.json`. TLS comes from the server's Caddy (`~/workspace/ops/config/Caddyfile`, the `asctrl.yalosaws.com` block; reload with `~/workspace/ops/bin/caddy reload --config` that file). To update, copy the changed files to the same paths under `~/asctrl-mcp/`, run `npm ci --omit=dev` there if the dependencies changed, and `sudo systemctl restart asctrl-mcp`. Keys:
 
@@ -445,9 +453,9 @@ Software like this is, structurally, remote-control software; the difference is 
 
 **Still to do before wide use:**
 
-- [ ] Put the relay behind an HTTPS reverse proxy and use `wss://` (currently plaintext)
+- [ ] Verify and deploy the public WSS reverse-proxy route before distributing its URL
 - [x] Limit attempts to prevent brute-force guessing (codes still don't expire on their own)
 - [ ] Optional confirmation at the computer for dangerous commands (removed on purpose in November 2026: nothing asks)
-- [x] Write an action log to disk (`%LOCALAPPDATA%\Asctrl\actions.log`)
+- [x] Record the controller, tool, effect, outcome, channel, elapsed time and argument sizes in `%LOCALAPPDATA%\Asctrl\actions.log`
 - [ ] Code signing, to reduce SmartScreen / antivirus blocking
 - [ ] Client ID metadata documents (CIMD) on the connector's OAuth server, so busy clients stop registering a new client per sign-in

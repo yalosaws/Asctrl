@@ -123,7 +123,9 @@ pub(super) async fn watch(ctx: &Ctx, args: &Value) -> Output {
         Ok(c) => c,
         Err(e) => return fail(e),
     };
-    let area = match ctx.frame().area(args, 6) {
+    let frame = ctx.frame();
+    let hwnd = frame.own.unwrap_or(0);
+    let area = match frame.area(args, 6) {
         Ok(a) => a,
         Err(e) => return fail(format!("{e}: give the region to read as x0, y0, x1, y1 on the latest screenshot")),
     };
@@ -145,7 +147,7 @@ pub(super) async fn watch(ctx: &Ctx, args: &Value) -> Output {
         let mut breaks = 0u32;
         loop {
             let tick = std::time::Instant::now();
-            let lines = if numeric { ocr::read_numbers(area)? } else { ocr::read(area)? };
+            let lines = if numeric { ocr::read_numbers(hwnd, area)? } else { ocr::read_in(hwnd, area)? };
             let text = lines.iter().map(|l| l.text()).collect::<Vec<_>>().join(" ");
             reads += 1;
             let raw = if numeric { first_number(&text) } else { None };

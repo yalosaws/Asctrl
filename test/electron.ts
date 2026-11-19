@@ -7,20 +7,21 @@
 // 2. read_text reads the window through the page: the open file's text is there.
 // 3. A click by an element's name (the Explorer view) goes through the page: the mouse does not move.
 
+import { driverExecutable, owned, fixtureDirectory } from "./fixtures.ts";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { TechClient } from "../src/console/tech-client.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const localFile = path.join(tmpdir(), `asctrl-electron-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
 process.env.ASCTRL_CONFIRM ??= "off";
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] }));
 const tech = new TechClient("ws://127.0.0.1:1", "ElectronTest");
-const work = mkdtempSync(path.join(tmpdir(), "asctrl-electron-"));
+const work = fixtureDirectory(path.join(tmpdir(), "asctrl-electron-"));
 const file = path.join(work, "hello.txt");
 writeFileSync(file, "hello from asctrl electron test\n");
 let failures = 0;
@@ -51,12 +52,11 @@ try {
 
   // 3.
   const mouse = cursor();
-  // While VS Code is still building its window the page has no such element yet, and the click goes the usual way
-  // (through UI Automation): once it has, it goes through the page
-  let c = await tech.call("click", { window: W, target: "Explorer", after: "none" });
-  for (let i = 0; i < 16 && c.ok && (c.data as { channel?: string } | undefined)?.channel !== "page"; i++) {
+  const pageClick = () => tech.call("click", { window: W, target: "Explorer (Ctrl+Shift+E)", mode: "page", timeoutSec: 2, after: "none" });
+  let c = await pageClick();
+  for (let i = 0; i < 12 && !c.ok; i++) {
     await new Promise((res) => setTimeout(res, 500));
-    c = await tech.call("click", { window: W, target: "Explorer", after: "none" });
+    c = await pageClick();
   }
   say(c.ok && (c.data as { channel?: string } | undefined)?.channel === "page" && cursor() === mouse, `a click by name through the page, the mouse stayed put: ${first(c.text ?? c.error)}`);
 } catch (e) {

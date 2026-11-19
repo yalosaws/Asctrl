@@ -13,7 +13,7 @@
     "mcp:http": "node src/console/mcp-http.ts",
     "keys": "node src/console/mcp-http.ts keys",
     "typecheck": "tsc",
-    "test": "node test/e2e.ts",
+    "test": "node --test test/regressions.ts && node test/e2e.ts",
     "test:http": "node test/http.ts",
     "bench": "node test/bench.ts",
     "prof": "node test/prof.ts"

@@ -3,6 +3,7 @@
 // Prints, per action, the reply time and the settle the reply reports; for comparing before and after a change
 // to how actions wait.
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,7 +12,7 @@ import { TechClient } from "../src/console/tech-client.ts";
 import type { ObserveData, ToolName } from "../src/shared/protocol.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const off = process.argv.includes("--no-events");
 const localFile = path.join(tmpdir(), `asctrl-settle-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
@@ -19,8 +20,8 @@ process.env.ASCTRL_LOCAL_FILE = localFile;
 process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
 // Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
 process.env.ASCTRL_CONFIRM ??= "off";
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ...(off ? { ASCTRL_NO_EVENTS: "1" } : {}) } });
-const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ...(off ? { ASCTRL_NO_EVENTS: "1" } : {}) } }));
+const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
 const tech = new TechClient("ws://127.0.0.1:1", "SettleTest");
 let failures = 0;
 

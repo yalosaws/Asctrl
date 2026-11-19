@@ -5,7 +5,8 @@
 // Revoking a key cuts off both at once. Only hashes of keys and tokens are stored.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import type { Response } from "express";
 import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
@@ -64,7 +65,6 @@ export const callerOf = (auth: AuthInfo | undefined): Caller | undefined =>
  */
 export class AuthStore {
   private data: StoreData = { keys: {}, clients: {}, tokens: {} };
-  private mtimeMs = -1;
   readonly file: string;
 
   constructor(file: string) {
@@ -73,38 +73,52 @@ export class AuthStore {
   }
 
   private refresh() {
-    let m: number;
+    let raw: string;
     try {
-      m = statSync(this.file).mtimeMs;
-    } catch {
+      raw = readFileSync(this.file, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      this.data = { keys: {}, clients: {}, tokens: {} };
       return;
     }
-    if (m === this.mtimeMs) return;
-    const v = JSON.parse(readFileSync(this.file, "utf8")) as Partial<StoreData>;
+    const v = JSON.parse(raw) as Partial<StoreData>;
     this.data = { keys: v.keys ?? {}, clients: v.clients ?? {}, tokens: v.tokens ?? {} };
-    this.mtimeMs = m;
   }
 
-  private save() {
-    const t = now();
-    for (const [h, tok] of Object.entries(this.data.tokens)) if (tok.expiresAt <= t) delete this.data.tokens[h];
+  /** SQLite's OS-backed writer lock is released even if a CLI or server process exits mid-update.
+   * Keep the existing JSON format so existing stores and backups can still be read. */
+  private update<T>(change: () => T): T {
     mkdirSync(path.dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
-    renameSync(tmp, this.file);
-    this.mtimeMs = statSync(this.file).mtimeMs;
+    const lock = new DatabaseSync(this.file + ".lock.sqlite");
+    try {
+      lock.exec("PRAGMA busy_timeout = 5000");
+      lock.exec("BEGIN IMMEDIATE");
+      this.refresh();
+      const result = change();
+      for (const [h, tok] of Object.entries(this.data.tokens)) if (tok.expiresAt <= now()) delete this.data.tokens[h];
+      const tmp = this.file + "." + randomUUID() + ".tmp";
+      try {
+        writeFileSync(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600, flag: "wx" });
+        renameSync(tmp, this.file);
+      } finally {
+        rmSync(tmp, { force: true });
+      }
+      return result;
+    } finally {
+      lock.close();
+    }
   }
 
   // ---- Access keys ----
 
   addKey(name: string): { id: string; key: string } {
-    this.refresh();
-    if (Object.values(this.data.keys).some((k) => k.name === name)) throw new Error(`A key named "${name}" already exists`);
-    const key = secret("asc_");
-    const id = randomBytes(4).toString("hex");
-    this.data.keys[sha256(key)] = { id, name, created: new Date().toISOString() };
-    this.save();
-    return { id, key };
+    return this.update(() => {
+      if (Object.values(this.data.keys).some((k) => k.name === name)) throw new Error(`A key named "${name}" already exists`);
+      const key = secret("asc_");
+      const id = randomBytes(4).toString("hex");
+      this.data.keys[sha256(key)] = { id, name, created: new Date().toISOString() };
+      return { id, key };
+    });
   }
 
   listKeys(): (KeyRecord & { tokens: number })[] {
@@ -118,13 +132,13 @@ export class AuthStore {
 
   /** Removes a key (by name or id) and every OAuth token issued under it */
   revokeKey(nameOrId: string): boolean {
-    this.refresh();
-    const entry = Object.entries(this.data.keys).find(([, k]) => k.id === nameOrId || k.name === nameOrId);
-    if (!entry) return false;
-    delete this.data.keys[entry[0]];
-    for (const [h, tok] of Object.entries(this.data.tokens)) if (tok.keyId === entry[1].id) delete this.data.tokens[h];
-    this.save();
-    return true;
+    return this.update(() => {
+      const entry = Object.entries(this.data.keys).find(([, k]) => k.id === nameOrId || k.name === nameOrId);
+      if (!entry) return false;
+      delete this.data.keys[entry[0]];
+      for (const [h, tok] of Object.entries(this.data.tokens)) if (tok.keyId === entry[1].id) delete this.data.tokens[h];
+      return true;
+    });
   }
 
   keyByValue(key: string): KeyRecord | undefined {
@@ -144,42 +158,46 @@ export class AuthStore {
   }
 
   registerClient(client: OAuthClientInformationFull) {
-    this.refresh();
-    if (Object.keys(this.data.clients).length >= MAX_CLIENTS) throw new InvalidClientMetadataError("Too many registered clients");
-    this.data.clients[client.client_id] = client;
-    this.save();
-    return client;
+    return this.update(() => {
+      if (Object.keys(this.data.clients).length >= MAX_CLIENTS) throw new InvalidClientMetadataError("Too many registered clients");
+      this.data.clients[client.client_id] = client;
+      return client;
+    });
   }
 
   issueTokens(keyId: string, clientId: string, scopes: string[]): OAuthTokens {
-    this.refresh();
+    return this.update(() => this.newTokens(keyId, clientId, scopes));
+  }
+
+  private newTokens(keyId: string, clientId: string, scopes: string[]): OAuthTokens {
+    if (!this.keyById(keyId)) throw new InvalidGrantError("Access key has been revoked");
     const access = secret("asa_");
     const refresh = secret("asr_");
     const t = now();
     this.data.tokens[sha256(access)] = { kind: "access", keyId, clientId, scopes, expiresAt: t + ACCESS_TTL_SEC };
     this.data.tokens[sha256(refresh)] = { kind: "refresh", keyId, clientId, scopes, expiresAt: t + REFRESH_TTL_SEC };
-    this.save();
     return { access_token: access, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: refresh, scope: scopes.join(" ") || undefined };
   }
 
   /** A refresh token is good for one use: it is replaced by the new pair */
   rotate(refreshToken: string, clientId: string): OAuthTokens {
-    this.refresh();
-    const h = sha256(refreshToken);
-    const tok = this.data.tokens[h];
-    if (!tok || tok.kind !== "refresh" || tok.clientId !== clientId || tok.expiresAt <= now() || !this.keyById(tok.keyId)) {
-      throw new InvalidGrantError("Invalid or expired refresh token");
-    }
-    delete this.data.tokens[h];
-    return this.issueTokens(tok.keyId, tok.clientId, tok.scopes);
+    return this.update(() => {
+      const h = sha256(refreshToken);
+      const tok = this.data.tokens[h];
+      if (!tok || tok.kind !== "refresh" || tok.clientId !== clientId || tok.expiresAt <= now() || !this.keyById(tok.keyId)) {
+        throw new InvalidGrantError("Invalid or expired refresh token");
+      }
+      delete this.data.tokens[h];
+      return this.newTokens(tok.keyId, tok.clientId, tok.scopes);
+    });
   }
 
   revokeToken(token: string, clientId: string) {
-    this.refresh();
-    const h = sha256(token);
-    if (this.data.tokens[h]?.clientId !== clientId) return;
-    delete this.data.tokens[h];
-    this.save();
+    return this.update(() => {
+      const h = sha256(token);
+      if (this.data.tokens[h]?.clientId !== clientId) return;
+      delete this.data.tokens[h];
+    });
   }
 
   /** An access key, or an OAuth access token whose key still exists */

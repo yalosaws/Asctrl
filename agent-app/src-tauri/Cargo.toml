@@ -69,6 +69,9 @@ windows = { version = "0.62", features = [
   "Win32_UI_Shell",
 ] }
 
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62", features = ["Win32_System_StationsAndDesktops"] }
+
 [profile.release]
 codegen-units = 1
 lto = true

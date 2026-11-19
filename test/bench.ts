@@ -6,6 +6,7 @@
 //        npm run bench -- --app <exe>       another build
 // It moves the mouse and types: leave the computer alone for the ~20 seconds it runs.
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,7 +19,7 @@ const PORT = 18788;
 const CODE = "246810";
 const root = path.resolve(import.meta.dirname, "..");
 const appIdx = process.argv.indexOf("--app");
-const exe = appIdx >= 0 ? process.argv[appIdx + 1] : path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = appIdx >= 0 ? process.argv[appIdx + 1] : driverExecutable(root);
 const benchApp = path.join(root, "test/bench-app.ps1");
 const WIN = "Asctrl Bench";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -33,11 +34,11 @@ process.env.ASCTRL_CONFIRM ??= "off";
 
 // The driver also registers with a relay; give it a local one rather than the hosted one
 const relay = startRelay(PORT);
-const agent = spawn(exe, ["--code", CODE, "--relay", `ws://localhost:${PORT}`], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_CODE: CODE } });
+const agent = owned(() => spawn(exe, ["--code", CODE, "--relay", `ws://127.0.0.1:${PORT}`], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_CODE: CODE } }));
 // Started directly, with no console of its own: nothing for a terminal app to take over
-const app = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", benchApp], { stdio: "ignore", windowsHide: true });
+const app = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", benchApp], { stdio: "ignore", windowsHide: true }));
 
-const tech = new TechClient(`ws://localhost:${PORT}`, "Bench");
+const tech = new TechClient(`ws://127.0.0.1:${PORT}`, "Bench");
 const latency = new Map<string, number[]>();
 
 /** Call a tool; throws on failure, so a task stops at its first broken step */

@@ -27,9 +27,18 @@ const THRESHOLD: u8 = 18;
 const POLL: Duration = Duration::from_millis(30);
 
 pub fn print(area: Area) -> Option<Print> {
+    print_in(None, area)
+}
+
+fn print_in(hwnd: Option<isize>, area: Area) -> Option<Print> {
     let w = (area.width / STEP).clamp(1, 1600);
     let h = ((area.height as i64 * w as i64 / area.width.max(1) as i64) as i32).max(1);
-    let bgra = capture::pixels(area, w, h, false).ok()?;
+    let bgra = match hwnd {
+        Some(win) if crate::winmgr::is_minimized(win)
+            || crate::winmgr::rect_of(win) != Some((area.left, area.top, area.left + area.width, area.top + area.height)) => return None,
+        Some(win) if crate::winmgr::covered(win, area) => crate::wgc::capture(win).ok()?.cut(area, w, h).ok()?,
+        _ => capture::pixels(area, w, h, false).ok()?,
+    };
     let px = bgra.as_chunks::<4>().0.iter().map(|p| ((p[0] as u32 + 2 * p[1] as u32 + p[2] as u32) / 4) as u8).collect();
     Some(Print { area, w, h, px })
 }
@@ -366,13 +375,17 @@ pub fn settle(b: &Before, quiet: Duration, max: Duration) -> Change {
 /// Wait until `area` stops changing for `calm_for`, up to `max`. True when it did. A part that keeps changing
 /// for `noise_after` (a video, an ad) is left out; make it long when a spinner should count as still loading.
 pub fn wait_stable(area: Area, calm_for: Duration, max: Duration, noise_after: Duration) -> bool {
+    wait_stable_in(None, area, calm_for, max, noise_after)
+}
+
+pub fn wait_stable_in(hwnd: Option<isize>, area: Area, calm_for: Duration, max: Duration, noise_after: Duration) -> bool {
     let start = Instant::now();
-    let Some(mut prev) = print(area) else { return true };
+    let Some(mut prev) = print_in(hwnd, area) else { return hwnd.is_none() };
     let mut tracker = Tracker::new(&prev, None, noise_after);
     let mut calm_since = Instant::now();
     while start.elapsed() < max {
         std::thread::sleep(POLL);
-        let Some(cur) = print(area) else { return true };
+        let Some(cur) = print_in(hwnd, area) else { return hwnd.is_none() };
         if let Some(tiles) = tile_diff(&prev, &cur) {
             tracker.update(&tiles);
             if merge(&cur, &tiles, &tracker.ignore).significant() {

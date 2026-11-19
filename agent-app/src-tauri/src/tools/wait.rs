@@ -130,19 +130,12 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
         Err(_) if !texts.is_empty() || stable => None,
         Err(e) => return fail(e),
     };
-    let within_arg = args.get("window").cloned();
+    let within_arg = args.get("window").filter(|v| !v.is_null() && !v.as_str().is_some_and(|s| s.trim().is_empty())).cloned();
     let ocr_arg = bool_arg(args, "ocr");
     let f = ctx.frame();
     let r = tokio::task::spawn_blocking(move || -> Result<Did, String> {
         let start = std::time::Instant::now();
         let scope = || within.filter(|h| winmgr::exists(*h)).or_else(|| winmgr::find_arg(within_arg.as_ref()).ok().flatten().map(|h| h.0 as isize));
-        if stable {
-            let at = scope().and_then(winmgr::rect_of).map(|(l, t, r, b)| ((l + r) / 2, (t + b) / 2));
-            // Slow to write a part off as moving on its own: a spinner means the page is still loading
-            let ok = screen::wait_stable(screen::watch_area(at), Duration::from_millis(400), timeout, Duration::from_millis(1500));
-            let s = start.elapsed().as_secs_f64();
-            return if ok { Ok(Did { done: format!("Screen settled after {s:.1} s"), change: None, hwnd: scope(), fresh: false, delivered: false }) } else { Err(format!("The screen was still changing after {s:.1} s")) };
-        }
         let what = if !window.is_empty() { format!("A window matching \"{}\"", window.join("|")) } else { format!("\"{}\"", texts.join("|")) };
         let mut problem = String::new();
         let mut polls = 0u32;
@@ -152,6 +145,32 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
             polls += 1;
             // Whatever happens to the windows from here on wakes the next look early
             let seen = crate::events::seq();
+            let target = scope();
+            if within_arg.is_some() && target.is_none() {
+                let left = timeout.saturating_sub(start.elapsed());
+                if left.is_zero() {
+                    return Err("Timed out waiting for the specified window".into());
+                }
+                crate::events::wait(seen, left.min(Duration::from_millis(100)));
+                continue;
+            }
+            if stable {
+                let area = match target {
+                    Some(h) => {
+                        let (l, t, r, b) = winmgr::rect_of(h).ok_or("The specified window has closed")?;
+                        capture::Area { left: l, top: t, width: r - l, height: b - t }
+                    }
+                    None => screen::watch_area(None),
+                };
+                let ok = screen::wait_stable_in(target, area, Duration::from_millis(400), timeout.saturating_sub(start.elapsed()), Duration::from_millis(1500));
+                let s = start.elapsed().as_secs_f64();
+                return if ok && scope() == target {
+                    Ok(Did { done: format!("Screen settled after {s:.1} s"), change: None, hwnd: target, fresh: false, delivered: false })
+                } else {
+                    Err(format!("The requested view did not stay stable for {s:.1} s"))
+                };
+            }
+            problem.clear();
             let mut overruled = false;
             // Some((details, the window it is in, whether to list that window's controls))
             let found: Option<(String, Option<isize>, bool)> = if !window.is_empty() {
@@ -172,7 +191,7 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
                     (look::win_line(&f, w), Some(w.handle), true)
                 })
             } else {
-                let hwnd = scope().unwrap_or_else(winmgr::foreground);
+                let hwnd = target.unwrap_or_else(winmgr::foreground);
                 // Pixels are read every other poll when not asked for outright: controls answer faster
                 let use_ocr = ocr_arg.unwrap_or(polls.is_multiple_of(2)) && ocr_arg != Some(false);
                 if hwnd == 0 { None } else { showing(hwnd, &texts, &f, use_ocr, &mut problem, &mut overruled).map(|(d, in_controls)| (d, Some(hwnd), in_controls)) }
@@ -184,7 +203,7 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
             let sure = overruled_since.is_none_or(|t| t.elapsed() >= GONE_SURE);
             match (found, gone) {
                 (Some((d, hwnd, list)), false) => return Ok(Did { done: format!("{what} appeared after {s:.1} s: {d}"), change: None, hwnd, fresh: list, delivered: false }),
-                (None, true) if sure => return Ok(Did { done: format!("{what} is gone after {s:.1} s"), change: None, hwnd: scope(), fresh: false, delivered: false }),
+                (None, true) if sure && problem.is_empty() => return Ok(Did { done: format!("{what} is gone after {s:.1} s"), change: None, hwnd: scope(), fresh: false, delivered: false }),
                 _ => {}
             }
             if start.elapsed() >= timeout {

@@ -50,7 +50,7 @@ impl Level {
     }
 }
 
-const LOOKING: [&str; 10] = ["observe", "screenshot", "read_text", "wait_for", "read_grid", "watch", "skills", "exec", "resume", "timeline"];
+const LOOKING: [&str; 9] = ["observe", "screenshot", "read_text", "wait_for", "read_grid", "watch", "exec", "resume", "timeline"];
 
 /// Words of things that go out to someone else
 fn external_words() -> &'static regex::Regex {
@@ -117,7 +117,7 @@ fn aimed_at(args: &Value) -> String {
 
 /// The level of `tool` with `args`, and what it is aimed at
 pub fn level(tool: &str, args: &Value) -> (Level, String) {
-    if LOOKING.contains(&tool) || (tool == "clipboard" && args.get("text").is_none_or(Value::is_null)) {
+    if LOOKING.contains(&tool) || (tool == "skills" && args["forget"].is_null() && args["import"].is_null()) || (tool == "clipboard" && args.get("text").is_none_or(Value::is_null)) {
         return (Level::Read, String::new());
     }
     let mut what = aimed_at(args);
@@ -155,52 +155,39 @@ pub fn level(tool: &str, args: &Value) -> (Level, String) {
 }
 
 /// After an action: one line in the log
-pub fn record(tool: &str, args: &Value, l: Level, what: &str, out: &Output) {
+pub fn record(tool: &str, args: &Value, l: Level, out: &Output, elapsed: std::time::Duration) {
     if l == Level::Read {
         return;
     }
-    let mut a = args.clone();
-    if let Some(o) = a.as_object_mut() {
-        for k in ["text", "value"] {
-            if let Some(v) = o.get(k).and_then(Value::as_str).map(|s| s.chars().count()) {
-                o.insert(k.into(), json!(format!("<{v} characters>")));
-            }
-        }
-        if let Some(f) = o.get_mut("fields").and_then(Value::as_object_mut) {
-            for v in f.values_mut() {
-                *v = json!(format!("<{} characters>", v.as_str().map(|s| s.chars().count()).unwrap_or(0)));
-            }
+    // Only keep counts. Targets, command lines, form values and result text can all contain user data.
+    let mut summary = serde_json::Map::new();
+    for key in ["text", "value", "content", "data", "script"] {
+        if let Some(s) = args[key].as_str() {
+            summary.insert(key.into(), json!(format!("<{} characters>", s.chars().count())));
         }
     }
-    // The reply reads typed text back ("now reads \"...\""): not that either
-    let mut result: String = out.body().lines().next().unwrap_or("").chars().take(200).collect();
-    let mut typed: Vec<&str> = ["text", "value"].iter().filter_map(|k| args.get(*k).and_then(Value::as_str)).collect();
-    typed.extend(args.get("fields").and_then(Value::as_object).into_iter().flat_map(|f| f.values().filter_map(Value::as_str)));
-    for t in typed.into_iter().filter(|t| !t.is_empty()) {
-        result = result.replace(t, &format!("<{} characters>", t.chars().count()));
-    }
-    if (result.contains("now reads") || result.contains("it now reads"))
-        && let Some(i) = result.find("reads \"")
-    {
-        result.truncate(i + 6);
-        result.push_str("…\" (not kept)");
+    for key in ["steps", "actions", "fields"] {
+        if let Some(items) = args[key].as_array() {
+            summary.insert(key.into(), json!(items.len()));
+        }
     }
     let line = json!({
         "at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
         "by": crate::controller_name(),
         "tool": tool,
-        "aimed": what,
-        "args": a,
+        "args": summary,
         "effect": l.as_str(),
+        "elapsedMs": elapsed.as_millis() as u64,
         "ok": out.ok,
         "channel": out.data.as_ref().and_then(|d| d.get("channel")).cloned(),
-        "result": result,
     });
     let Some(base) = std::env::var_os("LOCALAPPDATA") else { return };
     let dir = std::path::PathBuf::from(base).join("Asctrl");
     let file = std::env::var_os("ASCTRL_ACTION_LOG").map(std::path::PathBuf::from).unwrap_or_else(|| dir.join("actions.log"));
     let _ = std::fs::create_dir_all(file.parent().unwrap_or(&dir));
     // Kept to about 20 MB: the older half moves aside
+    static LOG_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOG_WRITE.lock().unwrap_or_else(|e| e.into_inner());
     if std::fs::metadata(&file).map(|m| m.len() > 10 << 20).unwrap_or(false) {
         let _ = std::fs::rename(&file, file.with_extension("log.1"));
     }

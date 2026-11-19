@@ -10,9 +10,10 @@
 //   --squeeze: replay pauses over 10 s as 10 s (long runs with an AI thinking between calls)
 // A log without an "info" line (older drivers) is replayed on this computer's primary screen.
 
+import { owned, fixtureDirectory } from "./fixtures.ts";
 import { spawn, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -63,7 +64,7 @@ const port = (server.address() as { port: number }).port;
 const browsers = [`${process.env.ProgramFiles}\\Google\\Chrome\\Application\\chrome.exe`, `${process.env["ProgramFiles(x86)"]}\\Microsoft\\Edge\\Application\\msedge.exe`];
 const exe = browsers.find(existsSync);
 if (!exe) throw new Error("no Chrome or Edge to replay in");
-const profile = mkdtempSync(path.join(tmpdir(), "asctrl-fxcheck-"));
+const profile = fixtureDirectory(path.join(tmpdir(), "asctrl-fxcheck-"));
 
 function screenOf(lines: { t: number; e: Record<string, unknown> }[]) {
   const info = lines.find((l) => l.e.phase === "info")?.e.info as { scale: number; monitors: { bounds: R; primary: boolean }[] } | undefined;
@@ -75,7 +76,7 @@ function screenOf(lines: { t: number; e: Record<string, unknown> }[]) {
 }
 
 async function openPage(scale: number, w: number, h: number) {
-  const proc = spawn(exe!, [`--user-data-dir=${profile}`, "--headless=new", "--remote-debugging-port=0", `--force-device-scale-factor=${scale}`, `--window-size=${w},${h}`, "--no-first-run", "--no-default-browser-check", "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "about:blank"], { stdio: "ignore" });
+  const proc = owned(() => spawn(exe!, [`--user-data-dir=${profile}`, "--headless=new", "--remote-debugging-port=0", `--force-device-scale-factor=${scale}`, `--window-size=${w},${h}`, "--no-first-run", "--no-default-browser-check", "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "about:blank"], { stdio: "ignore" }));
   const file = path.join(profile, "DevToolsActivePort");
   for (let i = 0; i < 100 && !existsSync(file); i++) await new Promise((r) => setTimeout(r, 100));
   const devPort = readFileSync(file, "utf8").split("\n")[0].trim();

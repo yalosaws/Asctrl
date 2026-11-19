@@ -9,6 +9,7 @@
 // 5. A running program stopped.
 // 6. A program in Asctrl's own browser: the page channel from inside a program.
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,15 +19,15 @@ import { TechClient } from "../src/console/tech-client.ts";
 import type { ObserveData, ProgramData } from "../src/shared/protocol.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const localFile = path.join(tmpdir(), `asctrl-p4-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
 // Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
 process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
 // Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
 process.env.ASCTRL_CONFIRM ??= "off";
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] });
-const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] }));
+const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
 const tech = new TechClient("ws://127.0.0.1:1", "P4Test");
 let failures = 0;
 const say = (ok: boolean, line: string) => {
@@ -55,6 +56,8 @@ try {
       return seen;`,
     args: { names: ["Ann", "Bob", "Cy"], w: B },
   });
+  const expired = await tech.call("exec", { script: "sleep(2500); return 17;", timeoutSec: 1, waitSec: 4, learn: false });
+  say(prog(expired)?.state === "stopped" && /out of time/.test(prog(expired)?.error ?? ""), "host sleep obeys the program deadline");
   const p1 = prog(r1);
   say(p1?.state === "done" && JSON.stringify(p1.result) === JSON.stringify(["Submitted: Ann", "Submitted: Bob", "Submitted: Cy"]), `three rows in one call, ${p1?.actions} actions in ${Math.round(performance.now() - t)} ms: ${JSON.stringify(p1?.result ?? brief(r1.text ?? r1.error))}`);
 

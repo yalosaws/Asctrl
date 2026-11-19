@@ -84,6 +84,14 @@ pub(super) async fn screenshot(ctx: &Ctx, args: &Value) -> Output {
         None => ctx.view().max_width,
     };
     *ctx.view.lock().unwrap() = View { scope, max_width };
+    // Set-of-Marks: each control the window has, boxed and numbered with its reference
+    if bool_arg(args, "marks") == Some(true) {
+        let h = window.unwrap_or_else(winmgr::foreground);
+        return match marked(ctx, h, max_width).await {
+            Ok(o) => o,
+            Err(e) => fail(e),
+        };
+    }
     // A window that others cover is taken as it draws itself, where it is: nothing on the screen moves
     if let Some(h) = window
         && let Some(r) = own_picture(ctx, h, max_width).await
@@ -108,14 +116,6 @@ pub(super) async fn screenshot(ctx: &Ctx, args: &Value) -> Output {
         if let Ok(Err(e)) = r {
             return fail(e);
         }
-    }
-    // Set-of-Marks: each control the window has, boxed and numbered with its reference
-    if bool_arg(args, "marks") == Some(true) {
-        let h = window.unwrap_or_else(winmgr::foreground);
-        return match marked(ctx, h, max_width).await {
-            Ok(o) => o,
-            Err(e) => fail(e),
-        };
     }
     match capture_view(ctx).await {
         Ok((image, note)) => {
@@ -184,6 +184,10 @@ fn draw_marks(px: &mut [u8], w: i32, h: i32, area: capture::Area, scale: f64, ma
 async fn marked(ctx: &Ctx, h: isize, max_width: i32) -> Result<Output, String> {
     let r = tokio::task::spawn_blocking(move || -> Result<_, String> {
         let area = winmgr::rect_of(h).and_then(|(l, t, r, b)| clip_to_screen((l, t, r, b))).ok_or("the window is not on the screen")?;
+        let own = if winmgr::covered(h, area) {
+            Some(crate::wgc::capture(h).map_err(|e| format!("Cannot mark the covered window: {e}"))?)
+        } else { None };
+        let area = own.as_ref().map_or(area, |picture| picture.area);
         let scene = uia::snapshot(h, false)?;
         let marks: Vec<(u32, winmgr::Rect, String)> = scene
             .nodes
@@ -197,14 +201,17 @@ async fn marked(ctx: &Ctx, h: isize, max_width: i32) -> Result<Output, String> {
             .map(|n| (n.rf, n.rect, format!("{} \"{}\"", n.role, uia::clip(&n.name, 50))))
             .collect();
         let (scale, w, hh) = capture::scaled(area, max_width);
-        let mut px = capture::pixels(area, w, hh, true)?;
+        let mut px = match &own {
+            Some(picture) => picture.shrink(w, hh),
+            None => capture::pixels(area, w, hh, true)?,
+        };
         draw_marks(&mut px, w, hh, area, scale, &marks.iter().map(|(rf, r, _)| (*rf, *r)).collect::<Vec<_>>());
-        Ok((area, scale, w, hh, capture::jpeg(&px, w, hh)?, marks, winmgr::layout()))
+        Ok((area, scale, w, hh, capture::jpeg(&px, w, hh)?, marks, winmgr::layout(), own.is_some()))
     })
     .await
     .map_err(|e| e.to_string())??;
-    let (area, scale, w, hh, jpeg, marks, layout) = r;
-    let frame = Frame { left: area.left, top: area.top, scale, width: w, height: hh, own: None };
+    let (area, scale, w, hh, jpeg, marks, layout, covered) = r;
+    let frame = Frame { left: area.left, top: area.top, scale, width: w, height: hh, own: covered.then_some(h) };
     *ctx.frame.lock().unwrap() = Some(frame);
     ctx.saw(layout);
     let list: Vec<String> = marks.iter().map(|(rf, _, d)| format!("{rf}: e{rf} {d}")).collect();
@@ -260,7 +267,7 @@ async fn zoom(ctx: &Ctx, args: &Value) -> Output {
         Err(e) => return fail(e),
     };
     let maxw = int_arg(args, "maxWidth", 1600, 320, 3840) as i32;
-    match shoot(area, maxw).await {
+    match shoot_in(g.own, area, maxw).await {
         Ok((shot, image)) => Output {
             ok: true,
             image: Some(image),
@@ -558,8 +565,8 @@ pub(super) async fn read_text(ctx: &Ctx, args: &Value) -> Output {
     let display = int_arg(args, "display", 0, 0, 16) as usize;
     let source = str_arg(args, "source").to_string();
     blocking(move || {
-        let ocr_lines = |area: capture::Area, what: &str| -> Result<String, String> {
-            let lines = ocr::read(area)?;
+        let ocr_lines = |hwnd: isize, area: capture::Area, what: &str| -> Result<String, String> {
+            let lines = ocr::read_in(hwnd, area)?;
             if lines.is_empty() {
                 return Ok(format!("No text found {what}"));
             }
@@ -575,12 +582,12 @@ pub(super) async fn read_text(ctx: &Ctx, args: &Value) -> Output {
             Ok(format!("Text read off the pixels {what}, top to bottom ({} lines; @ is each line's centre):\n{}{more}", lines.len(), shown.join("\n")))
         };
         if let Some(area) = region {
-            return ocr_lines(area, "in that region");
+            return ocr_lines(window.or(f.own).unwrap_or(0), area, "in that region");
         }
         if display > 0 && window.is_none() {
             let d = capture::displays();
             let area = d.get(display - 1).map(|d| d.area).ok_or(format!("There is no display #{display}"))?;
-            return ocr_lines(area, &format!("on display #{display}"));
+            return ocr_lines(0, area, &format!("on display #{display}"));
         }
         let hwnd = window.unwrap_or_else(winmgr::foreground);
         if hwnd == 0 {
@@ -599,7 +606,7 @@ pub(super) async fn read_text(ctx: &Ctx, args: &Value) -> Output {
             }
         }
         match area {
-            Some(a) => ocr_lines(a, &format!("of \"{title}\"")),
+            Some(a) => ocr_lines(hwnd, a, &format!("of \"{title}\"")),
             None => Err(format!("\"{title}\" is minimized or off the screen")),
         }
     })

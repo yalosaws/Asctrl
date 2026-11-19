@@ -9,6 +9,7 @@
 //    instead, it ends well, and its script now names the new button.
 // 4. export gives it back as JSON, with the change.
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,12 +18,12 @@ import { TechClient } from "../src/console/tech-client.ts";
 import type { ProgramData } from "../src/shared/protocol.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const localFile = path.join(tmpdir(), `asctrl-l4-local-${process.pid}.json`);
 const skillsFile = path.join(tmpdir(), `asctrl-l4-skills-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_SKILLS_FILE: skillsFile, ASCTRL_CONFIRM: "off" } });
-const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_SKILLS_FILE: skillsFile, ASCTRL_CONFIRM: "off" } }));
+const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
 const tech = new TechClient("ws://127.0.0.1:1", "L4Test");
 let failures = 0;
 const say = (ok: boolean, line: string) => {

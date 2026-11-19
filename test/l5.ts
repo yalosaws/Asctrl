@@ -5,6 +5,7 @@
 // 2. A declaration raises the level: "Agree" with effect: "irreversible" is logged as irreversible, and done too.
 // 3. The action log has each action and its level, and typed text only by its length.
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,14 +13,16 @@ import path from "node:path";
 import { TechClient } from "../src/console/tech-client.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const localFile = path.join(tmpdir(), `asctrl-l5-local-${process.pid}.json`);
 const log = path.join(tmpdir(), `asctrl-l5-actions-${process.pid}.log`);
+const replay = path.join(tmpdir(), `asctrl-l5-replay-${process.pid}.log`);
+const sample = path.join(tmpdir(), `asctrl-l5-fixture-${process.pid}.txt`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
 // Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
 process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_ACTION_LOG: log } });
-const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_ACTION_LOG: log, ASCTRL_FX_LOG: replay } }));
+const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
 const tech = new TechClient("ws://127.0.0.1:1", "L5Test");
 let failures = 0;
 const say = (ok: boolean, line: string) => {
@@ -45,12 +48,22 @@ try {
   r = await tech.call("click", { window: "Asctrl Bench", target: "Agree", effect: "irreversible", after: "none" });
   say(r.ok && performance.now() - t < 3000, `declared irreversible, the checkbox was still done with no question (${Math.round(performance.now() - t)} ms)`);
 
+  const multi = await tech.call("set_value", { window: "Asctrl Bench", fields: [{ target: "Name", value: "private-form-583" }], after: "none" });
+  say(multi.ok, "multiple fields set through the driver");
+  const payload = Buffer.from("private-upload-136").toString("base64");
+  const file = await tech.call("write_file", { path: sample, content: "private-file-207" });
+  const uploaded = await tech.call("upload_file", { path: sample, data: payload });
+  const nested = await tech.call("batch", { steps: [{ tool: "set_value", target: "Name", value: "private-step-308", window: "Asctrl Bench" }] });
+  say(file.ok && uploaded.ok && nested.ok, "file, upload and nested actions completed");
   // 3.
   const lines = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
-  const clicks = lines.filter((l) => l.tool === "click").map((l) => `${l.aimed}:${l.effect}:${l.ok}`).join(" | ");
-  say(clicks === "Submit:external:true | Agree:irreversible:true", `the log has each click and its level: ${clicks}`);
+  const clicks = lines.filter((l) => l.tool === "click").map((l) => `${l.effect}:${l.ok}`).join(" | ");
+  say(clicks === "external:true | irreversible:true", `the log has each click and its level: ${clicks}`);
+  const recorded = JSON.stringify(lines) + readFileSync(replay, "utf8");
+  say(["secret123", "private-form-583", "private-file-207", payload, "private-step-308"].every((s) => !recorded.includes(s))
+    && lines.every((entry) => Number.isFinite(entry.elapsedMs)), "both logs exclude payloads and the action log retains elapsed time");
   const typed = JSON.stringify(lines.filter((l) => l.tool === "set_value"));
-  say(!/secret123/.test(typed) && /<9 characters>/.test(typed), `typed values are logged by their length only`);
+  say(!/secret123|private-form-583/.test(JSON.stringify(lines)) && /<9 characters>/.test(typed), `typed values are logged by their length only`);
 } catch (e) {
   console.error(e);
   failures++;
@@ -61,6 +74,6 @@ try {
   bench.kill();
   agent.kill();
   rmSync(localFile, { force: true });
-  rmSync(log, { force: true });
+  for (const file of [log, replay, sample]) rmSync(file, { force: true, maxRetries: 6, retryDelay: 100 });
   setTimeout(() => process.exit(), 300);
 }

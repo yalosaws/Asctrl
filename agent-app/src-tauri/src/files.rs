@@ -140,37 +140,62 @@ fn sniff_enc(path: &Path) -> Option<Enc> {
     }
 }
 
-/// Write `bytes` to `path` without ever leaving it half written: into a new file beside it first, then swapped
-/// in, keeping the old file's attributes and permissions. A file that is never written whole (the disk is
-/// full) leaves the old one as it was. Only when the swap itself is refused (another program holds the file
-/// open) is it written in place.
+// A driver may be restarted or two copies may run on the same desktop. Windows releases
+// an abandoned mutex if a writer exits before committing its staged file.
+struct Writer(windows::Win32::Foundation::HANDLE);
+impl Writer {
+    fn acquire() -> Result<Self, String> {
+        use windows::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{CreateMutexW, INFINITE, WaitForSingleObject};
+        unsafe {
+            let handle = CreateMutexW(None, false, windows::core::w!("Local\\Asctrl.FileWriter.v1")).map_err(|e| e.to_string())?;
+            if matches!(WaitForSingleObject(handle, INFINITE), WAIT_OBJECT_0 | WAIT_ABANDONED) {
+                Ok(Self(handle))
+            } else {
+                let _ = CloseHandle(handle);
+                Err("Could not acquire the file writer lock".into())
+            }
+        }
+    }
+}
+impl Drop for Writer {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::System::Threading::ReleaseMutex(self.0);
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
 pub fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let _guard = Writer::acquire()?;
+    replace_bytes(path, bytes)
+}
+
+fn replace_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
     use windows::Win32::Storage::FileSystem::{REPLACE_FILE_FLAGS, ReplaceFileW};
     use windows::core::{HSTRING, PCWSTR};
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}.asctrl-{}.tmp", std::process::id()));
-    if let Err(e) = std::fs::write(&tmp, bytes) {
+    let tmp = path.with_file_name(format!(".asctrl-{:032x}.tmp", rand::random::<u128>()));
+    let mut file = std::fs::File::create_new(&tmp).map_err(|e| format!("Cannot stage {}: {e}", path.display()))?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        if path.try_exists()? {
+            unsafe { ReplaceFileW(&HSTRING::from(path.as_os_str()), &HSTRING::from(tmp.as_os_str()), PCWSTR::null(), REPLACE_FILE_FLAGS(0), None, None) }?;
+        } else {
+            std::fs::rename(&tmp, path)?;
+        }
+        Ok::<_, std::io::Error>(())
+    })();
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
-        // No room for a copy beside it, or the folder can't take new files: the file itself may still take it
-        return match e.kind() {
-            std::io::ErrorKind::PermissionDenied => std::fs::write(path, bytes).map_err(|e| format!("Failed to write {}: {e}", path.display())),
-            _ => Err(format!("Failed to write {} (it was left as it was): {e}", path.display())),
-        };
     }
-    let swapped = if path.exists() {
-        // REPLACEFILE_IGNORE_MERGE_ERRORS
-        unsafe { ReplaceFileW(&HSTRING::from(path.as_os_str()), &HSTRING::from(tmp.as_os_str()), PCWSTR::null(), REPLACE_FILE_FLAGS(2), None, None) }.is_ok()
-    } else {
-        std::fs::rename(&tmp, path).is_ok()
-    };
-    if swapped {
-        return Ok(());
-    }
-    let _ = std::fs::remove_file(&tmp);
-    std::fs::write(path, bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    result.map_err(|e| format!("Failed to replace {}: {e}", path.display()))
 }
 
 fn read_text(path: &Path) -> Result<(String, Enc), String> {
@@ -212,13 +237,14 @@ pub fn read(path: &Path, offset: usize, limit: usize) -> Result<String, String> 
 }
 
 pub fn write(path: &Path, content: &str, enc: Option<Enc>) -> Result<String, String> {
+    let _guard = Writer::acquire()?;
     // No encoding given: existing files keep theirs, new files use UTF-8
     let enc = match enc {
         Some(e) => e,
         None => sniff_enc(path).unwrap_or(Enc::Utf8),
     };
     let bytes = encode(content, enc)?;
-    write_whole(path, &bytes)?;
+    replace_bytes(path, &bytes)?;
     Ok(format!("Wrote {} ({}, {} bytes)", path.display(), enc.name(), bytes.len()))
 }
 
@@ -229,6 +255,7 @@ pub fn edit(path: &Path, old: &str, new: &str, replace_all: bool) -> Result<Stri
     if old == new {
         return Err("oldText and newText are identical; nothing to change".into());
     }
+    let _guard = Writer::acquire()?;
     let (text, enc) = read_text(path)?;
     // If the file uses CRLF but the input uses \n, convert to \r\n
     let crlf = text.contains("\r\n");
@@ -242,7 +269,7 @@ pub fn edit(path: &Path, old: &str, new: &str, replace_all: bool) -> Result<Stri
         return Err(format!("oldText appears {n} times in the file. Include more context to make it unique, or pass replaceAll: true"));
     }
     let out = if replace_all { text.replace(&old, &new) } else { text.replacen(&old, &new, 1) };
-    write_whole(path, &encode(&out, enc)?)?;
+    replace_bytes(path, &encode(&out, enc)?)?;
     Ok(format!("Edited {}: {} replacement(s) ({})", path.display(), if replace_all { n } else { 1 }, enc.name()))
 }
 
@@ -648,6 +675,32 @@ mod tests {
         std::fs::write(&p, [0x61, 0xD6, 0xD0, 0xCE, 0xC4]).unwrap(); // GBK bytes, invalid as UTF-8
         assert_eq!(sniff_enc(&p), Some(Enc::Ansi));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_edits_preserve_each_successful_change() {
+        let p = std::env::temp_dir().join(format!("asctrl-edits-{:032x}", rand::random::<u128>()));
+        std::fs::write(&p, "A B C D").unwrap();
+        std::thread::scope(|scope| {
+            for key in ["A", "B", "C", "D"] {
+                let path = &p;
+                scope.spawn(move || edit(path, key, &key.to_lowercase(), false).unwrap());
+            }
+        });
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "a b c d");
+        std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn failed_replace_preserves_original_bytes() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let p = std::env::temp_dir().join(format!("asctrl-held-{:032x}", rand::random::<u128>()));
+        std::fs::write(&p, b"original").unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1).open(&p).unwrap();
+        assert!(write_whole(&p, b"replacement").is_err());
+        drop(held);
+        assert_eq!(std::fs::read(&p).unwrap(), b"original");
+        std::fs::remove_file(p).unwrap();
     }
 
     #[test]

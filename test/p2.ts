@@ -10,6 +10,7 @@
 // 4. A screenshot of a covered window shows it as it draws itself without moving anything, and a click at a
 //    point on that picture lands in it.
 
+import { driverExecutable, owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,7 +19,7 @@ import { TechClient } from "../src/console/tech-client.ts";
 import type { BatchData, ObserveData } from "../src/shared/protocol.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const exe = path.join(root, "agent-app/src-tauri/target/release/asctrl-agent.exe");
+const exe = driverExecutable(root);
 const off = process.argv.includes("--no-events");
 const localFile = path.join(tmpdir(), `asctrl-p2-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
@@ -26,8 +27,8 @@ process.env.ASCTRL_LOCAL_FILE = localFile;
 process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
 // Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
 process.env.ASCTRL_CONFIRM ??= "off";
-const agent = spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ...(off ? { ASCTRL_NO_EVENTS: "1" } : {}) } });
-const bench = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1"), "-NotOnTop"], { stdio: "ignore", windowsHide: true });
+const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ...(off ? { ASCTRL_NO_EVENTS: "1" } : {}) } }));
+const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1"), "-NotOnTop"], { stdio: "ignore", windowsHide: true }));
 const tech = new TechClient("ws://127.0.0.1:1", "P2Test");
 let failures = 0;
 const say = (ok: boolean, line: string) => {
@@ -46,6 +47,11 @@ try {
   console.log(`timeline ${off ? "off" : "on"}`);
   await tech.call("wait_for", { appears: "Asctrl Bench", timeoutSec: 15 });
   const B = (await windowNamed(/^Asctrl Bench$/))!;
+
+  for (const condition of [{ text: "Submit" }, { stable: true }]) {
+    const absent = await tech.call("wait_for", { window: "Asctrl missing fixture 38721", ...condition, timeoutSec: 0.3, after: "none" });
+    say(!absent.ok && /specified window/.test(absent.error ?? ""), "a missing explicit window cannot satisfy " + JSON.stringify(condition));
+  }
 
   // 1. How long after the dialog opens wait_for notices it
   const late: number[] = [];
@@ -101,6 +107,8 @@ try {
   await tech.call("wait_for", { stable: true, timeoutSec: 3, after: "none" });
   const front = async () => ((await tech.call("observe", { max: 1 })).data as ObserveData | undefined)?.windows?.find((w) => w.front);
   const before = await front();
+  const marked = await tech.call("screenshot", { window: B, marks: true });
+  say(marked.ok && !!marked.image && /\be\d+ Button "Submit"/.test(marked.text ?? "") && (await front())?.handle === C, "covered screenshot preserves control references and foreground");
   const s = await tech.call("screenshot", { window: B });
   const still = (await front())?.handle;
   say(
