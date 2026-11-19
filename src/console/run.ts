@@ -101,6 +101,23 @@ const KINDS: Record<string, string[]> = {
   watch: ["until", "everyMs", "confirm", "timeoutSec"],
 };
 
+/** One right way to write each kind of step, shown when one is written wrong */
+const EXAMPLES: Record<string, string> = {
+  open: `{open: "notepad"} or {open: "https://example.com", browser: "asctrl"}`,
+  click: `{click: "Save"} (text it shows), or {tool: "click", x: 120, y: 40} for a point on the latest screenshot`,
+  press: `{press: "OK"}`,
+  fill: `{fill: {"Name": "Ada", "Email": "ada@example.com"}}`,
+  type: `{type: "the text", into: "Subject"}`,
+  keys: `{keys: "ctrl+s"}`,
+  expect: `{expect: "Saved"}`,
+  check: `{check: "Remember me"}`,
+  await: `{await: "Loading", gone: true, timeoutSec: 10}`,
+  scroll: `{scroll: "down", target: "Results", amount: 5}`,
+  read: `{read: "board"} (a grid declared in grids)`,
+  watch: `{watch: {x0: 10, y0: 10, x1: 90, y1: 30}, until: ">= 100"}`,
+};
+const example = (kind: string) => (EXAMPLES[kind] ? ` — e.g. ${EXAMPLES[kind]}` : "");
+
 const GRID_CELL = /^(\w+)\[\s*(\d+)\s*,\s*(\d+)\s*\]$/;
 const placeholder = (v: unknown) => typeof v === "string" && /\$(\{\w+\}|\d+)/.test(v);
 
@@ -166,10 +183,10 @@ export function validate(plan: Plan): string[] {
       return;
     }
     const kinds = Object.keys(KINDS).filter((k) => s[k] !== undefined);
-    if (kinds.length !== 1) return void errs.push(`${where}: give exactly one of ${[...Object.keys(KINDS), "tool"].join(", ")} (got ${kinds.length ? kinds.join(", ") : "none"})`);
+    if (kinds.length !== 1) return void errs.push(`${where}: give exactly one of ${[...Object.keys(KINDS), "tool"].join(", ")} (got ${kinds.length ? kinds.join(", ") : "none"}) — e.g. ${EXAMPLES.click}; ${EXAMPLES.type}; ${EXAMPLES.await}`);
     const kind = kinds[0];
     const extra = Object.keys(s).filter((k) => k !== kind && k !== "window" && !KINDS[kind].includes(k));
-    if (extra.length) errs.push(`${where} (${kind}): ${extra.map((k) => `"${k}"`).join(", ")} not understood; it takes ${["window", ...KINDS[kind]].join(", ")}`);
+    if (extra.length) errs.push(`${where} (${kind}): ${extra.map((k) => `"${k}"`).join(", ")} not understood; it takes ${["window", ...KINDS[kind]].join(", ")}${example(kind)}`);
     const v = s[kind];
     if (kind === "fill") {
       if (!v || typeof v !== "object" || Array.isArray(v) || !Object.keys(v).length) errs.push(`${where}: fill takes {label: value, …}`);
@@ -183,7 +200,7 @@ export function validate(plan: Plan): string[] {
     } else if (kind === "scroll") {
       if (!["up", "down", "left", "right"].includes(String(v)) && !placeholder(v)) errs.push(`${where}: scroll takes up, down, left or right`);
     } else if (typeof v !== "string" && typeof v !== "number") {
-      errs.push(`${where}: ${kind} takes text`);
+      errs.push(`${where}: ${kind} takes text${example(kind)}`);
     } else if (String(v).trim() === "") {
       errs.push(`${where}: ${kind} is empty`);
     }
