@@ -196,6 +196,19 @@ async fn relay_once(app: &AppHandle) -> Result<(), String> {
     let _ = tx.send(json!({ "type": "agent_hello", "code": code, "hostname": hostname, "protocol": PROTOCOL }).to_string());
     set_relay(app, RelayState::Ready);
 
+    // A controller coming or going waits for the one before to be cleaned up, which can take seconds: that is
+    // done in order on a task of its own, so this link keeps reading meanwhile (pings answered, End session
+    // heard). Calls need no such order: a controller sends them only once it was told it is paired.
+    let (lifecycle, mut changes) = mpsc::unbounded_channel::<Value>();
+    {
+        let (app, tx) = (app.clone(), tx.clone());
+        tokio::spawn(async move {
+            while let Some(m) = changes.recv().await {
+                let _ = relay_message(&app, &tx, m).await;
+            }
+        });
+    }
+
     let result = loop {
         tokio::select! {
             _ = st.kick_relay.notified() => break Ok(()),
@@ -203,15 +216,18 @@ async fn relay_once(app: &AppHandle) -> Result<(), String> {
                 None => break Err("Lost the connection to the server".into()),
                 Some(Err(e)) => break Err(e.to_string()),
                 Some(Ok(WsMsg::Text(t))) => {
-                    if let Ok(v) = serde_json::from_str::<Value>(t.as_str())
-                        && let Err(e) = relay_message(app, &tx, v).await {
-                            break Err(e);
-                        }
+                    let Ok(v) = serde_json::from_str::<Value>(t.as_str()) else { continue };
+                    if matches!(v.get("type").and_then(Value::as_str), Some("consent_request" | "peer_left")) {
+                        let _ = lifecycle.send(v);
+                    } else if let Err(e) = relay_message(app, &tx, v).await {
+                        break Err(e);
+                    }
                 }
                 Some(Ok(_)) => {}
             }
         }
     };
+    drop(lifecycle);
 
     let _ = stop.send(());
     let _ = writer.await;

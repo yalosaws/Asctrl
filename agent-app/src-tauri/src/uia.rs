@@ -989,7 +989,14 @@ impl Live {
         }
     }
 
-    fn toggle_state(&self) -> Option<&'static str> {
+    /// Whether it is the picked one (a radio button, tab, list item), when it says
+    pub fn is_selected(&self) -> Option<bool> {
+        let p = pattern::<IUIAutomationSelectionItemPattern>(&self.el, UIA_SelectionItemPatternId)?;
+        unsafe { p.CurrentIsSelected() }.ok().map(|b| b.as_bool())
+    }
+
+    /// checked, unchecked or mixed, for a control that toggles
+    pub fn toggle_state(&self) -> Option<&'static str> {
         let p = pattern::<IUIAutomationTogglePattern>(&self.el, UIA_TogglePatternId)?;
         Some(match unsafe { p.CurrentToggleState() } {
             Ok(s) if s == ToggleState_On => "checked",

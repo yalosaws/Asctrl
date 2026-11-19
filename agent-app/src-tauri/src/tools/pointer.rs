@@ -5,6 +5,7 @@
 use super::locate::{Ask, Located, Miss};
 use super::report::Did;
 use super::*;
+use crate::until;
 use crate::fx::Fx;
 use serde_json::json;
 
@@ -138,6 +139,12 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
             return Err(format!("{} is disabled, so clicking it would do nothing", loc.desc).into());
         }
         let direct = loc.live.as_ref().is_some_and(|l| forced || (mode != "mouse" && plain && !l.is_web()));
+        // What a plain click on it is for, where the control can say whether that happened
+        let expect = loc.live.as_ref().filter(|_| plain).and_then(|l| match l.role() {
+            "CheckBox" => l.toggle_state().filter(|s| *s != "mixed").map(Expect::Toggle),
+            "RadioButton" | "TabItem" => l.is_selected().map(|_| Expect::Select),
+            _ => None,
+        });
         let before = pace.before(Some(loc.point));
         let (framed, whole) = zone(loc.hwnd);
         let anim = Fx::start(&call, "a", "click", json!({ "count": count }), json!({ "at": fx::pt_json(loc.point), "zone": framed, "zoneIsWindow": whole, "win": framed, "app": fx::app_json(loc.hwnd) }));
@@ -182,12 +189,44 @@ pub(super) async fn click(ctx: &Ctx, args: &Value) -> Output {
         anim.step(0, true);
         anim.end(true);
         fx::zone_follows_window(&call, loc.hwnd, framed);
+        let mut done = done.unwrap_or_default();
+        let verified = match (expect, &loc.live) {
+            (Some(e), Some(l)) => {
+                let ok = until::holds(CLICK_TAKES, || e.met(l));
+                if !ok {
+                    done += &format!(", but it is still {}", l.toggle_state().unwrap_or("not selected"));
+                }
+                Some(ok)
+            }
+            _ => None,
+        };
         let change = if delivered { pace.after_direct(before) } else { pace.after(before) };
-        Ok(Did { done: done.unwrap_or_default() + &loc.note, change, hwnd: loc.scene, fresh: false, delivered, verified: None })
+        Ok(Did { done: done + &loc.note, change, hwnd: loc.scene, fresh: false, delivered, verified })
     })
     .await;
     drop(turn);
     finish(ctx, args, r).await
+}
+
+/// How long a clicked box or option may take to show it was ticked or picked
+const CLICK_TAKES: Duration = Duration::from_millis(800);
+
+/// What a plain click on a control with a state is for
+#[derive(Clone, Copy)]
+enum Expect {
+    /// A box that was in this state flips
+    Toggle(&'static str),
+    /// An option or tab becomes the picked one
+    Select,
+}
+
+impl Expect {
+    fn met(self, l: &uia::Live) -> bool {
+        match self {
+            Expect::Toggle(was) => l.toggle_state().is_some_and(|s| s != was),
+            Expect::Select => l.is_selected() == Some(true),
+        }
+    }
 }
 
 /// Where the wheel turns when no target is given: under the pointer if it is over the window in front,

@@ -102,6 +102,27 @@ fn set_one(ask: &Ask, value: &str, call: &str, part: &str, watch: &mut dyn FnMut
     Ok((r?, loc))
 }
 
+/// The control is seen holding `value`: ticked or not as asked, or its value reading it (either one taking in
+/// the other, so a list item picked by part of its name counts). False only means it couldn't be told: a
+/// value that plainly isn't so already failed in `set_one`.
+fn holds_value(loc: &Located, value: &str) -> bool {
+    let Some(l) = &loc.live else { return false };
+    if l.is_password() {
+        return false;
+    }
+    let word = value.trim().to_lowercase();
+    if let Some(state) = l.toggle_state() {
+        match word.as_str() {
+            "on" | "true" | "yes" | "checked" | "check" | "1" | "selected" => return state == "checked",
+            "off" | "false" | "no" | "unchecked" | "uncheck" | "0" => return state == "unchecked",
+            _ => {}
+        }
+    }
+    let norm = |s: &str| uia::newlines(s).trim().to_lowercase();
+    let want = norm(value);
+    l.value().map(|v| norm(&v)).is_some_and(|v| !want.is_empty() && (v.contains(&want) || want.contains(&v) && !v.is_empty()))
+}
+
 pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Output {
     // One control, or several as fields: [{ target, value }, …]
     let many = args.get("fields").is_some_and(|f| !f.is_null());
@@ -151,6 +172,8 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Output {
         let mut lines = vec![];
         let mut failed = 0;
         let mut hwnd = None;
+        // Every field was read back holding what it was given
+        let mut all_seen = true;
         for (i, (ask, value)) in asks.iter().enumerate() {
             let mut watch = |loc: &Located| {
                 if before.is_none() {
@@ -160,6 +183,7 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Output {
             match set_one(ask, value, &call, &format!("v{i}"), &mut watch) {
                 Ok((s, loc)) => {
                     hwnd = hwnd.or(loc.scene);
+                    all_seen &= holds_value(&loc, value);
                     lines.push((true, s));
                 }
                 // The screen is not what the AI saw: stop here rather than fill the rest blind
@@ -182,7 +206,8 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Output {
         } else {
             lines.remove(0).1
         };
-        Ok((Did { done, change, hwnd, fresh: false, delivered: true, verified: None }, failed == 0))
+        let verified = (failed == 0 && all_seen).then_some(true);
+        Ok((Did { done, change, hwnd, fresh: false, delivered: true, verified }, failed == 0))
     })
     .await;
     drop(turn);
