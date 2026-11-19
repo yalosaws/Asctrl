@@ -1262,6 +1262,12 @@ impl Live {
     }
 }
 
+/// A letter or digit of a script that spaces its words (not Chinese, Japanese or Korean, where any run of
+/// characters may be a word)
+pub fn wordy(c: char) -> bool {
+    c.is_alphanumeric() && !matches!(c as u32, 0x1100..=0x11FF | 0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF66..=0xFF9F | 0x20000..=0x3FFFF)
+}
+
 /// Lower-case, without white space, accelerator marks or trailing dots: how names are compared
 pub fn norm(s: &str) -> String {
     let s = s.split('\t').next().unwrap_or(s);

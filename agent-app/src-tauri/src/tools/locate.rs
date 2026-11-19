@@ -310,12 +310,23 @@ fn role_matches(role: &str, want: &str) -> bool {
     }
 }
 
+/// `want` is in `s` as whole words: "to" is in "To recipients" but not in "Calculator", "save" in "Save as"
+/// but not in "Unsaved". Chinese and Japanese text is matched anywhere.
+fn has_words(s: &str, want: &str) -> bool {
+    let (first, last) = (want.chars().next(), want.chars().next_back());
+    s.match_indices(want).any(|(i, _)| {
+        let before = s[..i].chars().next_back();
+        let after = s[i + want.len()..].chars().next();
+        !(first.is_some_and(uia::wordy) && before.is_some_and(uia::wordy)) && !(last.is_some_and(uia::wordy) && after.is_some_and(uia::wordy))
+    })
+}
+
 /// How well a control answers to `want` (already normalised); 0 = not at all.
 /// An exact name beats any partial one; among partial ones, the name the text makes up most of wins.
 fn score(n: &Node, want: &str, want_edit: bool) -> u32 {
     let wl = want.chars().count() as f64;
     let part = |s: &str, exact: f64, base: f64| -> f64 {
-        if s.is_empty() || !s.contains(want) {
+        if s.is_empty() || !has_words(s, want) {
             0.0
         } else if s == want {
             exact
@@ -672,6 +683,22 @@ pub fn uncover(loc: &Located) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_partial_name_matches_whole_words_only() {
+        assert!(has_words("to recipients", "to"));
+        assert!(!has_words("santa 2026 - the elf calculator", "to"));
+        assert!(has_words("save as…", "save"));
+        assert!(!has_words("unsaved changes", "save"));
+        assert!(has_words("send (ctrl-enter)", "send"));
+        assert!(has_words("discard draft (ctrl-shift-d)", "discard draft"));
+        // A word that also comes up inside another one still counts where it stands alone
+        assert!(has_words("customer to-do", "to"));
+        // Text without spaces between words
+        assert!(has_words("文件已保存", "保存"));
+        assert!(has_words("点击保存按钮", "保存"));
+        assert!(has_words("ファイルを保存", "保存"));
+    }
 
     #[test]
     fn a_fast_action_gives_what_it_brings_up_time_to_arrive() {

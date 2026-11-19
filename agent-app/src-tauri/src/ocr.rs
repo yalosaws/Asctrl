@@ -182,7 +182,11 @@ pub fn find(lines: &[Line], query: &str) -> Vec<Hit> {
         let qc: Vec<char> = q.chars().collect();
         let mut s = 0;
         while s + qn <= chars.len() {
-            if chars[s..s + qn] == qc[..] {
+            // Whole words only where the script spaces its words: "to" is not in "Calculator"
+            let edge = |a: usize, b: usize| owner[a] != owner[b] || !crate::uia::wordy(chars[a]) || !crate::uia::wordy(chars[b]);
+            let starts = s == 0 || edge(s - 1, s);
+            let ends = s + qn == chars.len() || edge(s + qn - 1, s + qn);
+            if chars[s..s + qn] == qc[..] && starts && ends {
                 let (a, b) = (owner[s], owner[s + qn - 1]);
                 hits.push(Hit { rect: union(line.words[a..=b].iter().map(|w| w.rect)), line: line.text(), exact: qn == chars.len() });
                 s += qn;
