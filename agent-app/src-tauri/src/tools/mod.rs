@@ -227,7 +227,10 @@ impl Ctx {
         program::stop_all(self).await;
         popups::stop("");
         self.reset_shell().await;
-        let _drained = self.calls.write().await;
+        // Every long wait ends within a poll once the session is over; a call stuck in a program that stopped
+        // answering may not, and must not keep the next controller out. What it does after this can't put
+        // input in (its session is over), so it is let run.
+        let _drained = tokio::time::timeout(DRAIN_MAX, self.calls.write()).await;
         // Catch any work that was already inside a tool when the connection closed.
         program::stop_all(self).await;
         self.reset_shell().await;
@@ -319,6 +322,18 @@ pub fn in_session<F: std::future::Future>(f: F) -> impl std::future::Future<Outp
     CALL_SESSION.scope(generation, f)
 }
 
+/// The session the calling work belongs to, to hand to a blocking thread (task-locals don't cross into one):
+/// the thread checks `ended` with it on every turn of a long wait, so a controller leaving ends the wait
+/// within a poll and the next controller is not kept waiting behind it
+pub fn session_token() -> u64 {
+    CALL_SESSION.try_with(|s| *s).unwrap_or_else(|_| SESSION.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// The session `token` stood for has ended
+pub fn ended(token: u64) -> bool {
+    token != SESSION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// The session this work belongs to has ended (the person pressed End session, or the controller left)
 pub fn session_over() -> bool {
     CALL_SESSION.try_with(|s| *s != SESSION.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(false)
@@ -408,6 +423,9 @@ fn note_yield(out: &mut Output) {
         }
     }
 }
+
+/// Longest a leaving controller's calls are waited for before the next controller may come in
+const DRAIN_MAX: Duration = Duration::from_secs(10);
 
 /// No change within this long after a mouse or keyboard action: nothing happened (or not yet)
 const QUIET: Duration = Duration::from_millis(300);
@@ -683,6 +701,22 @@ pub fn fx_after(ctx: &Ctx, tool: &str, before: &Value, out: &Output) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_long_wait_on_another_thread_ends_with_its_session() {
+        let token = in_session(async { session_token() }).await;
+        let waiting = tokio::task::spawn_blocking(move || {
+            let start = std::time::Instant::now();
+            crate::until::holds(Duration::from_secs(30), || ended(token));
+            start.elapsed()
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        SESSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let waited = waiting.await.unwrap();
+        assert!(waited < Duration::from_secs(1), "waited {waited:?}");
+        // Work started after the end belongs to the new session
+        assert!(!ended(in_session(async { session_token() }).await));
+    }
 
     #[test]
     fn frame_maps_both_ways_and_rejects_points_off_the_picture() {

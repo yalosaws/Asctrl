@@ -375,15 +375,19 @@ pub fn settle(b: &Before, quiet: Duration, max: Duration) -> Change {
 /// Wait until `area` stops changing for `calm_for`, up to `max`. True when it did. A part that keeps changing
 /// for `noise_after` (a video, an ad) is left out; make it long when a spinner should count as still loading.
 pub fn wait_stable(area: Area, calm_for: Duration, max: Duration, noise_after: Duration) -> bool {
-    wait_stable_in(None, area, calm_for, max, noise_after)
+    wait_stable_in(None, area, calm_for, max, noise_after, &|| false)
 }
 
-pub fn wait_stable_in(hwnd: Option<isize>, area: Area, calm_for: Duration, max: Duration, noise_after: Duration) -> bool {
+/// `stop` ends the wait early (the session it was for ended): false, as it did not settle
+pub fn wait_stable_in(hwnd: Option<isize>, area: Area, calm_for: Duration, max: Duration, noise_after: Duration, stop: &dyn Fn() -> bool) -> bool {
     let start = Instant::now();
     let Some(mut prev) = print_in(hwnd, area) else { return hwnd.is_none() };
     let mut tracker = Tracker::new(&prev, None, noise_after);
     let mut calm_since = Instant::now();
     while start.elapsed() < max {
+        if stop() {
+            return false;
+        }
         std::thread::sleep(POLL);
         let Some(cur) = print_in(hwnd, area) else { return hwnd.is_none() };
         if let Some(tiles) = tile_diff(&prev, &cur) {

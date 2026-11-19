@@ -134,6 +134,7 @@ pub(super) async fn watch(ctx: &Ctx, args: &Value) -> Output {
     let numeric = conds.iter().any(Cond::numeric);
     // A number must meet its condition this many readings running: one misread digit must not set off a sale
     let confirm = int_arg(args, "confirm", if numeric { 2 } else { 1 }, 1, 20) as u32;
+    let token = session_token();
     let r = tokio::task::spawn_blocking(move || -> Result<Did, String> {
         let start = std::time::Instant::now();
         let (mut reads, mut misses) = (0u32, 0u32);
@@ -146,6 +147,9 @@ pub(super) async fn watch(ctx: &Ctx, args: &Value) -> Output {
         // Readings running that break with the number believed last
         let mut breaks = 0u32;
         loop {
+            if ended(token) {
+                return Err(SESSION_OVER.into());
+            }
             let tick = std::time::Instant::now();
             let lines = if numeric { ocr::read_numbers(hwnd, area)? } else { ocr::read_in(hwnd, area)? };
             let text = lines.iter().map(|l| l.text()).collect::<Vec<_>>().join(" ");

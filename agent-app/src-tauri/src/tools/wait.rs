@@ -133,6 +133,7 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
     let within_arg = args.get("window").filter(|v| !v.is_null() && !v.as_str().is_some_and(|s| s.trim().is_empty())).cloned();
     let ocr_arg = bool_arg(args, "ocr");
     let f = ctx.frame();
+    let token = session_token();
     let r = tokio::task::spawn_blocking(move || -> Result<Did, String> {
         let start = std::time::Instant::now();
         let scope = || within.filter(|h| winmgr::exists(*h)).or_else(|| winmgr::find_arg(within_arg.as_ref()).ok().flatten().map(|h| h.0 as isize));
@@ -142,6 +143,9 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
         // Since when the pixels have overruled a control on every poll
         let mut overruled_since: Option<std::time::Instant> = None;
         loop {
+            if ended(token) {
+                return Err(SESSION_OVER.into());
+            }
             polls += 1;
             // Whatever happens to the windows from here on wakes the next look early
             let seen = crate::events::seq();
@@ -162,7 +166,10 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
                     }
                     None => screen::watch_area(None),
                 };
-                let ok = screen::wait_stable_in(target, area, Duration::from_millis(400), timeout.saturating_sub(start.elapsed()), Duration::from_millis(1500));
+                let ok = screen::wait_stable_in(target, area, Duration::from_millis(400), timeout.saturating_sub(start.elapsed()), Duration::from_millis(1500), &|| ended(token));
+                if ended(token) {
+                    return Err(SESSION_OVER.into());
+                }
                 let s = start.elapsed().as_secs_f64();
                 return if ok && scope() == target {
                     Ok(Did { done: format!("Screen settled after {s:.1} s"), change: None, hwnd: target, fresh: false, delivered: false, verified: None })
