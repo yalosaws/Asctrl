@@ -1,15 +1,16 @@
-//! recover: what a plan's step does here, without a round trip, when the text it names fits several controls
-//! or none.
+//! recover: what a program's step (a plan's too) does here, without a round trip, when the text it names fits
+//! several controls or none.
 //!
-//! Before the plan's runner (on the controller's side, where the decision model is) has to step in, the batch
-//! tries what needs no judgment, in the order a person would:
-//! 1. A popup in the way that the plan said how to handle (`on`): press what it says, try the step again.
-//! 2. Nothing showing that name right after an input that didn't wait for the screen: give it a moment.
-//! 3. Still unresolved: the candidates the runner chooses among go back with the miss — the equal matches,
-//!    then the controls of the window most like the text, then the rest of the right kind, at most 40.
+//! Before anyone on the controller's side (the decision model, or the AI) has to step in, the step tries what
+//! needs no judgment, in the order a person would:
+//! 1. A popup in the way that the program or plan said how to handle (`on`): press what it says, try again.
+//! 2. Nothing showing that name right after an input that didn't wait for the screen to rest: give it a moment.
+//! 3. Still unresolved: the candidates to choose among go back with the miss — the equal matches, then the
+//!    controls of the window most like the text, then the rest of the right kind, at most 40.
 //!
-//! A step takes part when it carries `recover: {kind: "click" | "field", late: bool}`; `late: false` when the
-//! plan gave the step its own timeout, which then is all the waiting it gets.
+//! A click, type_text or set_value naming its target by text takes part (see `Wish::of`); a step may say how with
+//! `recover: {kind: "click" | "field", late: bool}` (`late: false` when it has its own timeout, which then is all
+//! the waiting it gets), or `recover: false`.
 
 use super::*;
 use crate::uia::Node;
@@ -45,10 +46,29 @@ pub struct Wish {
 }
 
 impl Wish {
-    pub fn of(step: &Value) -> Option<Wish> {
-        let r = step.get("recover")?;
-        let kind = if r.get("kind").and_then(Value::as_str) == Some("field") { Kind::Field } else { Kind::Click };
-        Some(Wish { kind, late: r.get("late").and_then(Value::as_bool).unwrap_or(true) })
+    /// How `step` (a call of `tool`) is recovered: as it says (`recover: {kind, late}`), not at all
+    /// (`recover: false`, or nothing named by text), or else by what the tool does to its target
+    pub fn of(tool: &str, step: &Value) -> Option<Wish> {
+        match step.get("recover") {
+            Some(Value::Bool(false)) => None,
+            Some(r) if r.is_object() => {
+                let kind = if r.get("kind").and_then(Value::as_str) == Some("field") { Kind::Field } else { Kind::Click };
+                Some(Wish { kind, late: r.get("late").and_then(Value::as_bool).unwrap_or(true) })
+            }
+            _ => {
+                let target = step.get("target")?.as_str()?.trim();
+                // A reference is exact: there is nothing to choose among
+                let reference = target.strip_prefix('e').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+                if target.is_empty() || reference {
+                    return None;
+                }
+                match tool {
+                    "click" => Some(Wish { kind: Kind::Click, late: true }),
+                    "type_text" | "set_value" => Some(Wish { kind: Kind::Field, late: true }),
+                    _ => None,
+                }
+            }
+        }
     }
 }
 
@@ -169,7 +189,7 @@ pub struct Outcome {
 
 /// Recover a step whose reply `out` is a miss. `settled`: the screen was at rest before the step (it came first,
 /// or after a wait, or after an input that waited for the screen). `again` runs the step with some arguments
-/// changed, the way the batch runs a step.
+/// changed, the way a program runs a step.
 pub async fn recover<F, Fut>(ctx: &Ctx, step: &Value, wish: &Wish, on: &[(String, String)], settled: bool, mut out: Output, mut again: F) -> Outcome
 where
     F: FnMut(Value) -> Fut,
@@ -275,6 +295,21 @@ mod tests {
         let c = Cand::of(&n);
         assert_eq!(c.label, "CheckBox \"Remember me\" (checked)");
         assert_eq!(c.json()["ref"], "e7");
+    }
+
+    #[test]
+    fn a_step_naming_its_target_by_text_is_recovered_by_what_it_does() {
+        let kind = |tool: &str, step: Value| Wish::of(tool, &step).map(|w| (w.kind, w.late));
+        assert_eq!(kind("click", serde_json::json!({ "target": "Send" })), Some((Kind::Click, true)));
+        assert_eq!(kind("set_value", serde_json::json!({ "target": "To" })), Some((Kind::Field, true)));
+        assert_eq!(kind("type_text", serde_json::json!({ "target": "Subject", "text": "x" })), Some((Kind::Field, true)));
+        // As the step says
+        assert_eq!(kind("click", serde_json::json!({ "target": "Send", "recover": { "kind": "field", "late": false } })), Some((Kind::Field, false)));
+        // Not at all: asked not to, a reference, a point, a tool without a target
+        assert_eq!(kind("click", serde_json::json!({ "target": "Send", "recover": false })), None);
+        assert_eq!(kind("click", serde_json::json!({ "target": "e12" })), None);
+        assert_eq!(kind("click", serde_json::json!({ "x": 3, "y": 4 })), None);
+        assert_eq!(kind("press_keys", serde_json::json!({ "keys": "enter" })), None);
     }
 
     #[test]

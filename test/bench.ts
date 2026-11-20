@@ -29,8 +29,6 @@ const localFile = path.join(tmpdir(), `asctrl-bench-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
 // Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
 process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
-// Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
-process.env.ASCTRL_CONFIRM ??= "off";
 
 // The driver also registers with a relay; give it a local one rather than the hosted one
 const relay = startRelay(PORT);
@@ -216,16 +214,20 @@ try {
     return `(dialog noticed ${Math.round(w.ms)} ms after asking; it opens at ~800 ms)`;
   });
 
-  await task("Batch: 4 steps in one call, one report", async () => {
-    const b = await call("batch", {
-      steps: [
-        { tool: "click", target: "CANVAS-7391", window: WIN },
-        { tool: "click", target: "CANVAS-7391", window: WIN },
-        { tool: "click", target: "Submit", window: WIN },
-        { tool: "wait_for", text: "Canvas clicks: 3", window: WIN, timeoutSec: 3 },
-      ],
+  await task("A plan of 4 steps in one call, run as a program", async () => {
+    const b = await call("exec", {
+      plan: {
+        steps: [
+          { tool: "click", args: { target: "CANVAS-7391", window: WIN } },
+          { tool: "click", args: { target: "CANVAS-7391", window: WIN } },
+          { tool: "click", args: { target: "Submit", window: WIN } },
+          { tool: "wait_for", args: { text: "Canvas clicks: 3", window: WIN, timeoutSec: 3 } },
+        ],
+      },
+      learn: false,
+      waitSec: 30,
     });
-    expect(/All 4 steps done/.test(b.text), b.text);
+    expect(/ is done after /.test(b.text), b.text);
     return `(${Math.round(b.ms)} ms)`;
   });
 

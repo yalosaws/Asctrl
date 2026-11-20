@@ -197,19 +197,19 @@ run({ goal: "send 你好 to someone@example.com",
       on: { "Leave site?": "Leave" } })
 ```
 
-Steps: `open`, `click`, `press` (no mouse), `fill` (`{label: value}`), `type` (`into`, `enter`), `keys`, `expect` (text shown on success; `gone`), `check` (a claim about the window, such as "the email was sent", that the decision model judges from the window's controls; asked again until it holds or `timeoutSec` runs out), `await` (a window), `scroll`, `read` (a grid), `watch` (see below), or `{ tool, …args }` for a tool that can be a step. `when` holds a plan until its text is on screen; `on` says what to press when a known popup turns up. The whole plan is checked before any of it runs: an unknown step, an argument a step doesn't take or a cell outside its grid is reported, and nothing runs.
+Steps: `open`, `click`, `press` (no mouse), `fill` (`{label: value}`), `type` (`into`, `enter`), `keys`, `expect` (text shown on success; `gone`), `check` (a claim about the window, such as "the email was sent", that the decision model judges from the window's controls; asked again until it holds or `timeoutSec` runs out), `await` (text or a window's title, whichever shows first), `scroll`, `read` (a grid), `until` (see below), or `{ tool, …args }` for a tool that can be a step. `when` holds a plan until its text is on screen; `on` says what to press when a known popup turns up. The whole plan is checked before any of it runs: an unknown step, an argument a step doesn't take or a cell outside its grid is reported, and nothing runs.
 
-The driver runs the plan's steps in one call per stretch (up to the next `check`), so no step waits on a round trip. Each step is tried as written: the driver matches text on the computer, which costs nothing. When the text matches several controls or none, the driver first does, on the spot, what needs no judgment: the plan's `on` rules, and a moment's wait right after a fast input, so "not there yet" is not taken for "called something else"; a step that goes through this way lets the batch carry on. Only if it is still unresolved does the runner step in for that step, with the candidates the driver handed back, asking a decision model ([Drex](https://console.nace.ai), `NACE_API_KEY` in `.env`) asked to choose, among up to 40 short candidate lines (typically 150–550 tokens, about 0.5 s). Its answer is acted on only when it is sure (confidence ≥ 0.7, well ahead of the runner-up), and never when it is something irreversible (delete, send, replace…) that the plan didn't name. Besides the candidates, the model may answer that the window is not ready yet (it is waited for), that a popup is in the way (Escape is pressed) or that none fits, and it is told the plan's last steps and whether each changed the screen; when it is unsure the window is given a moment and it is asked once more, and a click it chose that visibly changed nothing is handed back as likely wrong. Answers are remembered per program (`~/.asctrl/drex-cache.json`, keyed by the program and its window title), so the same wording later goes straight to the control there and nowhere else; they are kept only once the whole plan has worked, checks included, so a wrong choice is never learnt. Anything else stops the plan with the candidates and a short look at the window.
+The plan runs on the computer as a program (the same runtime as `exec`), so no step waits on a round trip; a `check` is the one step the program asks the runner about. Each step is tried as written: the driver matches text on the computer, which costs nothing. When the text matches several controls or none, the driver first does, on the spot, what needs no judgment: the plan's `on` rules, and a moment's wait right after a fast input, so "not there yet" is not taken for "called something else"; a step that goes through this way lets the batch carry on. Only if it is still unresolved does the runner step in for that step, with the candidates the driver handed back, asking a decision model ([Drex](https://console.nace.ai), `NACE_API_KEY` in `.env`) asked to choose, among up to 40 short candidate lines (typically 150–550 tokens, about 0.5 s). Its answer is acted on only when it is sure (confidence ≥ 0.7, well ahead of the runner-up), and never when it is something irreversible (delete, send, replace…) that the plan didn't name. Besides the candidates, the model may answer that the window is not ready yet (it is waited for), that a popup is in the way (Escape is pressed) or that none fits, and it is told the plan's last steps and whether each changed the screen; when it is unsure the window is given a moment and it is asked once more, and a click it chose that visibly changed nothing is handed back as likely wrong. Answers are remembered per program (`~/.asctrl/drex-cache.json`, keyed by the program and its window title), so the same wording later goes straight to the control there and nowhere else; they are kept only once the whole plan has worked, checks included, so a wrong choice is never learnt. Anything else stops the plan with the candidates and a short look at the window.
 
 The same steps over many sets of data are written once: `repeat: [["7","3","21"], …]` runs them per row, filling `$1 $2 $3` (or `${name}` from `[{name: …}, …]`) in any step text, and the report lists the first row and only what went differently after.
 
-The pace is chosen per step. An input normally waits until the screen has reacted and stopped changing; on a screen that animates, that wait is most of the time. A step repeated over rows runs at the normal pace the first time, and if that brought no window up and nothing else to the front, its later runs go fast (about 25 ms each); the screen settles once before anything that reads it, and anything unexpected in a fast run puts the rest back to the normal pace. `fast: true` / `false` forces either. An Extreme sudoku on sudoku.com (58 cells, a click and a key each) is filled in 6.2 s this way, against 45.7 s at the normal pace.
+Each input goes on the moment the screen reacts to it, rather than once it has stopped changing; the next step waits for what it needs itself (its target to arrive and stop moving, the screen to rest before anything reads it), and a step aimed at the spot the last one just acted on lets the screen rest first, so a `Next` is never pressed twice on the same page. `fast: true` puts inputs in without waiting for the screen at all (about 25 ms each, for steps known to bring nothing up: an Extreme sudoku on sudoku.com, 58 cells, a click and a key each, took 6.2 s at that pace against 45.7 s waiting for the screen each time, measured before plans ran as programs); `fast: false` waits for the screen to be still after each.
 
 While a plan runs, the driver watches for windows that weren't there before. One that shows none of the text the plan works with, and has a button the plan named in `on` or one that only dismisses (`Not now`, `Close`, `关闭`, `以后再说`…), is dismissed with a pointer of its own: the press waits its turn among the plan's actions, so it goes in between two steps, and the report says what was pressed. OK, Cancel, Yes and anything destructive are never pressed this way.
 
 A screen drawn as a grid (a game board, a calendar) is declared once, by its corners on the latest screenshot: `grids: { board: { x0, y0, x1, y1, rows: 9, cols: 9 } }`. Steps then name cells as targets (`{ "click": "board[3,5]" }`, also with `$1` from rows), and `{ "read": "board" }` reads every cell: each cell's glyph is cut out against the cell's own background and the glyphs are read together as one line, since the OCR engine reads neither a lone glyph nor a board with its lines. A mark it can't read, or a cell something lies over (a banner, a popup: its background is far from the board's usual one), comes back as `?`, never as a guess or as empty. Like a click by coordinates, a read is checked against the windows as they were on that screenshot: if the window moved, the grid moves with it; if another window has come in front of it, nothing is read. A 9×9 board reads in about 50 ms.
 
-Some steps must wait on a number rather than on text: a price crossing a line, a countdown, a download's percentage, a score. `{ "watch": { x0, y0, x1, y1 }, "until": ">= 141 | <= 133" }` reads the number in that region about 8 times a second and goes on to the next step the moment one condition holds (`>`, `>=`, `<`, `<=`, `=`, or text to wait for), so the reaction goes in within a fraction of a second with no round trip to the AI; it fails if none held in `timeoutSec` (default 60, up to 600), naming the window over the region in case it was not the one meant. A number counts only when the reading before agrees with it and the one believed so far does too (a digit cut off at the region's edge, or a stray mark, must not set anything off), and a condition must hold on `confirm` readings in a row (default 2). Numbers are read with the English OCR engine where its pack is installed (`Add-WindowsCapability -Online -Name Language.OCR~~~en-US~0.0.1.0`, as administrator), since engines for other scripts misread digits: the Chinese one reads `4,816.93` as `816 · 93 ， 4 》`. A take-profit / stop-loss is then `[{ "click": "Buy" }, { "watch": {…}, "until": ">= 15 | <= -10" }, { "click": "Sell all" }]`.
+Some steps must wait on a number rather than on text: a price crossing a line, a countdown, a download's percentage, a score. `{ "until": ">= 141 | <= 133", "in": { x0, y0, x1, y1 } }` reads the number in that region about 8 times a second and goes on to the next step the moment one condition holds (`>`, `>=`, `<`, `<=`, `=`, or text to wait for), so the reaction goes in within a fraction of a second with no round trip to the AI; it fails if none held in `timeoutSec` (default 60, up to 600), naming the window over the region in case it was not the one meant. A number counts only when the reading before agrees with it and the one believed so far does too (a digit cut off at the region's edge, or a stray mark, must not set anything off), and a condition must hold on `confirm` readings in a row (default 2). Numbers are read with the English OCR engine where its pack is installed (`Add-WindowsCapability -Online -Name Language.OCR~~~en-US~0.0.1.0`, as administrator), since engines for other scripts misread digits: the Chinese one reads `4,816.93` as `816 · 93 ， 4 》`. A take-profit / stop-loss is then `[{ "click": "Buy" }, { "until": ">= 15 | <= -10", "in": {…} }, { "click": "Sell all" }]`. In a program the same is `until(">= 15 | <= -10", { x0, y0, x1, y1 })`, and as a single action `wait_for` with `until` and the region.
 
 A plan that fails cancels the plans queued behind it, since they were written assuming it would work; the next `run` returns that failure instead of queueing.
 
@@ -306,75 +306,21 @@ The HTTP connector, with no driver needed (a local relay and a fake computer): b
 npm run test:http
 ```
 
-The window timeline and covered windows (opens the bench window and Calculator for about 20 seconds; `--no-events` runs the driver with the timeline off, to compare):
+The desktop suites below each start a driver of their own (test/desk.ts) and drive the real desktop: leave the computer alone while one runs.
 
-```bash
-node test/p2.ts
-```
-
-How long single actions take and how much of it is waiting for the screen afterwards (opens the bench window for about 15 seconds):
-
-```bash
-node test/settle.ts
-```
-
-The page channel in Asctrl's own browser (opens it and Calculator for about 20 seconds; the browser keeps its profile in `%LOCALAPPDATA%\Asctrl\browser`):
-
-```bash
-node test/p3.ts
-```
-
-Programs (exec / resume; opens the bench window and Asctrl's browser for about 20 seconds):
-
-```bash
-node test/p4.ts
-```
-
-Skills (opens the bench window for about 15 seconds; keeps its skills in a file of its own):
-
-```bash
-node test/p5.ts
-```
-
-The person at the computer comes first, and work that needs no mouse goes on beside them (opens the bench window and Asctrl's browser for about 40 seconds; the test moves the mouse itself, with `test/jiggle.ps1`):
-
-```bash
-node test/p6.ts
-```
-
-The person's own browser through the extension, and iframes from other sites (starts a Chrome or Edge of its own with the extension loaded, about 90 s):
-
-```bash
-node test/ext.ts
-```
-
-An Electron program (VS Code, a copy of its own) worked through its pages:
-
-```bash
-node test/electron.ts
-```
-
-Programs' popup rules, waiting on a condition and answering a stuck step with code; skills kept by themselves, checked against the window, exported and put right; the action log; the decision model inside programs; the five tools:
-
-```bash
-node test/l2.ts
-```
-
-```bash
-node test/l4.ts
-```
-
-```bash
-node test/l5.ts
-```
-
-```bash
-node test/p4b.ts
-```
-
-```bash
-node test/tools.ts
-```
+| Suite | What it checks | On screen |
+|---|---|---|
+| `node test/windows.ts` | The window timeline and covered windows (`--no-events`: the timeline off, to compare) | the bench window and Calculator, ~20 s |
+| `node test/page.ts` | The page channel in Asctrl's own browser (its profile is kept in `%LOCALAPPDATA%\Asctrl\browser`) | the browser and Calculator, ~20 s |
+| `node test/programs.ts` | Programs: rows in one call, stuck and resumed, asking, abort, stop, the page channel, popup rules, `until`, answering with code, waiting on text | the bench window and the browser, ~40 s |
+| `node test/skills.ts` | Skills: learned, found, run again, refused, replaced, kept by themselves, checked against the window, imported, put right, exported | the bench window and Notepad, ~40 s |
+| `node test/presence.ts` | The person at the computer comes first; work that needs no mouse goes on beside them | the bench window and the browser, ~40 s; moves the mouse itself (`test/jiggle.ps1`) |
+| `node test/log.ts` | Nothing waits for the person, and every action is logged | the bench window, ~30 s |
+| `node test/tools.ts` | The five tools as an AI client sees them, and the decision model inside programs (with `NACE_API_KEY`) | the bench window, ~30 s |
+| `node test/run.ts` | Plans by text, the decision model, plans queued while "thinking" | the bench window and Calculator |
+| `node test/electron.ts` | An Electron program (VS Code, a copy of its own) worked through its pages | VS Code |
+| `node test/ext.ts --edge` | The person's own browser through the extension, and iframes from other sites | an Edge of its own with the extension loaded, ~90 s |
+| `npm run timing` | How long single actions take, and how much of it is waiting (numbers, to compare builds) | the bench window, ~40 s; moves the mouse |
 
 To install the extension in your own browser: open `chrome://extensions` (or `edge://extensions`), turn on Developer mode, choose Load unpacked and pick the `browser-extension` folder. The driver registers itself for it each time it starts.
 

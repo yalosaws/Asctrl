@@ -17,7 +17,7 @@
     "test:sandbox": "node test/sandbox.ts",
     "test:http": "node test/http.ts",
     "bench": "node test/bench.ts",
-    "prof": "node test/prof.ts"
+    "timing": "node test/timing.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

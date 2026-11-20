@@ -51,7 +51,7 @@ pub struct Overlay {
     /// Interaction is paused while the AI drives the mouse, so it doesn't click the orb
     suppress_until: Mutex<Option<Instant>>,
     /// Calls that move the mouse and are still running: interaction stays off for as long as any is, however
-    /// long it takes (a fixed window ran out halfway through a long batch, and a click landed on the orb)
+    /// long it takes (a fixed window ran out halfway through a long plan, and a click landed on the orb)
     driving: std::sync::atomic::AtomicUsize,
 }
 

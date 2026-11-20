@@ -36,8 +36,6 @@ pub struct Ask {
     pub seen: Arc<Vec<winmgr::Slot>>,
     /// The action wants something to type into: text boxes win ties
     pub want_edit: bool,
-    /// The control need not be on screen (it is operated through UI Automation, not clicked)
-    pub anywhere: bool,
 }
 
 /// Why something could not be pointed at, as a program reading the reply tells it apart
@@ -169,7 +167,7 @@ impl Ask {
         let window = winmgr::find_arg(args.get("window"))?.map(|h| h.0 as isize);
         let wait = Duration::from_secs_f64(args.get("timeoutSec").and_then(Value::as_f64).unwrap_or(1.5).clamp(0.0, 30.0));
         let nth = args.get("nth").and_then(Value::as_u64).filter(|n| *n >= 1).map(|n| n as usize);
-        Ok(Some(Ask { target, role: str_arg(args, "role").trim().to_lowercase(), nth, window, wait, frame, seen: ctx.seen(), want_edit: false, anywhere: false }))
+        Ok(Some(Ask { target, role: str_arg(args, "role").trim().to_lowercase(), nth, window, wait, frame, seen: ctx.seen(), want_edit: false }))
     }
 
     /// The usual target of an action: `target`, or `x`/`y`
@@ -185,11 +183,6 @@ impl Ask {
         self.want_edit = true;
         self
     }
-
-    pub fn anywhere(mut self) -> Ask {
-        self.anywhere = true;
-        self
-    }
 }
 
 /// "e12" / "E12" / "[e12]" -> 12
@@ -202,7 +195,7 @@ fn as_ref(s: &str) -> Option<u32> {
 /// Find what an Ask points at. Blocking: run it off the async thread.
 pub fn resolve(ask: &Ask) -> Result<Located, Miss> {
     match &ask.target {
-        Target::Ref(rf) => from_live(uia::live(*rf)?, ask.anywhere),
+        Target::Ref(rf) => from_live(uia::live(*rf)?),
         Target::Text(q) => by_text(ask, q),
         Target::Point(x, y) => by_point(ask, *x, *y),
     }
@@ -234,37 +227,8 @@ fn visible_part(live: &uia::Live, win: isize) -> Option<winmgr::Rect> {
     }
 }
 
-/// Where a step's target is right now, for drawing a pointer on its way there before the step runs. Looked up
-/// without waiting, scrolling or reading pixels, and without touching what replies compare against; None
-/// when it can't be told that cheaply (the step then finds it as always). `cache` holds one reading of a
-/// window for the whole batch, so a run of clicks by text reads the window once, not once per step.
-pub fn peek(ask: &Ask, cache: &std::sync::Mutex<Option<uia::Scene>>) -> Option<(i32, i32)> {
-    match &ask.target {
-        Target::Ref(rf) => {
-            let live = uia::live(*rf).ok()?;
-            Some(uia::aim(live.role(), live.rect()?))
-        }
-        Target::Point(x, y) => Some((*x, *y)),
-        Target::Text(q) => {
-            let hwnd = ask.window.unwrap_or_else(winmgr::foreground);
-            let mut held = cache.lock().ok()?;
-            if held.as_ref().map(|s| s.hwnd) != Some(hwnd) {
-                *held = Some(uia::snapshot(hwnd, false).ok()?);
-            }
-            match pick(held.as_ref()?, q, &ask.role, ask.nth, ask.want_edit) {
-                Pick::One(n) => Some(n.center()),
-                _ => None,
-            }
-        }
-    }
-}
-
-fn from_live(live: uia::Live, anywhere: bool) -> Result<Located, Miss> {
+fn from_live(live: uia::Live) -> Result<Located, Miss> {
     let win = live.window();
-    if anywhere {
-        let point = live.rect().map(|r| uia::aim(live.role(), r)).unwrap_or((0, 0));
-        return Ok(Located { point, hwnd: win, scene: Some(live.hwnd), desc: live.label.clone(), live: Some(live), note: String::new() });
-    }
     let mut part = visible_part(&live, win);
     if part.is_none() && live.scroll_into_view() {
         // The view scrolls, often with an animation
@@ -469,10 +433,56 @@ fn may_be_arriving() -> bool {
     UNSETTLED.lock().unwrap().is_some_and(|t| t.elapsed() < ARRIVING)
 }
 
+/// When a program's action last went on as soon as the screen reacted to it (see `REACT`)
+static REACTED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// A program's action went on the moment the screen reacted: what it set going may still be arriving or
+/// moving into place. (A fast plan step is different: it repeats a step known to bring nothing up, often on
+/// the same button on purpose, so it is not held up the same way.)
+pub fn reacted() {
+    unsettled();
+    *REACTED.lock().unwrap() = Some(Instant::now());
+}
+
+pub fn reacting() -> bool {
+    REACTED.lock().unwrap().is_some_and(|t| t.elapsed() < ARRIVING)
+}
+
+/// The screen has been let to settle since: what the last action brought up has arrived
+pub fn settled() {
+    *UNSETTLED.lock().unwrap() = None;
+    *REACTED.lock().unwrap() = None;
+}
+
+/// Where the last target found by its text was, and when
+static LAST_AIM: std::sync::Mutex<Option<((i32, i32), Instant)>> = std::sync::Mutex::new(None);
+
+fn aimed(loc: Located) -> Located {
+    *LAST_AIM.lock().unwrap() = Some((loc.point, Instant::now()));
+    loc
+}
+
+/// Is `p` where the last target was, while what that action brought up may still be arriving? Then the target
+/// found may be the same thing on the screen as it was (a "Next" on the page before the next one has come),
+/// and acting on it again would act twice.
+fn same_spot_again(p: (i32, i32)) -> bool {
+    reacting() && LAST_AIM.lock().unwrap().is_some_and(|((x, y), t)| t.elapsed() < ARRIVING && (x - p.0).abs() <= 4 && (y - p.1).abs() <= 4)
+}
+
+/// Let `hwnd` come to rest (what an action just set going in it has finished arriving)
+fn rest(hwnd: isize) {
+    if let Some(area) = window_area(hwnd) {
+        screen::wait_stable(area, Duration::from_millis(120), Duration::from_millis(1500), screen::NOISE_QUICK);
+    }
+    settled();
+}
+
 fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
     let start = Instant::now();
     let f = ask.frame;
     let at = |x: i32, y: i32| f.at(x, y);
+    // Let the screen rest once already because the target was where the last one was
+    let mut rested = false;
     loop {
         let seen = crate::events::seq();
         // The window in front is looked up again each time round: a dialog may be on its way up
@@ -495,7 +505,25 @@ fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
                         if uia::known_cost(hwnd).is_none() {
                             uia::remember(&scene);
                         }
-                        return from_live(uia::live(rf)?, ask.anywhere);
+                        let loc = from_live(uia::live(rf)?)?;
+                        if reacting() {
+                            if !rested && same_spot_again(loc.point) {
+                                rested = true;
+                                rest(hwnd);
+                                continue;
+                            }
+                            // Still moving into place (a panel sliding in): aim where it comes to rest
+                            std::thread::sleep(Duration::from_millis(30));
+                            if let Ok(live) = uia::live(rf)
+                                && let Ok(again) = from_live(live)
+                            {
+                                if again.point != loc.point && start.elapsed() < ask.wait {
+                                    continue;
+                                }
+                                return Ok(aimed(again));
+                            }
+                        }
+                        return Ok(aimed(loc));
                     }
                     Pick::Many(_) if may_be_arriving() => {
                         crate::events::wait(seen, Duration::from_millis(50));
@@ -542,17 +570,22 @@ fn by_text(ask: &Ask, q: &str) -> Result<Located, Miss> {
                     };
                     if let Some(h) = chosen {
                         let point = center(h.rect);
+                        if !rested && same_spot_again(point) {
+                            rested = true;
+                            rest(hwnd);
+                            continue;
+                        }
                         // The window it was read in (off its own picture when something covers it), or that
                         // program's menu or popup over it; never another program's window in front
                         let top = winmgr::top_window_at(point.0, point.1).filter(|t| winmgr::pid_of(*t) == winmgr::pid_of(hwnd));
-                        return Ok(Located {
+                        return Ok(aimed(Located {
                             point,
                             hwnd: top.unwrap_or(hwnd),
                             scene: Some(hwnd),
                             live: None,
                             desc: format!("the text \"{q}\" {}", f.at(point.0, point.1)),
                             note: String::new(),
-                        });
+                        }));
                     }
                 }
                 Err(e) => {
@@ -707,6 +740,20 @@ mod tests {
         *UNSETTLED.lock().unwrap() = Instant::now().checked_sub(ARRIVING + Duration::from_millis(1));
         assert!(!may_be_arriving());
     }
+    #[test]
+    fn acting_again_where_a_program_just_acted_waits_for_the_screen_first() {
+        let at = |p| Located { point: p, hwnd: 0, scene: None, live: None, desc: String::new(), note: String::new() };
+        // REACTED is set by hand: reacted() would also touch UNSETTLED, which another test is timing
+        *REACTED.lock().unwrap() = None;
+        let _ = aimed(at((100, 100)));
+        assert!(!same_spot_again((100, 100)), "nothing went on early");
+        *REACTED.lock().unwrap() = Some(Instant::now());
+        assert!(same_spot_again((102, 99)));
+        assert!(!same_spot_again((140, 100)), "somewhere else is a new target");
+        *REACTED.lock().unwrap() = Instant::now().checked_sub(ARRIVING + Duration::from_millis(1));
+        assert!(!same_spot_again((100, 100)), "long enough ago to have arrived");
+    }
+
     use crate::winmgr::Slot;
 
     fn node(rf: u32, depth: usize, role: &'static str, name: &str, flags: u32, x: i32, y: i32) -> Node {

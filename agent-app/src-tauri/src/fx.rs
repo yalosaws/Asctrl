@@ -115,12 +115,6 @@ impl Fx {
     }
 }
 
-/// The area a click framed is gone (it was a popup the click closed, like a browser's translate bubble): the
-/// overlay lets the frame go now rather than after its usual linger. `zone` is the one sent at the start.
-pub fn zone_gone(call: &str, zone: Value) {
-    zone_left(call, zone, false);
-}
-
 /// The frame no longer surrounds its area: the window it was drawn round was closed or hidden (`moved` false:
 /// it has already faded itself out, so the frame goes at once), or it moved or changed size (`moved` true: the
 /// frame fades, since the window is still there to look at)

@@ -141,7 +141,7 @@ pub fn level(tool: &str, args: &Value) -> (Level, String) {
         l = Level::External;
     }
     // Pressing, clicking, choosing: the words of what is pressed say what it does
-    if matches!(tool, "click" | "element_action" | "mouse") && !what.is_empty() {
+    if matches!(tool, "click" | "mouse") && !what.is_empty() {
         if external_words().is_match(&what) {
             l = Level::External;
         } else if irreversible_words().is_match(&what) {
@@ -170,6 +170,10 @@ pub fn record(tool: &str, args: &Value, l: Level, out: &Output, elapsed: std::ti
         if let Some(items) = args[key].as_array() {
             summary.insert(key.into(), json!(items.len()));
         }
+    }
+    // A plan run as a program: how many steps, not what they say
+    if let Some(items) = args["plan"]["steps"].as_array() {
+        summary.insert("plan".into(), json!(items.len()));
     }
     let line = json!({
         "at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
@@ -209,7 +213,7 @@ mod tests {
         assert_eq!(l("click", json!({ "target": "Place order" })), Level::External);
         assert_eq!(l("click", json!({ "target": "发送" })), Level::External);
         assert_eq!(l("click", json!({ "target": "Delete account" })), Level::Irreversible);
-        assert_eq!(l("element_action", json!({ "target": "清空回收站" })), Level::Irreversible);
+        assert_eq!(l("click", json!({ "target": "清空回收站", "mode": "direct" })), Level::Irreversible);
         // Whole words: "Sender" is not "send", "Postcode" is not "post"
         assert_eq!(l("click", json!({ "target": "Sender" })), Level::Reversible);
         assert_eq!(l("click", json!({ "target": "Postcode" })), Level::Reversible);

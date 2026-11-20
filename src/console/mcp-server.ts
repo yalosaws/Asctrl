@@ -46,8 +46,8 @@ const CONNECT_LOCAL = "1. connect (no arguments = this computer; a 6-digit code 
 const CONNECT_HOSTED =
   "1. connect with the 6-digit code shown in the Asctrl app on the computer to drive (ask the user for it if you don't have it).";
 
-/** In compact mode: how the tools named above are reached */
-const COMPACT_NOTE = `
+/** How the tools named above are reached */
+const FIVE_TOOLS = `
 
 Five tools: connect, query (looking: observe, screenshot, read_text, wait_for, progress, skills, files), act (doing: run a plan, click, type_text, set_value, press_keys, open_app, focus_window, shell and files, ...), exec and resume. query and act take the name of what they do and its arguments: act { do: "run", args: { steps: [...] } }, query { what: "observe", args: { window: "Notepad" } }.`;
 
@@ -128,23 +128,16 @@ export interface ServerOptions {
   hosted?: boolean;
   /** Where the icons are served (ending in /), for a server on the web; otherwise they are sent inline */
   iconBaseUrl?: string;
-  /**
-   * Which tools the AI sees. compact (default): five — connect, query (looking), act (doing), exec and resume —
-   * with every other tool reached through query or act by its name. full: every tool on its own.
-   * ASCTRL_TOOLS sets it when this isn't given.
-   */
-  tools?: "compact" | "full";
 }
 
 /** A fresh MCP server bound to one link to a driver */
-export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }: ServerOptions): McpServer {
+export function createAsctrlServer({ link, hosted = false, iconBaseUrl }: ServerOptions): McpServer {
   const { client } = link;
-  const compact = (tools ?? process.env.ASCTRL_TOOLS ?? "compact") !== "full";
   const server = new McpServer(
     { name: "asctrl", title: "Asctrl", version: "0.2.0", icons: orbIcons(iconBaseUrl) },
-    { instructions: instructions(hosted) + (compact ? COMPACT_NOTE : "") },
+    { instructions: instructions(hosted) + FIVE_TOOLS },
   );
-  // Compact: the tools below are kept here, not shown; query and act reach them by name (see the end)
+  // The tools below are kept here, not shown: query and act reach them by name (see the end)
   type Kept = { description: string; schema: Record<string, z.ZodType>; annotations?: unknown; handler: (a: Record<string, unknown>) => Promise<Reply> };
   const kept = new Map<string, Kept>();
   const keep = ((name: string, cfg: { description?: string; inputSchema?: Record<string, z.ZodType>; annotations?: unknown }, handler: Kept["handler"]) => {
@@ -342,7 +335,9 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
       description:
         "Wait until something happens, and return the moment it does. Much faster and more reliable than waiting a guessed time. Give exactly one of: " +
         "appears (a window whose title or program name contains this appears), text (this text shows up in window, default the one in front; among its controls or on its pixels), " +
-        "stable: true (the screen stops changing, e.g. a page finished loading), or seconds (a plain pause, when nothing else fits). " +
+        "stable: true (the screen stops changing, e.g. a page finished loading), seconds (a plain pause, when nothing else fits), " +
+        "or until with x0, y0, x1, y1 (a number, or text, read in that part of the latest screenshot about 8 times a second: returns the moment a condition such as \">= 141 | <= 133\" holds). " +
+        "appears and text together: whichever shows first (with gone, once neither does). " +
         "Separate alternatives with |, e.g. 'Save As|另存为'. gone: true waits for the window or text to disappear instead. " +
         "The reply lists the controls of what appeared, with references ready to use. Fails with what is in front when the time runs out.",
       inputSchema: {
@@ -353,7 +348,14 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
         gone: z.boolean().optional().describe("Wait for the window / text to disappear instead"),
         window: windowArg.optional().describe("For text / stable: the window to watch; default the window in front"),
         ocr: z.boolean().optional().describe("For text: also read the pixels. Default: yes, at a slower pace than the controls"),
-        timeoutSec: z.number().min(0.2).max(300).optional().describe("Give up after this many seconds; default 10"),
+        until: z.string().optional().describe('Conditions on the number read in x0..y1, separated by |: ">= 141 | <= 133", "= 0"; anything else is text to wait for there'),
+        x0: z.number().optional(),
+        y0: z.number().optional(),
+        x1: z.number().optional(),
+        y1: z.number().optional(),
+        everyMs: z.number().int().min(30).max(5000).optional().describe("For until: how often to read; default 120"),
+        confirm: z.number().int().min(1).max(20).optional().describe("For until: readings in a row that must meet it; default 2"),
+        timeoutSec: z.number().min(0.2).max(600).optional().describe("Give up after this many seconds; default 10 (until: 60)"),
         after,
       },
       annotations: { readOnlyHint: true },
@@ -515,17 +517,16 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
     "run",
     {
       description:
-        "Carry out a plan: steps named by what they act on, written without looking first. The whole plan is checked before any of it runs. Returns at once (queued), " +
+        "Carry out a plan: steps named by what they act on, written without looking first. The whole plan is checked before any of it runs, then runs on the computer as a program. Returns at once (queued), " +
         "with the reports of plans that finished since; write the next plan while this one runs, or call progress. A plan that fails cancels the plans queued behind it, " +
         "and the next run call returns that failure instead of queueing. " +
-        "Steps: {open: program/URL, browser?: \"asctrl\" | \"user\" (Asctrl's own browser, or the user's through the extension: steps act in the page, without the mouse)} · {click: text} · {press: text} (UI Automation, no mouse) · {fill: {label: value, …}} · {type: text, into?: label, enter?} · " +
+        "Steps: {open: program/URL, browser?: \"asctrl\" | \"user\" (Asctrl's own browser, or the user's through the extension: steps act in the page, without the mouse)} · {click: text} · {press: text} (a click without the mouse) · {fill: {label: value, …}} · {type: text, into?: label, enter?} · " +
         "{keys: \"ctrl+s\"} · {expect: text shown on success, gone?, timeoutSec?} · {check: a claim about the window (\"the email was sent\"), judged by the decision model, timeoutSec?} · " +
-        "{await: window title, gone?} · {scroll: up|down|left|right, target?, amount?} · {read: grid name} · " +
-        "{watch: {x0, y0, x1, y1} (a region on the latest screenshot), until: \">= 141 | <= 133\" or text, everyMs?, confirm? (readings in a row, default 2), timeoutSec? (default 60, up to 600)}: reads the number there " +
+        "{await: text or a window's title, whichever shows first, gone?} · {scroll: up|down|left|right, target?, amount?} · {read: grid name} · " +
+        "{until: \">= 141 | <= 133\" or text, in: {x0, y0, x1, y1} (a region on the latest screenshot), everyMs?, confirm? (readings in a row, default 2), timeoutSec? (default 60, up to 600)}: reads the number there " +
         "about 8 times a second and goes on the moment one condition holds, so the next step (a sell, a click) reacts within a fraction of a second; fails if none held in time · {tool: " + STEP_TOOLS.join("|") + ", …its args}. " +
         "Each step may add window. Text is matched on the computer first; when it matches several controls or none, a decision model picks among a few candidates, " +
-        "and only a confident choice is acted on (never something irreversible the plan didn't name). The pace is chosen for you: a step repeated over rows goes fast once its first run " +
-        "showed it brings nothing up. Popups that turn up meanwhile are dismissed in between steps: by on, or by a button that only dismisses (Not now, 关闭). End plans with expect.",
+        "and only a confident choice is acted on (never something irreversible the plan didn't name). Each input goes on the moment the screen reacts to it. Popups that turn up meanwhile are dismissed in between steps: by on, or by a button that only dismisses (Not now, 关闭). End plans with expect.",
       inputSchema: {
         steps: z.array(z.record(z.string(), z.unknown())).min(1).max(60),
         goal: z.string().optional().describe("One line on what the plan is for; given to the decision model when it has to choose"),
@@ -542,7 +543,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
           .record(z.string(), z.object({ x0: z.number().min(0), y0: z.number().min(0), x1: z.number().min(0), y1: z.number().min(0), rows: z.number().int().min(1).max(100), cols: z.number().int().min(1).max(100) }))
           .optional()
           .describe('Grids drawn on screen, by their outer corners on the latest screenshot: {board: {x0, y0, x1, y1, rows: 9, cols: 9}}. Name a cell "board[r,c]" (from 1) wherever a step takes a target'),
-        fast: z.boolean().optional().describe("Leave unset: the pace is chosen per step. true: inputs never wait for the screen to settle; false: they always do"),
+        fast: z.boolean().optional().describe("Leave unset: an input goes on the moment the screen reacts to it. true: inputs wait only for the program to take them; false: they wait until the screen is still"),
         wait: z.boolean().optional().describe("Return only when the plan has run, with its report; default false"),
       },
     },
@@ -597,12 +598,16 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
         "open(appOrUrl, opts) (opts.browser: \"asctrl\" for Asctrl's own browser, \"user\" for the user's through the extension) · waitFor(text, opts) · waitGone(text) · expect(text, opts) (stops there if it doesn't show in 5 s) · " +
         "shows(text) → true/false · read(window) → text · look(window) → observe's reply · tool(name, args) for any other tool · attempt(name, args) (returns a failure instead of stopping) · " +
         "ask(question, details) → your answer · sleep(ms) · log(…) · on(text, press) (a popup showing text that may turn up at any point: press that in it, in between steps) · " +
-        "until(() => condition, { timeoutSec, everyMs }) (waits until it is true, e.g. until(() => shows('Done')) or a number read() gives) · args (what you pass). opts are the tool's own arguments (window, nth, role, timeoutSec, …). " +
+        "until(() => condition, { timeoutSec, everyMs }) (waits until it is true, e.g. until(() => shows('Done')) or a number read() gives) · " +
+        "until(\">= 141 | <= 133\", { x0, y0, x1, y1 }) (the computer itself reads the number, or text, in that part of the latest screenshot about 8 times a second and goes on the moment a condition holds) ·args (what you pass). opts are the tool's own arguments (window, nth, role, timeoutSec, …). " +
         "When an action fails, the program does not end: it stops at that line (stuck) and this call returns with the failure; fix what is needed with single actions, " +
         "then resume it (retry, skip, instead, code, abort); being stuck also lists the windows that came up and went while it ran. Returns when the program ends, gets stuck, asks, or waitSec passes (then resume waits again). " +
         "Write it over args (the rows, the values) and give learn: a program that ends well is then kept as a skill on that computer, and skill: name runs it again with new args, no planning needed. " +
         "A program that ends well without learn is kept too, named after what it did (learn: false keeps it from being kept). A skill runs only when the window in front looks like one it was made in (force: true runs it anyway); " +
-        "one put right with instead (the same action aimed at another control) is changed to match once that run ends well.",
+        "one put right with instead (the same action aimed at another control) is changed to match once that run ends well. " +
+        "An action naming its target by text that fits several controls or none is first put right on the computer where that needs no judgment (an on rule, a moment's wait), " +
+        "then chosen by the decision model when it is sure; only then does it stop for you. pace: an input goes on the moment the screen reacts to it (default), " +
+        "\"normal\" waits until the screen is still, \"fast\" only for the program to take it (inputs known to bring nothing up). A plan (run) runs on the computer the same way.",
       inputSchema: {
         script: z.string().optional().describe("The program's JavaScript (or skill)"),
         skill: z.string().optional().describe("Run this kept skill instead of a script (skills finds them); args are its args"),
@@ -611,6 +616,7 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
         args: z.unknown().optional().describe("Given to the program as args (rows to go through, values to fill in)"),
         waitSec: z.number().min(0).max(300).optional().describe("Wait up to this long before answering; default 30"),
         timeoutSec: z.number().min(1).max(3600).optional().describe("Longest the program may run in all; default 600"),
+        pace: z.enum(["react", "normal", "fast"]).optional().describe("How long an input waits for the screen: react (default), normal, fast"),
       },
     },
     (a) => program("exec", a),
@@ -956,74 +962,71 @@ export function createAsctrlServer({ link, hosted = false, iconBaseUrl, tools }:
     },
   );
 
-  /** What the AI is offered: every tool kept above, or the five (see tools) */
+  /** What the AI is offered: five tools — connect, exec and resume as they are, and query (looking) and act (doing),
+   *  which reach every other tool kept above by its name */
   function publish(): McpServer {
     // Tools this server is not to offer at all (ASCTRL_TOOLS_DENY: names, comma-separated), e.g. a benchmark that
     // wants the AI to work through the apps rather than the shell
     for (const n of (process.env.ASCTRL_TOOLS_DENY ?? "").split(",").map((x) => x.trim()).filter(Boolean)) kept.delete(n);
-    if (!compact) {
-      for (const [name, k] of kept) server.registerTool(name, { description: k.description, inputSchema: k.schema, annotations: k.annotations as never }, k.handler as never);
-    } else {
-      // connect, exec and resume as they are
-      for (const name of ["connect", "exec", "resume"]) {
-        const k = kept.get(name);
-        if (!k) continue;
-        server.registerTool(name, { description: k.description, inputSchema: k.schema, annotations: k.annotations as never }, k.handler as never);
-      }
-      const LOOK = ["observe", "screenshot", "read_text", "wait_for", "timeline", "progress", "skills", "list_files", "read_file", "search_files", "disk_usage"].filter((n) => kept.has(n));
-      const DO = [...kept.keys()].filter((n) => (n === "skills" || !LOOK.includes(n)) && !["connect", "exec", "resume"].includes(n));
-      // Each tool in a line: what it does (its first sentence) and its args
-      const entries = (n: string, readOnly = false) => Object.entries(kept.get(n)!.schema)
-        .filter(([a]) => !(readOnly && n === "skills" && ["import", "forget"].includes(a)));
-      const description = (n: string, readOnly = false) => readOnly && n === "skills"
-        ? "Find skills for a task or window, show a saved skill, or export skills."
-        : kept.get(n)!.description;
-      const line = (n: string, readOnly = false) => {
-        const desc = description(n, readOnly);
-        const what = (/^[^.]*\./.exec(desc)?.[0] ?? desc).slice(0, 200);
-        const args = entries(n, readOnly).map(([a, t]) => (t.isOptional() ? a : `${a}*`)).join(", ");
-        return `- ${n}: ${what}${args ? ` Args: ${args}` : ""}`;
-      };
-      const through = async (n: string, args: unknown, readOnly = false): Promise<Reply> => {
-        const k = kept.get(n);
-        if (!k) return say(`No such tool: ${n}`, true);
-        const parsed = z.object(k.schema).safeParse(args ?? {});
-        if (!parsed.success) return say(`${n}: ${parsed.error.issues.map((i) => `${i.path.join(".") || "args"}: ${i.message}`).join("; ")}\n${k.description}`, true);
-        if (readOnly && n === "skills" && (parsed.data.import != null || parsed.data.forget != null)) return say("Use act with do: skills to import or forget a skill.", true);
-        return k.handler(parsed.data as Record<string, unknown>);
-      };
-      server.registerTool(
-        "query",
-        {
-          description:
-            "Look at the computer: what: the kind of look, args: its arguments (* = needed). Reading the screen as controls (observe) is cheaper and more exact than a screenshot. " +
-            "help: a kind's full description.\n" +
-            "Use act for skills import and forget.\n" + LOOK.map((n) => line(n, true)).join("\n"),
-          inputSchema: {
-            what: z.enum(LOOK as [string, ...string[]]).describe("The kind of look"),
-            args: z.record(z.string(), z.unknown()).optional().describe("Its arguments"),
-            help: z.boolean().optional().describe("Only say what this kind does and takes"),
-          },
-          annotations: { readOnlyHint: true },
-        },
-        async ({ what, args, help }) => (help ? say(`${what}: ${description(what, true)}\nArgs:\n${entries(what, true).map(([a, t]) => `- ${a}: ${t.description ?? ""}`).join("\n")}`) : through(what, args, true)),
-      );
-      server.registerTool(
-        "act",
-        {
-          description:
-            "Do something on the computer: do: the action, args: its arguments (* = needed). run carries out a whole plan in one call; the others are single actions for corrections, " +
-            "and the computer's own work (shell, files, admin). help: an action's full description.\n" +
-            DO.map((n) => line(n)).join("\n"),
-          inputSchema: {
-            do: z.enum(DO as [string, ...string[]]).describe("The action"),
-            args: z.record(z.string(), z.unknown()).optional().describe("Its arguments"),
-            help: z.boolean().optional().describe("Only say what this action does and takes"),
-          },
-        },
-        async (a) => (a.help ? say(`${a.do}: ${kept.get(a.do)?.description}\nArgs:\n${Object.entries(kept.get(a.do)?.schema ?? {}).map(([k, t]) => `- ${k}: ${t.description ?? ""}`).join("\n")}`) : through(a.do, a.args)),
-      );
+    // connect, exec and resume as they are
+    for (const name of ["connect", "exec", "resume"]) {
+      const k = kept.get(name);
+      if (!k) continue;
+      server.registerTool(name, { description: k.description, inputSchema: k.schema, annotations: k.annotations as never }, k.handler as never);
     }
+    const LOOK = ["observe", "screenshot", "read_text", "wait_for", "timeline", "progress", "skills", "list_files", "read_file", "search_files", "disk_usage"].filter((n) => kept.has(n));
+    const DO = [...kept.keys()].filter((n) => (n === "skills" || !LOOK.includes(n)) && !["connect", "exec", "resume"].includes(n));
+    // Each tool in a line: what it does (its first sentence) and its args
+    const entries = (n: string, readOnly = false) => Object.entries(kept.get(n)!.schema)
+      .filter(([a]) => !(readOnly && n === "skills" && ["import", "forget"].includes(a)));
+    const description = (n: string, readOnly = false) => readOnly && n === "skills"
+      ? "Find skills for a task or window, show a saved skill, or export skills."
+      : kept.get(n)!.description;
+    const line = (n: string, readOnly = false) => {
+      const desc = description(n, readOnly);
+      const what = (/^[^.]*\./.exec(desc)?.[0] ?? desc).slice(0, 200);
+      const args = entries(n, readOnly).map(([a, t]) => (t.isOptional() ? a : `${a}*`)).join(", ");
+      return `- ${n}: ${what}${args ? ` Args: ${args}` : ""}`;
+    };
+    const through = async (n: string, args: unknown, readOnly = false): Promise<Reply> => {
+      const k = kept.get(n);
+      if (!k) return say(`No such tool: ${n}`, true);
+      const parsed = z.object(k.schema).safeParse(args ?? {});
+      if (!parsed.success) return say(`${n}: ${parsed.error.issues.map((i) => `${i.path.join(".") || "args"}: ${i.message}`).join("; ")}\n${k.description}`, true);
+      if (readOnly && n === "skills" && (parsed.data.import != null || parsed.data.forget != null)) return say("Use act with do: skills to import or forget a skill.", true);
+      return k.handler(parsed.data as Record<string, unknown>);
+    };
+    server.registerTool(
+      "query",
+      {
+        description:
+          "Look at the computer: what: the kind of look, args: its arguments (* = needed). Reading the screen as controls (observe) is cheaper and more exact than a screenshot. " +
+          "help: a kind's full description.\n" +
+          "Use act for skills import and forget.\n" + LOOK.map((n) => line(n, true)).join("\n"),
+        inputSchema: {
+          what: z.enum(LOOK as [string, ...string[]]).describe("The kind of look"),
+          args: z.record(z.string(), z.unknown()).optional().describe("Its arguments"),
+          help: z.boolean().optional().describe("Only say what this kind does and takes"),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ what, args, help }) => (help ? say(`${what}: ${description(what, true)}\nArgs:\n${entries(what, true).map(([a, t]) => `- ${a}: ${t.description ?? ""}`).join("\n")}`) : through(what, args, true)),
+    );
+    server.registerTool(
+      "act",
+      {
+        description:
+          "Do something on the computer: do: the action, args: its arguments (* = needed). run carries out a whole plan in one call; the others are single actions for corrections, " +
+          "and the computer's own work (shell, files, admin). help: an action's full description.\n" +
+          DO.map((n) => line(n)).join("\n"),
+        inputSchema: {
+          do: z.enum(DO as [string, ...string[]]).describe("The action"),
+          args: z.record(z.string(), z.unknown()).optional().describe("Its arguments"),
+          help: z.boolean().optional().describe("Only say what this action does and takes"),
+        },
+      },
+      async (a) => (a.help ? say(`${a.do}: ${kept.get(a.do)?.description}\nArgs:\n${Object.entries(kept.get(a.do)?.schema ?? {}).map(([k, t]) => `- ${k}: ${t.description ?? ""}`).join("\n")}`) : through(a.do, a.args)),
+    );
 
     return server;
   }

@@ -142,11 +142,6 @@ pub async fn clear(max: Duration) {
     }
 }
 
-/// Whether a popup is being dealt with right now
-pub fn busy() -> bool {
-    BUSY.load(Ordering::SeqCst)
-}
-
 struct Found {
     hwnd: isize,
     title: String,

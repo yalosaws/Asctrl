@@ -4,7 +4,7 @@
 // behind, not by the model's word), wall time, model calls, tokens and tool calls.
 //
 // Usage: node test/p0/run.ts [--only b01,office,...] [--model sonnet] [--root D:\other-checkout] [--turns 60] [--tools compact|full] [--popups 4] [--dry]
-//   --tools  the MCP surface the model gets: compact (five tools, the default) or full (every tool by name)
+//   --tools  full for an older checkout (--root) whose MCP server lists every tool by name; otherwise the five tools
 //   --root   another checkout (its MCP server and its release driver), e.g. main for the v0.2 numbers
 //   --popups every Nth task gets an unexpected popup in the middle of its work (test/p0/popup.ps1, "Update
 //            available"), the experiment of docs/architecture-v2.md section 7: the summary compares those tasks
@@ -153,10 +153,8 @@ const localFile = path.join(base, "local.json");
 process.env.ASCTRL_LOCAL_FILE = localFile;
 // Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
 process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
-// Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
-process.env.ASCTRL_CONFIRM ??= "off";
 const mcpConfig = path.join(base, "mcp.json");
-writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { asctrl: { command: "node", args: [path.join(root, "src/console/mcp-server.ts")], env: { RELAY_URL: "ws://127.0.0.1:1", ASCTRL_LOCAL_FILE: localFile, TECH_NAME: "P0", ASCTRL_TOOLS: surface, ASCTRL_TOOLS_DENY: NO.join(","), ASCTRL_CONFIRM: "off", ASCTRL_SKILLS_FILE: process.env.ASCTRL_SKILLS_FILE ?? "" } } } }));
+writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { asctrl: { command: "node", args: [path.join(root, "src/console/mcp-server.ts")], env: { RELAY_URL: "ws://127.0.0.1:1", ASCTRL_LOCAL_FILE: localFile, TECH_NAME: "P0", ASCTRL_TOOLS: surface, ASCTRL_TOOLS_DENY: NO.join(","), ASCTRL_SKILLS_FILE: process.env.ASCTRL_SKILLS_FILE ?? "" } } } }));
 mkdirSync(path.join(here, "test/out"), { recursive: true });
 const out = path.join(here, `test/out/p0-${stamp}.jsonl`);
 const browserProfile = path.join(base, "browser-profile");

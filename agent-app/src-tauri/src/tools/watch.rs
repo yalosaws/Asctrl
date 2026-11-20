@@ -1,4 +1,4 @@
-//! watch: keep reading a number (or some text) off a region of the screen, many times a second, and return
+//! wait_for with until: keep reading a number (or some text) off a region of the screen, many times a second, and return
 //! the moment it meets a condition. A price that crosses a line, a timer that runs out, a score: the AI says
 //! where and when once, and the reaction (the next step of its plan) goes in within a fraction of a second,
 //! instead of each look costing it a round trip.

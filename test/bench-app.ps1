@@ -1,6 +1,6 @@
 # A small window with known controls for test/bench.ts: ordinary controls (readable by UI Automation),
 # a canvas that draws its own text (only OCR can read it), and a dialog that opens after a delay.
-# -NotOnTop: an ordinary window that others can cover (test/p2.ts); otherwise it stays on top.
+# -NotOnTop: an ordinary window that others can cover (test/windows.ts); otherwise it stays on top.
 param([switch]$NotOnTop)
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing

@@ -142,7 +142,7 @@ pub async fn conclude(ctx: &Ctx, args: &Value, did: Did, shot_default: bool) -> 
         o.data = data;
         return o;
     }
-    // Inside a batch every step says what it did in a line; the batch reports once at the end
+    // A program's step says what it did in a line
     if STEP.try_with(|s| *s).unwrap_or(false) || after == After::None {
         return with(text(body));
     }

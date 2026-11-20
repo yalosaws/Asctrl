@@ -13,8 +13,6 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { startRelay } from "../src/relay/server.ts";
 import { startHttpServer } from "../src/console/mcp-http.ts";
-// The tools by their own names (the five-tool surface has a check of its own in test/tools.ts)
-process.env.ASCTRL_TOOLS = "full";
 import { AuthStore } from "../src/console/auth.ts";
 
 const RELAY_PORT = 18797;
@@ -84,21 +82,22 @@ try {
   const a = await mcp(alice.key);
   const tools = (await a.c.listTools()).tools;
   const names = tools.map((t) => t.name);
-  check("tools listed", names.includes("run") && names.includes("connect"), `${names.length} tools`);
-  check("no server-disk tools when hosted", !names.includes("upload_file") && !names.includes("download_file"));
+  const act = tools.find((t) => t.name === "act")?.description ?? "";
+  check("five tools listed, run among the actions", names.sort().join(",") === "act,connect,exec,query,resume" && act.includes("- run:"), names.join(", "));
+  check("no server-disk tools when hosted", !act.includes("upload_file") && !act.includes("download_file"));
   const connectSchema = tools.find((t) => t.name === "connect")?.inputSchema as any;
   check("connect needs a code when hosted", connectSchema?.required?.includes("code"));
   const icons = (a.c.getServerVersion() as any)?.icons ?? [];
   check("server icons are https URLs", icons.length === 3 && icons.every((i: any) => i.src.startsWith(`${BASE}/icons/`)), icons[0]?.src);
   check("instructions ask for the code", (a.c.getInstructions() ?? "").includes("6-digit code shown in the Asctrl app"));
 
-  const noConn = await a.c.callTool({ name: "observe", arguments: {} });
+  const noConn = await a.c.callTool({ name: "query", arguments: { what: "observe" } });
   check("tools refuse before connect", !!noConn.isError && text(noConn).includes("connect first"), text(noConn));
 
   const conn = await a.c.callTool({ name: "connect", arguments: { code: CODE } });
   check("connect through the relay", !conn.isError && text(conn).includes("FAKE-PC"), text(conn));
   check("consent card names the client", consentName === "test-agent", consentName);
-  const obs = await a.c.callTool({ name: "observe", arguments: { query: "Save" } });
+  const obs = await a.c.callTool({ name: "query", arguments: { what: "observe", args: { query: "Save" } } });
   check("calls reach the computer", text(obs).includes('fake observe {"query":"Save"}'), text(obs));
 
   // ---- Sessions belong to their key ----
@@ -125,14 +124,14 @@ try {
   await a.t.terminateSession();
   await a.c.close();
   const g = await mcp(alice.key);
-  const later = await g.c.callTool({ name: "observe", arguments: { query: "Next" } });
+  const later = await g.c.callTool({ name: "query", arguments: { what: "observe", args: { query: "Next" } } });
   check("computer still connected in the next session", text(later).includes('fake observe {"query":"Next"}'), text(later));
   await g.t.terminateSession();
   await g.c.close();
   check("ending sessions leaves the connection", srv.links.size === 1 && [...srv.links.values()][0].link.client.connected);
   // Another client with its own sign-in gets its own connection
   const other = await mcp(bob.key);
-  const none = await other.c.callTool({ name: "observe", arguments: {} });
+  const none = await other.c.callTool({ name: "query", arguments: { what: "observe" } });
   check("another key has no computer until it connects", !!none.isError && text(none).includes("connect first"), text(none));
   await other.c.close();
 
@@ -175,7 +174,7 @@ try {
   check("code is single use", reuse.status === 400);
 
   const o = await mcp(tok.access_token, "claude-ai");
-  check("OAuth token opens a session", (await o.c.listTools()).tools.length > 10);
+  check("OAuth token opens a session", (await o.c.listTools()).tools.length === 5);
   await o.c.close();
 
   const ref = await (await token({ grant_type: "refresh_token", refresh_token: tok.refresh_token })).json();
@@ -192,9 +191,9 @@ try {
 
   // ---- The stdio server, on the user's own machine, keeps everything ----
   const sc = new Client({ name: "smoke", version: "1.0.0" });
-  await sc.connect(new StdioClientTransport({ command: process.execPath, args: [path.resolve(import.meta.dirname, "../src/console/mcp-server.ts")], env: { ...(process.env as Record<string, string>), ASCTRL_TOOLS: "full" } }));
-  const local = (await sc.listTools()).tools.map((t) => t.name);
-  check("stdio server keeps file copying and local connect", local.includes("upload_file") && (sc.getInstructions() ?? "").includes("no arguments = this computer"), `${local.length} tools`);
+  await sc.connect(new StdioClientTransport({ command: process.execPath, args: [path.resolve(import.meta.dirname, "../src/console/mcp-server.ts")], env: { ...(process.env as Record<string, string>) } }));
+  const local = (await sc.listTools()).tools;
+  check("stdio server keeps file copying and local connect", !!local.find((t) => t.name === "act")?.description?.includes("upload_file") && (sc.getInstructions() ?? "").includes("no arguments = this computer"), local.map((t) => t.name).join(", "));
   await sc.close();
 } catch (e) {
   console.error(e);

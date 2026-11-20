@@ -76,7 +76,7 @@ fn fx_args(args: &Value) -> Value {
 
 /// Tools that may move the mouse: pause overlay interaction while they run so they don't hit the orb
 fn moves_mouse(tool: &str) -> bool {
-    matches!(tool, "click" | "batch" | "scroll" | "drag" | "mouse" | "type_text" | "set_value")
+    matches!(tool, "click" | "exec" | "resume" | "scroll" | "drag" | "mouse" | "type_text" | "set_value")
 }
 
 pub fn reply(tx: &mpsc::UnboundedSender<String>, id: &str, out: tools::Output) {
@@ -101,10 +101,6 @@ fn dispatch(app: &AppHandle, tx: &mpsc::UnboundedSender<String>, msg: &Value) {
     let (id, tool) = (s("id"), s("tool"));
     let args = msg.get("args").cloned().unwrap_or(json!({}));
     let (app, tx) = (app.clone(), tx.clone());
-    if tool == "plan_mark" {
-        reply_text(&tx, &id, true, &tools::popups::plan_mark(&args));
-        return;
-    }
     let Ok(call) = app.state::<AgentState>().ctx.calls.clone().try_read_owned() else {
         reply_text(&tx, &id, false, "The controller session is ending");
         return;

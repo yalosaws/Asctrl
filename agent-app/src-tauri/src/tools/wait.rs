@@ -109,14 +109,21 @@ fn showing(hwnd: isize, texts: &[String], f: &Frame, use_ocr: bool, problem: &mu
 /// Poll until a window or some text shows up (or goes away), or the screen settles.
 /// Returns as soon as it happens, so the AI never has to guess how long to wait.
 pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
+    // until: a number (or text) read again and again in a region, many times a second (see `watch`)
+    if !str_arg(args, "until").trim().is_empty() {
+        return super::watch::watch(ctx, args).await;
+    }
     let window = alternatives(str_arg(args, "appears"));
     let texts = alternatives(str_arg(args, "text"));
     let stable = bool_arg(args, "stable").unwrap_or(false);
     let seconds = args.get("seconds").and_then(Value::as_f64);
     let gone = bool_arg(args, "gone").unwrap_or(false);
-    let given = [!window.is_empty(), !texts.is_empty(), stable, seconds.is_some()].iter().filter(|b| **b).count();
+    // appears and text together: whichever shows first (with gone: once neither does). A program's waitFor
+    // asks this way, since what it names may be a window's title or something a window shows.
+    let either = !window.is_empty() && !texts.is_empty();
+    let given = [!window.is_empty() || !texts.is_empty(), stable, seconds.is_some()].iter().filter(|b| **b).count();
     if given != 1 {
-        return fail("Give exactly one of appears, text, stable or seconds");
+        return fail("Give exactly one of appears, text, stable or seconds (appears and text together: whichever shows first)");
     }
     if let Some(s) = seconds {
         let s = s.clamp(0.0, 60.0);
@@ -137,7 +144,13 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
     let r = tokio::task::spawn_blocking(move || -> Result<Did, String> {
         let start = std::time::Instant::now();
         let scope = || within.filter(|h| winmgr::exists(*h)).or_else(|| winmgr::find_arg(within_arg.as_ref()).ok().flatten().map(|h| h.0 as isize));
-        let what = if !window.is_empty() { format!("A window matching \"{}\"", window.join("|")) } else { format!("\"{}\"", texts.join("|")) };
+        let what = if either {
+            format!("\"{}\" (as text in the window or as a window's title)", texts.join("|"))
+        } else if !window.is_empty() {
+            format!("A window matching \"{}\"", window.join("|"))
+        } else {
+            format!("\"{}\"", texts.join("|"))
+        };
         let mut problem = String::new();
         let mut polls = 0u32;
         // Since when the pixels have overruled a control on every poll
@@ -180,11 +193,17 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
             problem.clear();
             let mut overruled = false;
             // Some((details, the window it is in, whether to list that window's controls))
-            let found: Option<(String, Option<isize>, bool)> = if !window.is_empty() {
+            let by_window: Option<(String, Option<isize>, bool)> = if !window.is_empty() {
                 let ws = winmgr::list();
                 let hit = ws.iter().find(|w| {
                     let (t, p) = (w.title.to_lowercase(), w.process.to_lowercase());
-                    window.iter().any(|q| t.contains(&q.to_lowercase()) || p.contains(&q.to_lowercase()))
+                    window.iter().any(|q| {
+                        let q = q.to_lowercase();
+                        // Text that may as well be on screen counts as a program only by its whole name: "ok"
+                        // is not Outlook
+                        let program = if either { p.strip_suffix(".exe").unwrap_or(&p) == q } else { p.contains(&q) };
+                        t.contains(&q) || program
+                    })
                 });
                 hit.map(|w| {
                     // A window exists before it has drawn anything: let it finish, so the next step can read it
@@ -198,11 +217,18 @@ pub(super) async fn wait_for(ctx: &Ctx, args: &Value) -> Output {
                     (look::win_line(&f, w), Some(w.handle), true)
                 })
             } else {
+                None
+            };
+            // Windows are looked through first: that is cheap, reading a window's controls is not
+            let found = by_window.or_else(|| {
+                if texts.is_empty() {
+                    return None;
+                }
                 let hwnd = target.unwrap_or_else(winmgr::foreground);
                 // Pixels are read every other poll when not asked for outright: controls answer faster
                 let use_ocr = ocr_arg.unwrap_or(polls.is_multiple_of(2)) && ocr_arg != Some(false);
                 if hwnd == 0 { None } else { showing(hwnd, &texts, &f, use_ocr, &mut problem, &mut overruled).map(|(d, in_controls)| (d, Some(hwnd), in_controls)) }
-            };
+            });
             let s = start.elapsed().as_secs_f64();
             overruled_since = if overruled { overruled_since.or(Some(std::time::Instant::now())) } else { None };
             // Gone on the pixels' word alone only when they have said so for a while: a misreading, or a window

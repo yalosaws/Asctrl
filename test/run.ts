@@ -17,8 +17,6 @@ const localFile = path.join(tmpdir(), `asctrl-run-local-${process.pid}.json`);
 process.env.ASCTRL_LOCAL_FILE = localFile;
 // Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
 process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
-// Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
-process.env.ASCTRL_CONFIRM ??= "off";
 // A cache of its own, empty: the checks count decision-model calls
 const cacheFile = path.join(tmpdir(), `asctrl-run-cache-${process.pid}.json`);
 process.env.ASCTRL_DREX_CACHE = cacheFile;
@@ -86,11 +84,11 @@ try {
     { window: B, on: { "Bench Dialog": "Close me" }, steps: [{ click: "Open dialog" }, { tool: "wait_for", seconds: 1.5 }, { fill: { Name: "Pop" } }, { click: "Submit" }, { expect: "Submitted: Pop" }] },
     (t) => t.includes("✓ done") && t.includes('pressed "Close me"'),
   );
-  // The pace is chosen per step: rows after the first go fast once the first showed the steps bring nothing up
+  // At the default pace each input goes on the moment the screen reacts: every row goes through, each checked
   await check(
-    "repeat, pace chosen per step",
+    "repeat at the default pace",
     { window: B, repeat: [["A1"], ["A2"], ["A3"], ["A4"]], steps: [{ fill: { Name: "$1" } }, { click: "Submit" }, { expect: "Submitted: $1" }] },
-    (t) => t.includes("✓ done") && /\d+ steps? fast/.test(t),
+    (t) => t.includes("✓ done") && t.includes("✓ rows 2–4 the same way"),
   );
   // Settled by an expect, then a dialog that opens late: the model may say "not ready yet", and it is waited for
   await check(

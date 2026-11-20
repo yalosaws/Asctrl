@@ -11,7 +11,6 @@
 use crate::{capture, fx, input, screen, uia, winmgr};
 
 mod apps;
-mod batch;
 mod grid;
 mod keys;
 mod locate;
@@ -21,6 +20,7 @@ pub mod popups;
 mod program;
 mod recover;
 mod skills;
+mod step;
 mod report;
 mod system;
 mod values;
@@ -45,7 +45,7 @@ pub struct Output {
     pub file: Option<FileData>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Structured results, for a program reading the reply (a plan's runner reads a batch's steps from it)
+    /// Structured results, for a program reading the reply (a plan's runner reads its steps' results from it)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
 }
@@ -68,12 +68,6 @@ pub fn probe_missed(args: &Value, out: &Output) -> bool {
     let unresolved = |d: Option<&Value>| matches!(miss_kind(d), Some("ambiguous" | "absent"));
     if out.ok {
         return false;
-    }
-    // A batch that stopped at such a probe: the plan's runner carries on from that step
-    let failed = out.data.as_ref().and_then(|d| Some((d.get("failed")?.as_u64()? as usize, d.get("steps")?.as_array()?)));
-    if let (Some(steps), Some((i, results))) = (args.get("steps").and_then(Value::as_array), failed) {
-        let probe = steps.get(i).is_some_and(|s| bool_arg(s, "probe") == Some(true));
-        return probe && unresolved(results.get(i).and_then(|r| r.get("data")));
     }
     bool_arg(args, "probe") == Some(true) && unresolved(out.data.as_ref())
 }
@@ -441,24 +435,29 @@ tokio::task_local! {
     /// The session a call was made in (see `in_session`)
     static CALL_SESSION: u64;
     static PROGRAM_DEADLINE: std::time::Instant;
-    /// Set by batch fast: input steps don't wait for the screen to settle, only for the program to take the input
+    /// Set for a program running fast: input steps don't wait for the screen to settle, only for the program to take the input
     static FAST: bool;
     /// Set by a watch argument: the region (screen pixels) whose changes count after an input step
     static WATCH: capture::Area;
-    /// Set inside a batch: steps say what they did in a line; the batch reports the outcome once at the end
+    /// Set for a program's steps: each says what it did in a line
     static STEP: bool;
+    /// Set for a program's steps: an input waits only until the screen reacts, not until it is still. Nothing
+    /// reads the reply's account of the change, and the next step waits for what it needs itself: its target
+    /// to arrive and stop moving (`locate`), the screen to rest before a read (`program`).
+    static REACT: bool;
 }
 
 /// How an action waits for the screen afterwards, decided before it runs (task-locals don't cross threads)
 #[derive(Clone, Copy)]
 struct Pace {
     fast: bool,
+    react: bool,
     watch: Option<capture::Area>,
 }
 
 impl Pace {
     fn current() -> Pace {
-        Pace { fast: FAST.try_with(|f| *f).unwrap_or(false), watch: WATCH.try_with(|w| *w).ok() }
+        Pace { fast: FAST.try_with(|f| *f).unwrap_or(false), react: REACT.try_with(|r| *r).unwrap_or(false), watch: WATCH.try_with(|w| *w).ok() }
     }
 
     /// The screen before an action at `at` (None: a keystroke), to compare with afterwards
@@ -484,6 +483,14 @@ impl Pace {
 
     fn after_within(&self, before: Option<screen::Before>, quiet: Duration) -> Option<screen::Change> {
         match before {
+            Some(b) if self.react => {
+                let c = screen::react(&b, quiet, SETTLE_MAX);
+                // What it brought up may still be arriving, or still moving into place
+                if c.changed {
+                    locate::reacted();
+                }
+                Some(c)
+            }
             Some(b) => Some(screen::settle(&b, quiet, SETTLE_MAX)),
             None => {
                 std::thread::sleep(FAST_GAP);
@@ -494,7 +501,7 @@ impl Pace {
     }
 }
 
-/// The region a tool's or batch's `watch` argument frames ({x0, y0, x1, y1} on the latest screenshot), if any
+/// The region a tool's `watch` argument frames ({x0, y0, x1, y1} on the latest screenshot), if any
 fn watch_arg(ctx: &Ctx, args: &Value) -> Result<Option<capture::Area>, String> {
     match args.get("watch").filter(|w| !w.is_null()) {
         None => Ok(None),
@@ -545,12 +552,17 @@ async fn shoot_in(hwnd: Option<isize>, area: capture::Area, max_width: i32) -> R
 
 type BoxedRun<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Output> + Send + 'a>>;
 
-/// Run a tool
+/// Run a tool. One that asks to be recovered (`recover: {kind, late}`, as a plan's runner asks when it tries a step
+/// again) is, as a program's step would be: its miss comes back with the candidates to choose among.
 pub async fn run(ctx: &Ctx, tool: &str, args: &Value) -> Output {
+    if args.get("recover").is_some_and(Value::is_object) {
+        let on = step::on_rules(args.get("on"));
+        return step::run_recovering(ctx, tool, args, fx::call_id(), false, &on, !locate::reacting()).await;
+    }
     run_tool(ctx, tool, args).await
 }
 
-/// Boxed so batch can run tools from inside a tool. A watch argument frames the region input steps wait on.
+/// Boxed so a program can run tools from inside a tool. A watch argument frames the region input steps wait on.
 fn run_tool<'a>(ctx: &'a Ctx, tool: &'a str, args: &'a Value) -> BoxedRun<'a> {
     Box::pin(async move {
         // What it does to the world, for the action log
@@ -612,7 +624,6 @@ async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
         },
         "wait_for" => wait::wait_for(ctx, args).await,
         "read_grid" => grid::read_grid(ctx, args).await,
-        "watch" => watch::watch(ctx, args).await,
         "timeline" => timeline(args),
         // Acting
         // In Asctrl's own browser, text targets go through the page first (see web)
@@ -633,8 +644,6 @@ async fn dispatch(ctx: &Ctx, tool: &str, args: &Value) -> Output {
             Some(o) => o,
             None => values::set_value(ctx, args).await,
         },
-        "element_action" => values::element_action(ctx, args).await,
-        "batch" => batch::batch(ctx, args).await,
         "exec" => program::exec(ctx, args).await,
         "resume" => program::resume(ctx, args).await,
         "skills" => skills::skills(ctx, args).await,
@@ -745,20 +754,15 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_stopped_by_a_missed_probe_is_no_failure_to_flash() {
-        let step = |kind: Option<&str>| match kind {
-            Some(k) => serde_json::json!({ "ok": false, "text": "", "data": { "miss": { "kind": k, "candidates": [] } } }),
-            None => serde_json::json!({ "ok": false, "text": "Access denied" }),
-        };
-        let out = |kind: Option<&str>| Output { ok: false, data: Some(serde_json::json!({ "failed": 1, "steps": [{ "ok": true, "text": "" }, step(kind)] })), ..Default::default() };
-        let args = |probe: bool| serde_json::json!({ "steps": [{ "tool": "keys" }, { "tool": "click", "target": "send", "probe": probe }] });
+    fn a_missed_probe_is_no_failure_to_flash() {
+        let out = |kind: Option<&str>| Output { ok: false, data: Some(match kind { Some(k) => serde_json::json!({ "miss": { "kind": k, "candidates": [] } }), None => serde_json::json!({}) }), ..Default::default() };
+        let args = |probe: bool| serde_json::json!({ "target": "send", "probe": probe });
         assert!(probe_missed(&args(true), &out(Some("absent"))));
         assert!(probe_missed(&args(true), &out(Some("ambiguous"))));
         // Not a probe, or a probe that failed some other way: a real failure
         assert!(!probe_missed(&args(false), &out(Some("absent"))));
         assert!(!probe_missed(&args(true), &out(Some("stale"))));
         assert!(!probe_missed(&args(true), &out(None)));
-        // A single call
         let one = Output { ok: false, data: Some(report::miss_data(locate::MissKind::Absent, &[])), ..Default::default() };
         assert!(probe_missed(&serde_json::json!({ "target": "send", "probe": true }), &one));
     }

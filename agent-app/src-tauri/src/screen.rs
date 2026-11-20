@@ -312,6 +312,17 @@ pub struct Change {
 /// captures in a row match, up to `max` in all. A different window coming to the front counts as a change.
 /// What moves on its own away from the action point is left out (see the module comment).
 pub fn settle(b: &Before, quiet: Duration, max: Duration) -> Change {
+    settle_with(b, quiet, max, 2)
+}
+
+/// Like settle, but done the moment the screen reacts (or a window comes to the front), without waiting for
+/// it to stop changing: for a caller whose next step waits for what it needs by itself (see `locate`)
+pub fn react(b: &Before, quiet: Duration, max: Duration) -> Change {
+    settle_with(b, quiet, max, 0)
+}
+
+/// `calm_polls`: how many captures in a row must match once the screen has reacted
+fn settle_with(b: &Before, quiet: Duration, max: Duration, calm_polls: u32) -> Change {
     let start = Instant::now();
     let mut tracker = b.print.as_ref().filter(|_| !b.only).map(|p| Tracker::new(p, b.focus, NOISE_AFTER));
     let mut prev: Option<Print> = None;
@@ -346,7 +357,7 @@ pub fn settle(b: &Before, quiet: Duration, max: Duration) -> Change {
         } else {
             calm = if cur.is_none() || !d.significant() { calm + 1 } else { 0 };
         }
-        let done = if seen { calm >= 2 } else { elapsed >= quiet };
+        let done = if seen { calm >= calm_polls } else { elapsed >= quiet };
         if done || elapsed >= max {
             if let (Some(t), Some(p)) = (&tracker, &b.print) {
                 t.save(p);

@@ -1198,68 +1198,6 @@ impl Live {
         }
         Some(r.map(|_| format!("{label} is now \"{}\"", clip(&item_name, 60))))
     }
-
-    /// One explicit action. action: press, toggle, select, expand, collapse, focus, scroll_into_view,
-    /// scroll (value: up/down/left/right, optionally ":page")
-    pub fn act(&self, action: &str, value: &str) -> Result<String, String> {
-        self.guard()?;
-        let label = &self.label;
-        let el = &self.el;
-        match action {
-            "" | "press" | "click" | "invoke" => self.press().map_err(|e| format!("{e}; use click (it falls back to the mouse)")),
-            "toggle" => {
-                let p = pattern::<IUIAutomationTogglePattern>(el, UIA_TogglePatternId).ok_or(format!("{label} is not a checkbox or toggle"))?;
-                unsafe { p.Toggle() }.map_err(|e| fail("Toggling it", e))?;
-                Ok(format!("{label} is now {}", self.toggle_state().unwrap_or("toggled")))
-            }
-            "select" => {
-                let p = pattern::<IUIAutomationSelectionItemPattern>(el, UIA_SelectionItemPatternId).ok_or(format!("{label} can't be selected (not a list, tab or radio item)"))?;
-                unsafe { p.Select() }.map_err(|e| fail("Selecting it", e))?;
-                Ok(format!("Selected {label}"))
-            }
-            "expand" | "collapse" => {
-                let p = pattern::<IUIAutomationExpandCollapsePattern>(el, UIA_ExpandCollapsePatternId).ok_or(format!("{label} can't be expanded or collapsed"))?;
-                if action == "expand" {
-                    unsafe { p.Expand() }.map_err(|e| fail("Expanding it", e))?;
-                } else {
-                    unsafe { p.Collapse() }.map_err(|e| fail("Collapsing it", e))?;
-                }
-                Ok(format!("{} {label}", if action == "expand" { "Expanded" } else { "Collapsed" }))
-            }
-            "focus" => {
-                self.focus()?;
-                Ok(format!("Focused {label}"))
-            }
-            "scroll_into_view" => {
-                if !self.scroll_into_view() {
-                    return Err(format!("{label} can't be scrolled into view this way; use scroll"));
-                }
-                Ok(format!("Scrolled {label} into view"))
-            }
-            "scroll" => {
-                let auto = automation()?;
-                let p = scroller(&auto, el).ok_or(format!("Nothing around {label} scrolls this way; use scroll (the mouse wheel)"))?;
-                let v = value.trim().to_lowercase();
-                let (dir, page) = match v.split_once(':') {
-                    Some((d, m)) => (d.to_string(), m == "page"),
-                    None => (v.clone(), false),
-                };
-                let (inc, dec) = if page { (ScrollAmount_LargeIncrement, ScrollAmount_LargeDecrement) } else { (ScrollAmount_SmallIncrement, ScrollAmount_SmallDecrement) };
-                let none = ScrollAmount_NoAmount;
-                let (h, vv) = match dir.as_str() {
-                    "" | "down" => (none, inc),
-                    "up" => (none, dec),
-                    "right" => (inc, none),
-                    "left" => (dec, none),
-                    other => return Err(format!("Unknown scroll direction: {other} (use up, down, left or right)")),
-                };
-                unsafe { p.Scroll(h, vv) }.map_err(|e| fail("Scrolling", e))?;
-                let pos = unsafe { p.CurrentVerticalScrollPercent() }.unwrap_or(-1.0);
-                Ok(if pos >= 0.0 { format!("Scrolled; now {pos:.0}% down") } else { "Scrolled".into() })
-            }
-            other => Err(format!("Unknown action: {other} (use press, toggle, select, expand, collapse, focus, scroll or scroll_into_view)")),
-        }
-    }
 }
 
 /// A letter or digit of a script that spaces its words (not Chinese, Japanese or Korean, where any run of
@@ -1305,18 +1243,6 @@ pub fn scroll_area_at(x: i32, y: i32, horizontal: bool) -> Option<ScrollArea> {
     None
 }
 
-/// The nearest element at or above `el` that can scroll
-fn scroller(auto: &IUIAutomation, el: &IUIAutomationElement) -> Option<IUIAutomationScrollPattern> {
-    let walker = unsafe { auto.ControlViewWalker() }.ok()?;
-    let mut cur = el.clone();
-    for _ in 0..30 {
-        if let Some(p) = pattern::<IUIAutomationScrollPattern>(&cur, UIA_ScrollPatternId) {
-            return Some(p);
-        }
-        cur = unsafe { walker.GetParentElement(&cur) }.ok()?;
-    }
-    None
-}
 
 /// The control with the keyboard focus right now: (what it is, its value when it has one, its window, a
 /// reference when it has been read before)

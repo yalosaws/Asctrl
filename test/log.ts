@@ -1,38 +1,28 @@
-// L5, on a real desktop: nothing waits for the person at the computer, and every action is logged.
-// Usage: node test/l5.ts   (opens the bench window ~30 s)
+// The action log, on a real desktop: nothing waits for the person at the computer, and every action is logged.
+// Usage: node test/log.ts   (opens the bench window ~30 s)
 //
 // 1. "Submit" sends something out: it is done at once, with no question.
 // 2. A declaration raises the level: "Agree" with effect: "irreversible" is logged as irreversible, and done too.
 // 3. The action log has each action and its level, and typed text only by its length.
 
-import { driverExecutable, owned } from "./fixtures.ts";
-import { spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { TechClient } from "../src/console/tech-client.ts";
+import { Suite } from "./desk.ts";
 
-const root = path.resolve(import.meta.dirname, "..");
-const exe = driverExecutable(root);
-const localFile = path.join(tmpdir(), `asctrl-l5-local-${process.pid}.json`);
 const log = path.join(tmpdir(), `asctrl-l5-actions-${process.pid}.log`);
 const replay = path.join(tmpdir(), `asctrl-l5-replay-${process.pid}.log`);
 const sample = path.join(tmpdir(), `asctrl-l5-fixture-${process.pid}.txt`);
-process.env.ASCTRL_LOCAL_FILE = localFile;
-// Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
-process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
-const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_ACTION_LOG: log, ASCTRL_FX_LOG: replay } }));
-const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
-const tech = new TechClient("ws://127.0.0.1:1", "L5Test");
-let failures = 0;
-const say = (ok: boolean, line: string) => {
-  if (!ok) failures++;
-  console.log(`${ok ? "✓" : "✗"} ${line}`);
-};
+const s = new Suite("Log", { bench: true, env: { ASCTRL_ACTION_LOG: log, ASCTRL_FX_LOG: replay } });
+const { tech, say } = s;
 const first = (s?: string) => (s ?? "").split("\n")[0];
 const result = async () => (await tech.call("observe", { window: "Asctrl Bench", query: "Submitted" })).text ?? "";
 
-try {
+s.after(async () => {
+  for (const file of [log, replay, sample]) rmSync(file, { force: true, maxRetries: 6, retryDelay: 100 });
+});
+
+await s.run(async () => {
   await tech.connectLocalDriver({ launch: false, waitMs: 30_000 });
   await tech.call("wait_for", { appears: "Asctrl Bench", timeoutSec: 15 });
   const named = await tech.call("set_value", { window: "Asctrl Bench", target: "Name", value: "secret123", after: "none" });
@@ -53,7 +43,7 @@ try {
   const payload = Buffer.from("private-upload-136").toString("base64");
   const file = await tech.call("write_file", { path: sample, content: "private-file-207" });
   const uploaded = await tech.call("upload_file", { path: sample, data: payload });
-  const nested = await tech.call("batch", { steps: [{ tool: "set_value", target: "Name", value: "private-step-308", window: "Asctrl Bench" }] });
+  const nested = await tech.call("exec", { plan: { steps: [{ tool: "set_value", args: { target: "Name", value: "private-step-308", window: "Asctrl Bench" } }] }, learn: false, waitSec: 30 });
   say(file.ok && uploaded.ok && nested.ok, "file, upload and nested actions completed");
   // 3.
   const lines = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
@@ -64,16 +54,4 @@ try {
     && lines.every((entry) => Number.isFinite(entry.elapsedMs)), "both logs exclude payloads and the action log retains elapsed time");
   const typed = JSON.stringify(lines.filter((l) => l.tool === "set_value"));
   say(!/secret123|private-form-583/.test(JSON.stringify(lines)) && /<9 characters>/.test(typed), `typed values are logged by their length only`);
-} catch (e) {
-  console.error(e);
-  failures++;
-} finally {
-  console.log(failures ? `\n${failures} check(s) failed` : "\nAll checks passed");
-  process.exitCode = failures ? 1 : 0;
-  tech.disconnect();
-  bench.kill();
-  agent.kill();
-  rmSync(localFile, { force: true });
-  for (const file of [log, replay, sample]) rmSync(file, { force: true, maxRetries: 6, retryDelay: 100 });
-  setTimeout(() => process.exit(), 300);
-}
+});

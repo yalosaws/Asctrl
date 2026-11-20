@@ -1,5 +1,5 @@
-// P3, on a real desktop: the page channel in Asctrl's own browser.
-// Usage: node test/p3.ts   (opens Asctrl's browser and Calculator for about 20 s; leave the computer alone)
+// The page channel in Asctrl's own browser, on a real desktop.
+// Usage: node test/page.ts   (opens Asctrl's browser and Calculator for about 20 s; leave the computer alone)
 //
 // Opens test/web/p3.html in Asctrl's browser, covers the browser with Calculator (maximized), and then works the
 // page without bringing it forward: controls named by their text, label, placeholder or aria-label, one that
@@ -7,38 +7,33 @@
 // the whole page's text, two controls with the same name (left to the usual lookup), and a link to another
 // page (waited for until it has loaded). The mouse must not move and Calculator must stay in front.
 
-import { driverExecutable, owned, fixtureDirectory } from "./fixtures.ts";
-import { execFileSync, spawn } from "node:child_process";
+import { fixtureDirectory } from "./fixtures.ts";
+import { execFileSync } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { TechClient } from "../src/console/tech-client.ts";
+import { Suite, root } from "./desk.ts";
 import type { ObserveData } from "../src/shared/protocol.ts";
 
-const root = path.resolve(import.meta.dirname, "..");
-const exe = driverExecutable(root);
 const pagesDir = fixtureDirectory(path.join(tmpdir(), "asctrl-duplicate-pages-"));
-const localFile = path.join(tmpdir(), `asctrl-p3-local-${process.pid}.json`);
-process.env.ASCTRL_LOCAL_FILE = localFile;
 process.env.ASCTRL_BROWSER_PROFILE = path.join(pagesDir, "browser");
-// Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
-process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
-// Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
-process.env.ASCTRL_CONFIRM ??= "off";
-const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"] }));
-const tech = new TechClient("ws://127.0.0.1:1", "P3Test");
-let failures = 0;
-const say = (ok: boolean, line: string) => {
-  if (!ok) failures++;
-  console.log(`${ok ? "✓" : "✗"} ${line}`);
-};
+const s = new Suite("Page");
+const { tech, say } = s;
 const first = (s?: string) => (s ?? "").split("\n")[0];
 const cursor = () => execFileSync("powershell.exe", ["-NoProfile", "-Command", "Add-Type -AssemblyName System.Windows.Forms; $p = [System.Windows.Forms.Cursor]::Position; \"$($p.X),$($p.Y)\""]).toString().trim();
 
 let C: number | undefined;
 let W: number | undefined;
-try {
+s.after(async () => {
+  // Restored before it closes: Calculator opens next time the way it was closed, and other tests expect its usual size
+  if (C) await tech.call("focus_window", { window: C, action: "restore", after: "none" }).catch(() => undefined);
+  if (C) await tech.call("focus_window", { window: C, action: "close", after: "none" }).catch(() => undefined);
+  if (W) await tech.call("focus_window", { window: W, action: "close", after: "none" }).catch(() => undefined);
+  rmSync(pagesDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
+});
+
+await s.run(async () => {
   await tech.connectLocalDriver({ launch: false, waitMs: 30_000 });
   const url = pathToFileURL(path.join(root, "test/web/p3.html")).href;
   const coldPages = ["ColdOne", "ColdTwo"].map((marker) => {
@@ -120,19 +115,4 @@ try {
   const beta = await page();
   say(set.ok && /FixtureAlpha/.test(alpha) && /OnlyOnAlpha/.test(alpha) && /FixtureBeta/.test(beta) && !/OnlyOnAlpha/.test(beta), "an edit affected only the active same-title form");
   say(/FixtureAlpha/.test(switched.text ?? "") && (switched.data as { channel?: string })?.channel === "page", "switching between equal titles reads the visible tab");
-} catch (e) {
-  console.error(e);
-  failures++;
-} finally {
-  // Restored before it closes: Calculator opens next time the way it was closed, and other tests expect its usual size
-  if (C) await tech.call("focus_window", { window: C, action: "restore", after: "none" }).catch(() => undefined);
-  if (C) await tech.call("focus_window", { window: C, action: "close", after: "none" }).catch(() => undefined);
-  if (W) await tech.call("focus_window", { window: W, action: "close", after: "none" }).catch(() => undefined);
-  console.log(failures ? `\n${failures} check(s) failed` : "\nAll checks passed");
-  process.exitCode = failures ? 1 : 0;
-  tech.disconnect();
-  agent.kill();
-  rmSync(localFile, { force: true });
-  rmSync(pagesDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
-  setTimeout(() => process.exit(), 300);
-}
+});

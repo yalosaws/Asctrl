@@ -1,47 +1,43 @@
-// The five-tool surface (connect, query, act, exec, resume), through the MCP server as an AI client sees it.
-// Usage: node test/tools.ts   (opens the bench window for about 15 s; leave the computer alone)
+// The five tools (connect, query, act, exec, resume), through the MCP server as an AI client sees it.
+// Usage: node test/tools.ts   (opens the bench window for about 30 s; leave the computer alone)
 //
-// 1. Five tools by default, every other one reached by name through query or act; full lists them all.
+// 1. Five tools, every other one reached by name through query or act.
 // 2. Wrong args for an action are refused with what it takes; help says what an action does.
 // 3. On the bench window, only through the five: a plan (act run), a look (query observe), a single action
-//    (act set_value), a program (exec).
+//    (act set_value), a screenshot numbered by references, the timeline, a program (exec).
+// 4. The decision model inside programs (only with NACE_API_KEY, in .env or the environment): a program stuck on
+//    words that fit no control exactly ("Open the dialog") is decided on the server's side and goes on, and the
+//    reply says what was decided; one stuck on something that isn't there ("Erase all records") stays stuck for
+//    the AI.
 
-import { driverExecutable, owned } from "./fixtures.ts";
-import { spawn } from "node:child_process";
-import { rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { Suite, root } from "./desk.ts";
 
-const root = path.resolve(import.meta.dirname, "..");
-const exe = driverExecutable(root);
-const localFile = path.join(tmpdir(), `asctrl-tools-local-${process.pid}.json`);
-const env = { ...process.env, RELAY_URL: "ws://127.0.0.1:1", ASCTRL_LOCAL_FILE: localFile, TECH_NAME: "ToolsTest", ASCTRL_NO_LAUNCH: "1", ASCTRL_CONFIRM: "off", ASCTRL_SKILLS_FILE: path.join(tmpdir(), `asctrl-tools-skills-${process.pid}.json`) } as Record<string, string>;
-let failures = 0;
-const say = (ok: boolean, line: string) => {
-  if (!ok) failures++;
-  console.log(`${ok ? "✓" : "✗"} ${line}`);
-};
-type Reply = { content: { type: string; text?: string }[]; isError?: boolean };
+const s = new Suite("Tools", { bench: true });
+const { say } = s;
+// A decision-model cache of its own, empty: the model is asked, not a cache
+const cache = path.join(tmpdir(), `asctrl-tools-drex-${process.pid}.json`);
+s.after(() => rmSync(cache, { force: true }));
+const env = { ...process.env, RELAY_URL: "ws://127.0.0.1:1", TECH_NAME: "ToolsTest", ASCTRL_NO_LAUNCH: "1", ASCTRL_DREX_CACHE: cache } as Record<string, string>;
+const envFile = path.join(root, ".env");
+const model = !!process.env.NACE_API_KEY || (existsSync(envFile) && /^\s*NACE_API_KEY\s*=/m.test(readFileSync(envFile, "utf8")));
+
+type Reply = { content: { type: string; text?: string; data?: string }[]; isError?: boolean };
 const text = (r: Reply) => r.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
-const open = async (mode?: string) => {
-  const c = new Client({ name: "tools-test", version: "1" });
-  await c.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(root, "src/console/mcp-server.ts")], env: mode ? { ...env, ASCTRL_TOOLS: mode } : env, stderr: "inherit" }));
-  return c;
-};
+const c = new Client({ name: "tools-test", version: "1" });
+s.after(() => c.close());
+const call = async (name: string, args: Record<string, unknown>, timeout = 120_000) => (await c.callTool({ name, arguments: args }, undefined, { timeout })) as Reply;
 
-let agent: ReturnType<typeof spawn> | undefined;
-let bench: ReturnType<typeof spawn> | undefined;
-const c = await open();
-const call = async (name: string, args: Record<string, unknown>) => (await c.callTool({ name, arguments: args }, undefined, { timeout: 120_000 })) as Reply;
-try {
+await s.run(async () => {
+  await c.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(root, "src/console/mcp-server.ts")], env, stderr: "inherit" }));
+
   // 1.
   const five = (await c.listTools()).tools.map((t) => t.name).sort();
-  const full = await open("full");
-  const all = (await full.listTools()).tools.length;
-  await full.close();
-  say(five.join(",") === "act,connect,exec,query,resume" && all > 30, `five tools by default (${five.join(", ")}); full lists ${all}`);
+  say(five.join(",") === "act,connect,exec,query,resume", `five tools (${five.join(", ")})`);
 
   // 2.
   const bad = await call("act", { do: "click", args: { count: 9 } });
@@ -49,8 +45,6 @@ try {
   say(!!bad.isError && /count/.test(text(bad)) && /Carry out a plan/.test(text(help)), `wrong args are refused with what the action takes; help describes it: ${text(bad).split("\n")[0]}`);
 
   // 3.
-  agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env }));
-  bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
   const conn = await call("connect", { waitSec: 30 });
   say(!conn.isError, `connected: ${text(conn).split("\n")[0]}`);
   await call("query", { what: "wait_for", args: { appears: "Asctrl Bench", timeoutSec: 15 } });
@@ -64,9 +58,8 @@ try {
   say(/Submitted: five/.test(text(look)), `a look through query: ${text(look).split("\n").find((l) => /Submitted/.test(l))?.trim()}`);
   const one = await call("act", { do: "set_value", args: { window: "Asctrl Bench", target: "Name", value: "single" } });
   say(!one.isError, `a single action through act: ${text(one).split("\n")[0]}`);
-  const shot = (await c.callTool({ name: "query", arguments: { what: "screenshot", args: { window: "Asctrl Bench", marks: true } } }, undefined, { timeout: 60_000 })) as Reply & { content: { type: string; data?: string }[] };
-  const marked = text(shot);
-  const ref = /^(\d+): e\1 Button "Submit"/m.exec(marked)?.[1];
+  const shot = await call("query", { what: "screenshot", args: { window: "Asctrl Bench", marks: true } }, 60_000);
+  const ref = /^(\d+): e\1 Button "Submit"/m.exec(text(shot))?.[1];
   say(!!ref && shot.content.some((x) => x.type === "image"), `a screenshot with the controls numbered by their references (Submit is ${ref})`);
   const byRef = await call("act", { do: "click", args: { target: `e${ref}`, window: "Asctrl Bench" } });
   say(!byRef.isError, `the number on the picture is a target: ${text(byRef).split("\n")[0]}`);
@@ -74,15 +67,19 @@ try {
   say(/(shown|front) "Asctrl Bench"/.test(text(tl)), `the timeline says what came up: ${text(tl).split("\n").find((l) => /Asctrl Bench/.test(l))?.trim()}`);
   const prog = await call("exec", { script: `click('Submit', { window: 'Asctrl Bench' }); return read('Asctrl Bench').match(/Submitted: \\w+/)[0];`, learn: false, waitSec: 30 });
   say(/Submitted: single/.test(text(prog)), `a program through exec: ${/Result: .*/.exec(text(prog))?.[0]}`);
-} catch (e) {
-  console.error(e);
-  failures++;
-} finally {
-  console.log(failures ? `\n${failures} check(s) failed` : "\nAll checks passed");
-  process.exitCode = failures ? 1 : 0;
-  await c.close().catch(() => undefined);
-  bench?.kill();
-  agent?.kill();
-  rmSync(localFile, { force: true });
-  setTimeout(() => process.exit(), 300);
-}
+
+  // 4.
+  if (!model) {
+    console.log("- the decision model inside programs: not checked (no NACE_API_KEY in .env or the environment)");
+    return;
+  }
+  let t = performance.now();
+  const r1 = await call("exec", { script: `click('Open the dialog', { window: 'Asctrl Bench' }); waitFor('Bench Dialog'); click('Close me', { window: 'Bench Dialog' }); return 'closed';`, waitSec: 60 }, 180_000);
+  say(!r1.isError && /Decided on the computer's side/.test(text(r1)) && /Open dialog/.test(text(r1)) && /closed/.test(text(r1)), `a program went on after the decision model chose for it (${Math.round(performance.now() - t)} ms): ${text(r1).split("\n").slice(0, 3).join(" | ")}`);
+  t = performance.now();
+  const r2 = await call("exec", { script: `click('Erase all records', { window: 'Asctrl Bench' }); return 'erased';`, waitSec: 60 }, 180_000);
+  const body = text(r2);
+  say(/stuck/i.test(body) && !/erased/.test(body), `a program stays stuck for the AI when the model isn't sure (${Math.round(performance.now() - t)} ms): ${body.split("\n").slice(0, 2).join(" | ")}`);
+  const id = /program (\d+)|"id":\s*(\d+)|id[: ]+(\d+)/i.exec(body)?.slice(1).find(Boolean);
+  if (id) await call("resume", { id: Number(id), stop: true });
+});

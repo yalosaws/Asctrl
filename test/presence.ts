@@ -1,5 +1,5 @@
-// P6, on a real desktop: the person at the computer comes first, and actions that need no mouse go on beside them.
-// Usage: node test/p6.ts   (opens the bench window and Asctrl's browser for about 40 s; leave the computer alone:
+// Presence, on a real desktop: the person at the computer comes first, and actions that need no mouse go on beside them.
+// Usage: node test/presence.ts   (opens the bench window and Asctrl's browser for about 40 s; leave the computer alone:
 // the test plays the person itself, by moving the mouse with test/jiggle.ps1)
 //
 // 1. Someone moving the mouse: a mouse click waits until they have stopped, and says so.
@@ -8,31 +8,17 @@
 // 4. Two programs at once, one in the browser and one in the bench window, take less time than one after another.
 // 5. A button UI Automation can press goes ahead in the background while the person moves the mouse.
 
-import { driverExecutable, owned } from "./fixtures.ts";
+import { owned } from "./fixtures.ts";
 import { spawn } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { TechClient } from "../src/console/tech-client.ts";
+import { Suite, root } from "./desk.ts";
 import type { ObserveData, ProgramData } from "../src/shared/protocol.ts";
 
-const root = path.resolve(import.meta.dirname, "..");
-const exe = driverExecutable(root);
-const localFile = path.join(tmpdir(), `asctrl-p6-local-${process.pid}.json`);
-process.env.ASCTRL_LOCAL_FILE = localFile;
-// Programs that work are kept as skills by themselves: in a file of the test's own, not the computer's
-process.env.ASCTRL_SKILLS_FILE ??= path.join(tmpdir(), `asctrl-test-skills-${process.pid}.json`);
-// Its driver acts without asking the person first (L5's check has a test of its own: test/l5.ts)
-process.env.ASCTRL_CONFIRM ??= "off";
-const agent = owned(() => spawn(exe, ["--relay", "ws://127.0.0.1:1"], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, ASCTRL_YIELD_MAX: "4" } }));
-const bench = owned(() => spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "test/bench-app.ps1")], { stdio: "ignore", windowsHide: true }));
-const tech = new TechClient("ws://127.0.0.1:1", "P6Test");
-let failures = 0;
-const say = (ok: boolean, line: string) => {
-  if (!ok) failures++;
-  console.log(`${ok ? "✓" : "✗"} ${line}`);
-};
+const s = new Suite("Presence", { bench: true, env: { ASCTRL_YIELD_MAX: "4" } });
+const { tech, say } = s;
 const first = (s?: string) => (s ?? "").split("\n")[0];
 const prog = (r: { data?: unknown }) => (r.data as ProgramData | undefined)?.program;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -49,7 +35,11 @@ async function person(seconds: number): Promise<{ stopped: Promise<void> }> {
 }
 
 let W: number | undefined;
-try {
+s.after(async () => {
+  if (W) await tech.call("focus_window", { window: W, action: "close", after: "none" });
+});
+
+await s.run(async () => {
   await tech.connectLocalDriver({ launch: false, waitMs: 30_000 });
   await tech.call("wait_for", { appears: "Asctrl Bench", timeoutSec: 15 });
   const B = ((await tech.call("observe", { max: 1 })).data as ObserveData).windows.find((x) => x.title === "Asctrl Bench")!.handle;
@@ -118,16 +108,4 @@ try {
   await stopped;
   const shown5 = (await tech.call("observe", { window: B, query: "Submitted:" })).text ?? "";
   say(c5.ok && ms5 < 1500 && /in the background/.test(c5.text ?? "") && /Submitted: beside/.test(shown5) && front5 === W, `a UI Automation press went ahead in the background while the person moved the mouse (${ms5} ms), and their window stayed in front: ${first(c5.text ?? c5.error)} | front ${front5} (theirs ${W}) | ${/Submitted[^\n|]*/.exec(shown5)?.[0]}`);
-} catch (e) {
-  console.error(e);
-  failures++;
-} finally {
-  if (W) await tech.call("focus_window", { window: W, action: "close", after: "none" }).catch(() => undefined);
-  console.log(failures ? `\n${failures} check(s) failed` : "\nAll checks passed");
-  process.exitCode = failures ? 1 : 0;
-  tech.disconnect();
-  bench.kill();
-  agent.kill();
-  rmSync(localFile, { force: true });
-  setTimeout(() => process.exit(), 300);
-}
+});

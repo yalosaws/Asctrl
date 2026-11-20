@@ -1,13 +1,14 @@
 // run: plans the AI writes once and the driver carries out, while the AI thinks about the next one.
 //
 // A plan is a list of steps named by what they act on ("Compose", "To"), not by reference, so it can be written
-// without looking first. The whole plan is checked before anything runs. Its steps then go to the driver in as
-// few calls as possible (a batch per stretch of steps), where each is tried as written: the driver matches text
-// locally, for free, and paces itself (see the driver's batch). When a step's text matches several controls or
-// none, the driver first does what needs no judgment, on the spot (a rule the plan gave for a popup, a moment's
-// wait), and hands back the candidates; only then does the runner take over that one step, with a decision model
-// (Drex) choosing among them, and only a confident, harmless answer is acted on. Anything else stops the plan
-// and hands back to the AI with what it needs to re-plan.
+// without looking first. The whole plan is checked before anything runs. It then runs on the computer as a
+// program (exec with plan: the driver's one runtime for work of many steps), where each step is tried as
+// written: the driver matches text locally, for free, and paces itself. When a step's text matches several
+// controls or none, the driver first does what needs no judgment, on the spot (a rule the plan gave for a popup,
+// a moment's wait), and the program stops at that step with the candidates; only then does the runner take it
+// over, with a decision model (Drex) choosing among them, and only a confident, harmless answer is acted on;
+// the program then goes on. A check is asked of the runner the same way. Anything else stops the plan and hands
+// back to the AI with what it needs to re-plan.
 //
 // Everything the runner learns from the driver comes as structured data (a step's effect on the screen, what
 // kind of miss it was and the candidates, the windows): nothing is read back out of the replies' wording.
@@ -24,7 +25,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { TechClient } from "./tech-client.ts";
-import type { ActionData, BatchData, BatchStepResult, Candidate, ObserveData, ProgramData, ToolName, ToolResult } from "../shared/protocol.ts";
+import type { ActionData, Candidate, ObserveData, ProgramData, StepResult, ToolName, ToolResult } from "../shared/protocol.ts";
 
 export type Step = Record<string, unknown>;
 /** A grid drawn on screen (a game board, a calendar): cells are named "board[row,col]", from 1 */
@@ -79,10 +80,10 @@ function fill(v: unknown, row: Row): unknown {
 
 // ---------- Steps
 
-/** Tools a `{tool: …}` step may name: the ones the driver's batch runs */
+/** Tools a `{tool: …}` step may name: looking and acting, nothing that changes files or the system */
 export const STEP_TOOLS = [
-  "click", "type_text", "press_keys", "scroll", "drag", "mouse", "set_value", "element_action", "focus_window", "open_app", "wait_for",
-  "clipboard", "read_text", "observe", "read_grid", "watch", "timeline",
+  "click", "type_text", "press_keys", "scroll", "drag", "mouse", "set_value", "focus_window", "open_app", "wait_for",
+  "clipboard", "read_text", "observe", "read_grid", "timeline",
 ] as const;
 
 /** Every kind of step: the key that names it, and the other keys it takes (besides window) */
@@ -98,7 +99,7 @@ const KINDS: Record<string, string[]> = {
   await: ["gone", "timeoutSec"],
   scroll: ["target", "amount"],
   read: [],
-  watch: ["until", "everyMs", "confirm", "timeoutSec"],
+  until: ["in", "everyMs", "confirm", "timeoutSec"],
 };
 
 /** One right way to write each kind of step, shown when one is written wrong */
@@ -114,7 +115,7 @@ const EXAMPLES: Record<string, string> = {
   await: `{await: "Loading", gone: true, timeoutSec: 10}`,
   scroll: `{scroll: "down", target: "Results", amount: 5}`,
   read: `{read: "board"} (a grid declared in grids)`,
-  watch: `{watch: {x0: 10, y0: 10, x1: 90, y1: 30}, until: ">= 100"}`,
+  until: `{until: ">= 100", in: {x0: 10, y0: 10, x1: 90, y1: 30}} (a number read in that part of the latest screenshot, or text to wait for there)`,
 };
 const example = (kind: string) => (EXAMPLES[kind] ? ` — e.g. ${EXAMPLES[kind]}` : "");
 
@@ -192,11 +193,11 @@ export function validate(plan: Plan): string[] {
       if (!v || typeof v !== "object" || Array.isArray(v) || !Object.keys(v).length) errs.push(`${where}: fill takes {label: value, …}`);
     } else if (kind === "read") {
       if (typeof v !== "string" || (!placeholder(v) && !plan.grids?.[v])) errs.push(`${where}: read takes the name of a grid declared in grids`);
-    } else if (kind === "watch") {
-      const r = v as Record<string, unknown> | null;
-      const box = r && typeof r === "object" && !Array.isArray(r) && ["x0", "y0", "x1", "y1"].every((k) => typeof r[k] === "number" && (r[k] as number) >= 0);
-      if (!box || (r.x1 as number) <= (r.x0 as number) || (r.y1 as number) <= (r.y0 as number)) errs.push(`${where}: watch takes the region to read, {x0, y0, x1, y1} on the latest screenshot`);
-      if (typeof s.until !== "string" || !s.until.trim()) errs.push(`${where}: watch needs until, e.g. ">= 141 | <= 133" (a number read there) or text to wait for`);
+    } else if (kind === "until") {
+      const r = s.in as Record<string, unknown> | null | undefined;
+      const box = isRecord(r) && ["x0", "y0", "x1", "y1"].every((k) => typeof r[k] === "number" && (r[k] as number) >= 0);
+      if (!box || (r.x1 as number) <= (r.x0 as number) || (r.y1 as number) <= (r.y0 as number)) errs.push(`${where}: until takes in, the region to read: {x0, y0, x1, y1} on the latest screenshot${example(kind)}`);
+      if (typeof v !== "string" || !v.trim()) errs.push(`${where}: until takes the condition, e.g. ">= 141 | <= 133" (a number read there) or text to wait for`);
     } else if (kind === "scroll") {
       if (!["up", "down", "left", "right"].includes(String(v)) && !placeholder(v)) errs.push(`${where}: scroll takes up, down, left or right`);
     } else if (typeof v !== "string" && typeof v !== "number") {
@@ -236,11 +237,13 @@ interface Prepared {
   asWritten?: Record<string, unknown>;
 }
 
-/** One step of the plan as it runs: filled from its row; `k` is its place in the steps written */
+/** An until step: it holds the plan for as long as it watches, and what it read is the point of it */
+const watches = (x: Prepared) => x.tool === "wait_for" && x.args.until !== undefined;
+
+/** One step of the plan as it runs, filled from its row */
 interface Item {
   s: Step;
   row: number;
-  k: number;
 }
 
 type Effect = NonNullable<ActionData["effect"]> | "";
@@ -368,19 +371,14 @@ interface Job {
   scopes: Map<string, string>;
   /** The plan's last steps and what each did to the screen, for the decision model */
   history: string[];
-  /** Inputs the driver put in without waiting for the screen */
-  fast: number;
-  /** Where things stood when a batch failed, and the call count then: still true while nothing else was called */
-  where?: { text: string; at: number };
-  /** The plan has been marked as running (by plan_mark, or with its first batch), and as over */
-  marked: boolean;
-  ended: boolean;
 }
 
-/** Most steps sent to the driver in one call */
-const SEGMENT = 500;
-
-type BatchStep = BatchStepResult;
+/** A step's reply as the runner weighs it: a plan's step that went through, or one tried again */
+interface StepReply {
+  ok: boolean;
+  text: string;
+  data?: unknown;
+}
 
 export class Runner {
   private jobs: Job[] = [];
@@ -414,7 +412,7 @@ export class Runner {
         text: `Not queued: an earlier plan failed, and this one was likely written assuming it would work. Re-plan from here.\n\n${this.report(j)}${cancelled.length ? `\n(also cancelled: ${cancelled.map((c) => c.id).join(", ")})` : ""}`,
       };
     }
-    const job: Job = { id: `r${++this.n}`, plan, status: "queued", lines: [], ms: 0, drex: { calls: 0, tokens: 0, ms: 0 }, reported: false, done: Promise.resolve(), pending: new Map(), scopes: new Map(), history: [], fast: 0, marked: false, ended: false };
+    const job: Job = { id: `r${++this.n}`, plan, status: "queued", lines: [], ms: 0, drex: { calls: 0, tokens: 0, ms: 0 }, reported: false, done: Promise.resolve(), pending: new Map(), scopes: new Map(), history: [] };
     this.jobs.push(job);
     job.done = this.chain = this.chain.then(() => this.exec(job));
     const earlier = this.finished(job);
@@ -468,9 +466,8 @@ export class Runner {
         : j.status === "cancelled"
           ? `${j.id} – cancelled (an earlier plan failed)`
           : `${j.id} ✗ failed after ${(j.ms / 1000).toFixed(1)} s`;
-    const fast = j.fast ? ` · ${j.fast} step${j.fast === 1 ? "" : "s"} fast` : "";
     const dx = j.drex.calls ? ` · decision model: ${j.drex.calls} call(s), ${j.drex.tokens} tokens, ${(j.drex.ms / 1000).toFixed(1)} s` : "";
-    return [head + fast + dx, ...j.lines.map((l, i) => `${i + 1}. ${l}`), ...(j.tail ? [j.tail] : [])].join("\n");
+    return [head + dx, ...j.lines.map((l, i) => `${i + 1}. ${l}`), ...(j.tail ? [j.tail] : [])].join("\n");
   }
 
   private async exec(job: Job) {
@@ -482,17 +479,10 @@ export class Runner {
     const t0 = performance.now();
     let completed = false;
     const p = job.plan;
-    // To the overlay the whole plan is one piece of work; to the driver, the time to watch for popups. It goes
-    // with the plan's first batch, unless something comes before that
-    const mark = { plan: job.id, on: p.on ?? {}, keep: keepTexts(p.steps) };
-    const markNow = async () => {
-      if (job.marked) return;
-      job.marked = true;
-      await this.call("plan_mark", mark).catch(() => undefined);
-    };
+    // The program running the plan, while it runs
+    let program: number | undefined;
     try {
       if (p.when) {
-        await markNow();
         const r = await this.call("wait_for", { text: p.when, timeoutSec: p.whenSec ?? 5, ...this.win(p.window), after: "none" });
         if (!r.ok) return await this.fail(job, `✗ not started: "${p.when}" did not show up`, p.window);
       }
@@ -500,76 +490,71 @@ export class Runner {
       // of several fields is one step per field, so each can be resolved on its own
       const rows: (Row | undefined)[] = p.repeat?.length ? p.repeat : [undefined];
       const items: Item[] = rows.flatMap((row, r) =>
-        p.steps.flatMap((raw, k) => {
+        p.steps.flatMap((raw) => {
           const s = row === undefined ? raw : (fill(raw, row) as Step);
           if (s.fill && typeof s.fill === "object" && Object.keys(s.fill).length > 1) {
             const { fill: fields, ...rest } = s;
-            return Object.entries(fields as Record<string, unknown>).map(([label, value], f) => ({ s: { ...rest, fill: { [label]: value } }, row: r, k: k * 64 + f }));
+            return Object.entries(fields as Record<string, unknown>).map(([label, value]) => ({ s: { ...rest, fill: { [label]: value } }, row: r }));
           }
-          return [{ s, row: r, k: k * 64 }];
+          return [{ s, row: r }];
         }),
       );
       const many = rows.length > 1;
       // The first row's steps are reported one by one; later rows only where something was out of the way
       let firstRowEnd = -1;
       const said = (it: Item, line: string) => {
+        if (many && firstRowEnd < 0 && it.row > 0) firstRowEnd = job.lines.length;
         if (it.row === 0) job.lines.push(line);
         else if (!line.startsWith("✓ ") || /\((decision model|showed up)|:\n/.test(line)) job.lines.push(`row ${it.row + 1}: ${line}`);
       };
-      let i = 0;
-      while (i < items.length) {
-        if (many && firstRowEnd < 0 && items[i].row > 0) firstRowEnd = job.lines.length;
-        const it = items[i];
-        if (it.s.check !== undefined) {
-          await markNow();
-          const window = (it.s.window as string | number | undefined) ?? p.window;
-          if (!(await this.checkStep(job, it, String(it.s.check), window, (it.s.timeoutSec as number | undefined) ?? 5, said))) return await this.fail(job, undefined, window);
-          i++;
+      const prepared: (Prepared | undefined)[] = [];
+      for (const it of items) prepared.push(it.s.check !== undefined ? undefined : await this.prepare(job, it.s));
+      const steps = prepared.map((x, i) => (x ? { tool: x.tool, args: { ...x.args, ...this.recoverArg(x, items[i].s) } } : { tool: "check" }));
+      // An until holds the plan for as long as it watches
+      const watching = prepared.reduce((t, x) => t + (x && watches(x) ? Number(x.args.timeoutSec ?? 60) : 0), 0);
+      const pace = p.fast === true ? { pace: "fast" } : p.fast === false ? { pace: "normal" } : {};
+      const plan = { steps, on: p.on ?? {}, keep: keepTexts(p.steps) };
+      let r = await this.call("exec", { plan, ...pace, learn: false, waitSec: 60, timeoutSec: Math.min(3600, 600 + watching) }, 120_000);
+      for (;;) {
+        const pg = (r.data as ProgramData | undefined)?.program;
+        if (!pg) throw new Error(firstLines(r.error ?? r.text ?? "the driver ran no program (is it up to date?)", 6));
+        program = pg.id;
+        for (const st of pg.steps ?? []) this.went(job, items[st.i], prepared[st.i]!, st, said);
+        if (pg.state === "done") {
+          program = undefined;
+          job.lines.push(...dismissed(pg.log));
+          break;
+        }
+        if (pg.state === "running") {
+          r = await this.call("resume", { id: pg.id, waitSec: 60 }, 120_000);
           continue;
         }
-        // A stretch of steps up to the next check, sent in one call
-        const seg: Item[] = [];
-        for (let j = i; j < items.length && items[j].s.check === undefined && seg.length < SEGMENT; j++) seg.push(items[j]);
-        const prepared: Prepared[] = [];
-        for (const x of seg) prepared.push(await this.prepare(job, x.s));
-        const steps = prepared.map((x, m) => ({ tool: x.tool, ...x.args, ...this.recoverArg(x, seg[m].s), ...(many ? { k: seg[m].k } : {}) }));
-        const pace = p.fast === true ? "fast" : p.fast === false ? "normal" : "auto";
-        // A watch holds its batch for as long as it watches
-        const watching = prepared.reduce((t, x) => t + (x.tool === "watch" ? Number(x.args.timeoutSec ?? 60) * 1000 : 0), 0);
-        // The plan starts with its first batch, and ends with the batch that runs its last steps
-        const first = !job.marked;
-        const last = i + seg.length === items.length;
-        job.marked = true;
-        const r = await this.call("batch", { steps, pace, after: "none", on: p.on ?? {}, ...(first ? { mark } : {}), ...(last ? { end: job.id } : {}) }, 120_000 + watching);
-        const data = r.data as Partial<BatchData> | undefined;
-        if (typeof data?.ended === "string") {
-          job.ended = true;
-          if (data.ended) job.lines.push(...data.ended.split("\n").filter(Boolean));
-        }
-        if (!data?.steps) throw new Error(firstLines(r.error ?? r.text ?? "the driver gave no step results (is it up to date?)", 6));
-        data.steps.forEach((res, m) => {
-          if (res.fast) job.fast++;
-          if (!res.ok) return;
-          const x = prepared[m];
-          const what = x.alias ? `${x.what} → ${x.alias} (remembered)` : x.what;
-          // What the driver did on the way: a popup pressed away is a line of its own, a wait a word on the step's
-          const [asides, aside] = notes(res);
-          for (const n of asides) said(seg[m], n);
-          // What a read step read is the point of it
-          said(seg[m], x.tool === "read_grid" || x.tool === "read_text" || x.tool === "observe" || x.tool === "watch" ? `✓ ${what}${aside}:\n${res.text}` : `✓ ${what}${aside}`);
-          this.noteDone(job, what, effectOf(res.data));
-        });
-        if (data.failed == null) {
-          i += seg.length;
+        if (pg.state === "asking") {
+          const i = Number((pg.question?.details as { i?: number } | null)?.i);
+          const it = items[i];
+          const window = (it?.s.window as string | number | undefined) ?? p.window;
+          if (!it || !(await this.checkStep(job, it, String(it.s.check), window, (it.s.timeoutSec as number | undefined) ?? 5, said))) return await this.fail(job, undefined, window);
+          r = await this.call("resume", { id: pg.id, answer: true, waitSec: 60 }, 120_000);
           continue;
         }
-        const m = data.failed;
-        if (data.where) job.where = { text: data.where, at: this.calls };
-        if (!(await this.recover(job, seg[m], prepared[m], data.steps[m], said))) {
-          if (seg[m].row > 0) job.lines.push(`✗ in row ${seg[m].row + 1} of ${rows.length} ${JSON.stringify(rows[seg[m].row]).slice(0, 80)}`);
-          return await this.fail(job, undefined, (seg[m].s.window as string | number | undefined) ?? p.window);
+        if (pg.state === "stuck") {
+          const i = Number(pg.call?.args.__i);
+          const it = items[i];
+          const x = prepared[i];
+          if (!it || !x) throw new Error(`the plan's program got stuck outside its steps: ${firstLines(pg.failure?.error ?? "", 3)}`);
+          const f = pg.failure;
+          const res: StepReply = { ok: false, text: (f?.error ?? f?.text ?? "").trim(), data: f?.data };
+          if (!(await this.recover(job, it, x, res, said))) {
+            if (it.row > 0) job.lines.push(`✗ in row ${it.row + 1} of ${rows.length} ${JSON.stringify(rows[it.row]).slice(0, 80)}`);
+            return await this.fail(job, undefined, (it.s.window as string | number | undefined) ?? p.window);
+          }
+          r = await this.call("resume", { id: pg.id, skip: true, value: { ok: true }, waitSec: 60 }, 120_000);
+          continue;
         }
-        i += m + 1;
+        // failed or stopped
+        program = undefined;
+        job.lines.push(...dismissed(pg.log));
+        return await this.fail(job, `✗ ${firstLines(pg.error ?? pg.state, 4)}`, p.window);
       }
       if (many) {
         if (firstRowEnd < 0) firstRowEnd = job.lines.length;
@@ -582,9 +567,10 @@ export class Runner {
     } catch (e) {
       job.lines.push(`✗ ${(e as Error).message}`);
     } finally {
-      if (job.marked && !job.ended) {
-        const end = await this.call("plan_mark", { plan: job.id, end: true }).catch(() => undefined);
-        if (end?.text) job.lines.push(...end.text.split("\n").filter(Boolean));
+      // A plan that stopped mid-way: its program stops too, and says which popups it dismissed meanwhile
+      if (program !== undefined) {
+        const end = await this.call("resume", { id: program, stop: true, waitSec: 3 }).catch(() => undefined);
+        job.lines.push(...dismissed((end?.data as ProgramData | undefined)?.program?.log ?? []));
       }
       job.ms = performance.now() - t0;
       // Told only now that its report is whole: a plan sent while the failure was still being written up (the look at
@@ -597,17 +583,24 @@ export class Runner {
     }
   }
 
+  /** A plan's step that went through: its line in the report, and what it did for the decision model's view */
+  private went(job: Job, it: Item | undefined, x: Prepared | undefined, st: StepResult, said: (it: Item, line: string) => void) {
+    if (!it || !x) return;
+    const what = x.alias ? `${x.what} → ${x.alias} (remembered)` : x.what;
+    // What the driver did on the way: a popup pressed away is a line of its own, a wait a word on the step's
+    const [asides, aside] = notes(st);
+    for (const n of asides) said(it, n);
+    // What a read step read is the point of it
+    said(it, x.tool === "read_grid" || x.tool === "read_text" || x.tool === "observe" || watches(x) ? `✓ ${what}${aside}:\n${st.text}` : `✓ ${what}${aside}`);
+    this.noteDone(job, what, effectOf(st.data));
+  }
+
   private async fail(job: Job, line: string | undefined, window?: string | number) {
     if (line) job.lines.push(line);
     // Two entries per choice (the candidates it chose among, and the wording)
     const n = job.pending.size / 2;
     if (n) job.lines.push(`(${n === 1 ? "the decision model's choice in this plan was" : `the decision model's ${n} choices in this plan were`} not remembered, since the plan failed)`);
-    // A short look at where things stand, so the AI can re-plan without a separate look: the one the driver took
-    // when the batch failed, if nothing has been done since
-    if (job.where && job.where.at === this.calls) {
-      job.tail = `Where things stand:\n${job.where.text}`;
-      return;
-    }
+    // A short look at where things stand, so the AI can re-plan without a separate look
     const o = await this.call("observe", { silent: true, ...this.win(window), max: 40 }).catch(() => undefined);
     if (o?.text) job.tail = `Where things stand:\n${o.text.split("\n").slice(0, 45).join("\n")}`;
   }
@@ -629,10 +622,9 @@ export class Runner {
     // step would (it may also show up now), for the controls to choose among.
     if (!cands.length) {
       const kind = p.call.tool === "set_value" || p.call.tool === "type_text" ? "field" : "click";
-      const r = await this.call("batch", { steps: [{ tool: p.call.tool, ...p.call.args, recover: { kind, late: false }, probe: true }], pace: "normal", after: "none", where: false });
-      const s = (r.data as BatchData | undefined)?.steps?.[0];
-      if (s?.ok) return { resume: { skip: true, value: { ok: true, text: s.text, data: s.data ?? null } }, note: `${what}: it was there when looked for again, and was done` };
-      const m = missOf(s?.data);
+      const s = await this.call(p.call.tool as ToolName, { ...p.call.args, recover: { kind, late: false }, probe: true, after: "none" });
+      if (s.ok) return { resume: { skip: true, value: { ok: true, text: s.text, data: s.data ?? null } }, note: `${what}: it was there when looked for again, and was done` };
+      const m = missOf(s.data);
       if (!unresolved(m) || !m!.candidates.length) return null;
       cands = m!.candidates;
     }
@@ -685,11 +677,10 @@ export class Runner {
     return x.args.probe && typeof x.args.target === "string" ? { recover: { kind: x.kind, late: s.timeoutSec === undefined } } : {};
   }
 
-  /** One step, run as the batch runs it, so a miss comes back recovered as far as the driver can take it */
-  private async step(job: Job, tool: ToolName, args: Record<string, unknown>, recover: object): Promise<BatchStep> {
-    const r = await this.call("batch", { steps: [{ tool, ...args, ...recover }], pace: "normal", after: "none", on: job.plan.on ?? {}, where: false });
-    const s = (r.data as BatchData | undefined)?.steps?.[0];
-    return s ?? { ok: false, text: (r.error ?? r.text ?? "the driver gave no step result").trim(), fast: false };
+  /** One step, run as a program runs it, so a miss comes back recovered as far as the driver can take it */
+  private async step(job: Job, tool: ToolName, args: Record<string, unknown>, recover: object): Promise<StepReply> {
+    const r = await this.call(tool, { ...args, ...recover, on: job.plan.on ?? {}, after: "none" });
+    return { ok: r.ok, text: ((r.ok ? r.text : r.error ?? r.text) ?? "").trim(), data: r.data };
   }
 
   private win(window: string | number | undefined) {
@@ -740,7 +731,7 @@ export class Runner {
 
   /** A step whose target the driver couldn't tell, after the driver did what needed no judgment (the plan's popup
    *  rules, a moment's wait): the decision model chooses among the candidates the driver handed back */
-  private async recover(job: Job, it: Item, x: Prepared, res: BatchStep, said: (it: Item, line: string) => void): Promise<boolean> {
+  private async recover(job: Job, it: Item, x: Prepared, res: StepReply, said: (it: Item, line: string) => void): Promise<boolean> {
     const window = (it.s.window as string | number | undefined) ?? job.plan.window;
     const w = this.win(window);
     const ok = (line: string, r: { text?: string; data?: unknown }, what = x.what) => {
@@ -748,13 +739,13 @@ export class Runner {
       this.noteDone(job, what, effectOf(r.data));
       return true;
     };
-    for (const n of res.notes ?? []) if (!n.startsWith("(")) said(it, n);
+    for (const n of notesOf(res)) if (!n.startsWith("(")) said(it, n);
     let { tool, args } = x;
     // A remembered wording that no longer fits: the plan's own words, as written
     if (x.asWritten) {
       args = x.asWritten;
       res = await this.step(job, tool, { ...args, probe: true }, this.recoverArg({ ...x, args }, it.s));
-      for (const n of res.notes ?? []) if (!n.startsWith("(")) said(it, n);
+      for (const n of notesOf(res)) if (!n.startsWith("(")) said(it, n);
       if (res.ok) return ok(`✓ ${x.what}${notes(res)[1]}`, res);
     }
     const { what, kind } = x;
@@ -941,14 +932,23 @@ export class Runner {
 /** The program a window belongs to (its program and title, numbers left out): the scope of what is remembered */
 const scopeOf = (program: string, title: string) => `${program.toLowerCase()}|${title.replace(/\d+/g, "#").replace(/\s+/g, " ").trim()}`;
 
+/** What the driver did to get a step through, from its reply's data */
+const notesOf = (res: { data?: unknown }) => (res.data as ActionData | undefined)?.notes ?? [];
+
 /** A step's notes from the driver: lines of their own (a popup pressed away), and a word for the step's line */
-function notes(res: BatchStep): [string[], string] {
-  const all = res.notes ?? [];
+function notes(res: { data?: unknown }): [string[], string] {
+  const all = notesOf(res);
   const aside = all.filter((n) => n.startsWith("("));
   return [all.filter((n) => !n.startsWith("(")), aside.length ? ` ${aside.join(" ")}` : ""];
 }
 
 const firstLines = (s: string, n: number) => s.split("\n").slice(0, n).join("\n").slice(0, 900);
+
+/** The popups a plan's program dismissed along the way, from its log, one line each */
+function dismissed(log: string[]): string[] {
+  const at = log.findIndex((l) => l.startsWith("Popups dismissed along the way:"));
+  return at < 0 ? [] : log[at].split("\n").slice(1).filter(Boolean);
+}
 
 /** Where a grid cell's centre is, in screenshot pixels; undefined for anything that isn't a cell */
 function cell(v: unknown, grids: Record<string, Grid>): { x: number; y: number } | undefined {
@@ -964,7 +964,7 @@ function cell(v: unknown, grids: Record<string, Grid>): { x: number; y: number }
 export function translate(s: Step, w: Record<string, unknown>, grids: Record<string, Grid>): Prepared {
   const pass = (keys: string[]) => Object.fromEntries(keys.filter((k) => s[k] !== undefined).map((k) => [k, s[k]]));
   const quiet = { after: "none" };
-  // A text target is tried at once (every action already waits for the screen to settle, so what is named is
+  // A text target is tried at once (every action already waits for the screen to react, so what is named is
   // normally there) and as a probe: a miss goes to the runner, which waits or decides (see recover)
   const aim = (v: unknown, key = "target") => cell(v, grids) ?? { [key]: v, probe: true, timeoutSec: s.timeoutSec ?? 0 };
   if (typeof s.tool === "string") {
@@ -973,7 +973,7 @@ export function translate(s: Step, w: Record<string, unknown>, grids: Record<str
   }
   if (s.open !== undefined) return { tool: "open_app", args: { target: s.open, ...pass(["args", "cwd", "timeoutSec", "browser"]), ...quiet }, what: `open ${s.open}`, kind: "click" };
   if (s.click !== undefined) return { tool: "click", args: { ...w, ...aim(s.click), ...pass(["role", "nth", "count", "button"]), ...quiet }, what: `click "${s.click}"`, kind: "click" };
-  if (s.press !== undefined) return { tool: "element_action", args: { ...w, ...aim(s.press), action: "press", ...pass(["role", "nth"]), ...quiet }, what: `press "${s.press}"`, kind: "click" };
+  if (s.press !== undefined) return { tool: "click", args: { ...w, ...aim(s.press), mode: "direct", ...pass(["role", "nth"]), ...quiet }, what: `press "${s.press}"`, kind: "click" };
   if (s.fill !== undefined) {
     const [label, value] = Object.entries(s.fill as Record<string, unknown>)[0];
     return { tool: "set_value", args: { ...w, ...aim(label), value, ...quiet }, what: `fill "${label}" with ${JSON.stringify(value).slice(0, 60)}`, kind: "field" };
@@ -984,14 +984,15 @@ export function translate(s: Step, w: Record<string, unknown>, grids: Record<str
   }
   if (s.keys !== undefined) return { tool: "press_keys", args: { ...w, keys: String(s.keys), ...pass(["repeat"]), ...quiet }, what: `keys ${s.keys}`, kind: "click" };
   if (s.expect !== undefined) return { tool: "wait_for", args: { ...w, text: String(s.expect), timeoutSec: s.timeoutSec ?? 8, ...pass(["gone"]), ...quiet }, what: `expect "${s.expect}"${s.gone ? " gone" : ""}`, kind: "click" };
-  if (s.await !== undefined) return { tool: "wait_for", args: { appears: String(s.await), timeoutSec: s.timeoutSec ?? 10, ...pass(["gone"]), ...quiet }, what: `await window "${s.await}"`, kind: "click" };
+  // A window's title or text a window shows, whichever comes first
+  if (s.await !== undefined) return { tool: "wait_for", args: { appears: String(s.await), text: String(s.await), timeoutSec: s.timeoutSec ?? 10, ...pass(["gone"]), ...quiet }, what: `await "${s.await}"`, kind: "click" };
   if (s.scroll !== undefined) {
     const at = s.target !== undefined ? aim(s.target) : {};
     return { tool: "scroll", args: { ...w, ...at, direction: s.scroll, ...pass(["amount"]), ...quiet }, what: `scroll ${s.scroll}`, kind: "click" };
   }
-  if (s.watch !== undefined) {
-    const r = s.watch as Record<string, number>;
-    return { tool: "watch", args: { x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, until: String(s.until), ...pass(["everyMs", "confirm", "timeoutSec"]), ...quiet }, what: `watch until ${s.until}`, kind: "click" };
+  if (s.until !== undefined) {
+    const r = s.in as Record<string, number>;
+    return { tool: "wait_for", args: { x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, until: String(s.until), ...pass(["everyMs", "confirm", "timeoutSec"]), ...quiet }, what: `until ${s.until}`, kind: "click" };
   }
   if (s.read !== undefined) {
     const g = grids[String(s.read)];

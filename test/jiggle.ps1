@@ -1,4 +1,4 @@
-# Someone else using the mouse, for test/p6.ts: moves the pointer a pixel back and forth with SendInput (as a
+# Someone else using the mouse, for test/presence.ts: moves the pointer a pixel back and forth with SendInput (as a
 # person's mouse or a remote desktop tool would, without Asctrl's mark) for -Seconds, starting after -After.
 param([double]$Seconds = 2, [double]$After = 0, [string]$Signal = '')
 Add-Type @'

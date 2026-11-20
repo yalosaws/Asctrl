@@ -1,6 +1,6 @@
 //! Operating controls by what they should become rather than by gestures: set_value makes a control hold a
-//! value whatever kind it is (text, number, on/off, a chosen item) and checks that it does; element_action
-//! runs one explicit UI Automation action without touching the mouse, the focus or the window order.
+//! value whatever kind it is (text, number, on/off, a chosen item) and checks that it does. (Pressing one
+//! without the mouse is click's mode "direct".)
 
 use super::locate::{Ask, Located, Miss};
 use super::report::Did;
@@ -8,34 +8,25 @@ use super::*;
 use crate::fx::Fx;
 use serde_json::json;
 
-/// The animation, and the work area it framed (to tell afterwards whether that area went away; null when the
-/// whole window was framed). The overlay keeps one frame and one spot for the orb per window (`win`), however the
-/// actions in it are framed.
-fn anim(call: &str, part: &str, loc: &Located) -> (Fx, Value) {
+/// The animation: the work area it frames, or the whole window. The overlay keeps one frame and one spot for the
+/// orb per window (`win`), however the actions in it are framed.
+fn anim(call: &str, part: &str, loc: &Located) -> Fx {
     let win = winmgr::rect_of(loc.hwnd);
     // The work area of the last scene read, when it is in this window (it may be another window's)
     let inside = |r: &(i32, i32, i32, i32), w: &(i32, i32, i32, i32)| r.0 >= w.0 - 2 && r.1 >= w.1 - 2 && r.2 <= w.2 + 2 && r.3 <= w.3 + 2;
     let area = uia::work_area().filter(|(r, _)| win.is_some_and(|w| inside(r, &w)));
-    let zone = json!(area.map(|(r, _)| fx::rect_json(r)));
     let (shown, whole) = match area {
         Some((r, w)) => (fx::rect_json(r), w),
         None => (json!(win.map(fx::rect_json)), true),
     };
-    let fx = Fx::start(
+    // "element_action" is the overlay's name for this kind of animation (pointers on controls, no mouse path)
+    Fx::start(
         call,
         part,
         "element_action",
         json!({}),
         json!({ "targets": [fx::pt_json(loc.point)], "zone": shown, "zoneIsWindow": whole, "win": win.map(fx::rect_json), "app": fx::app_json(loc.hwnd) }),
-    );
-    (fx, zone)
-}
-
-/// Let the frame go at once when the area it was drawn round is no longer the work area (a popup closed)
-fn drop_zone_if_gone(call: &str, zone: Value) {
-    if !zone.is_null() && json!(uia::work_area().map(|(r, _)| fx::rect_json(r))) != zone {
-        fx::zone_gone(call, zone);
-    }
+    )
 }
 
 /// Fill a field the way a person would when it won't take a value directly: focus it, select everything,
@@ -85,7 +76,7 @@ fn type_into(loc: &Located, value: &str, call: &str, part: &str, prior: Option<S
 fn set_one(ask: &Ask, value: &str, call: &str, part: &str, watch: &mut dyn FnMut(&Located)) -> Result<(String, Located), Miss> {
     let loc = locate::resolve(ask)?;
     watch(&loc);
-    let (fx, _) = anim(call, part, &loc);
+    let fx = anim(call, part, &loc);
     let prior = loc.live.as_ref().filter(|l| !l.is_password()).and_then(|l| l.value());
     let r = match &loc.live {
         Some(l) => match l.set(value) {
@@ -221,43 +212,6 @@ pub(super) async fn set_value(ctx: &Ctx, args: &Value) -> Output {
             o.error = o.text.take();
             o
         }
-        Ok(Err(m)) => report::missed(ctx, m).await,
-        Err(e) => fail(e.to_string()),
-    }
-}
-
-pub(super) async fn element_action(ctx: &Ctx, args: &Value) -> Output {
-    let ask = match Ask::parse(ctx, args, "target", "", "") {
-        Ok(Some(a)) => a.anywhere(),
-        Ok(None) => return fail("Say which control: target (a reference like \"e12\", or its name)"),
-        Err(e) => return fail(e),
-    };
-    let action = str_arg(args, "action").to_string();
-    let value = str_arg(args, "value").to_string();
-    let (pace, call) = (Pace::current(), fx::call_id());
-    let turn = match acting().await {
-        Ok(t) => t,
-        Err(o) => return o,
-    };
-    let r = tokio::task::spawn_blocking(move || -> Result<Did, Miss> {
-        let loc = locate::resolve(&ask)?;
-        let Some(live) = &loc.live else {
-            return Err(format!("{} was read off the pixels, so it is not a control that can be operated this way; use click", loc.desc).into());
-        };
-        let before = pace.before(Some(loc.point));
-        let (fx, zone) = anim(&call, "a", &loc);
-        let r = live.act(&action, &value);
-        fx.step(0, r.is_ok());
-        fx.end(r.is_ok());
-        let done = r?;
-        let change = pace.after_direct(before);
-        drop_zone_if_gone(&call, zone);
-        Ok(Did { done, change, hwnd: loc.scene, fresh: false, delivered: true, verified: None })
-    })
-    .await;
-    drop(turn);
-    match r {
-        Ok(Ok(did)) => report::conclude(ctx, args, did, true).await,
         Ok(Err(m)) => report::missed(ctx, m).await,
         Err(e) => fail(e.to_string()),
     }

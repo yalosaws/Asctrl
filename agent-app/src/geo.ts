@@ -124,10 +124,6 @@ export function syncHits() {
   if (isTauri) invoke("set_hit_regions", { rects, scale }).catch(() => {});
 }
 
-// ---- The orb's "home": the corner normally, mid-screen while a question is open ----
+// ---- The orb's "home": where it rests between actions ----
 
-let homeOverride: Pt | null = null;
-export const home = (): Pt => homeOverride ?? dock();
-export function setHome(p: Pt | null) {
-  homeOverride = p;
-}
+export const home = (): Pt => dock();

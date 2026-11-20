@@ -1,8 +1,10 @@
 //! Programs (exec / resume): the AI writes a short JavaScript program, the driver runs it here, on the computer
 //! it works, and the AI comes back only when the program needs it.
 //!
-//! A plan (`run`) is a straight list of steps; a program has the language: loops over rows, ifs on what the
-//! screen shows, its own variables, functions, try / catch. It runs in QuickJS on a thread of its own, with
+//! A program has the language: loops over rows, ifs on what the screen shows, its own variables, functions,
+//! try / catch. A plan (`run`, a straight list of steps) runs as one too: `exec` with `plan` runs its steps
+//! through a short program of the driver's own (PLAN), with the plan's popup rules, and keeps each step's result
+//! for the plan's runner. It runs in QuickJS on a thread of its own, with
 //! nothing of the computer's but what is given to it below: no files, no network, no processes (those are
 //! tools too, and go through the same calls as the AI's). Each action it takes is a driver tool, run exactly as
 //! when the AI calls it (the overlay shows it, the page channel and recovery apply).
@@ -22,6 +24,10 @@
 //! opts are the tool's own arguments (window, nth, role, timeoutSec, browser, …).
 //!
 //! `learn: { name, description }` keeps a program that ends well as a skill; `skill: name` runs one (see skills).
+//!
+//! Pace (`pace`): an input goes on the moment the screen reacts to it (the default), or waits until it is still
+//! ("normal"), or waits only for the program to take it ("fast", for steps known to bring nothing up). A step
+//! that names its target by text and misses is recovered as far as needs no judgment first (see `recover`).
 
 use super::*;
 use rquickjs::{Context, Function, Runtime};
@@ -30,6 +36,33 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as smpsc;
 use std::time::Instant;
+
+/// Steps that read what the screen shows once, as it is: after an input that went on the moment the screen
+/// reacted, they wait for it to rest first. (wait_for looks again and again by itself.)
+const READS_SCREEN: [&str; 4] = ["read_text", "observe", "screenshot", "read_grid"];
+
+/// How a plan runs: its steps one after another; a check is asked of the plan's runner (it judges the window
+/// with the decision model) and must hold. Each step carries its place in the plan (__i), for the runner.
+const PLAN: &str = r#"const S = args.steps;
+for (let i = 0; i < S.length; i++) {
+  const s = S[i];
+  if (s.tool === 'check') { if (ask('check', { i }) !== true) throw new Error('the check did not hold'); continue; }
+  tool(s.tool, Object.assign({}, s.args, { __i: i }));
+}
+return null;"#;
+
+/// Most steps a plan may have, once its rows are filled in
+const PLAN_MAX: usize = 60_000;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Pace {
+    /// Inputs go on the moment the screen reacts
+    React,
+    /// Inputs wait until the screen is still
+    Normal,
+    /// Inputs wait only for the program to take them
+    Fast,
+}
 
 const PRELUDE: &str = r#"(() => {
   const host = globalThis.__host; delete globalThis.__host;
@@ -49,15 +82,17 @@ const PRELUDE: &str = r#"(() => {
   globalThis.tool = (name, a = {}) => step(name, a, false);
   globalThis.attempt = (name, a = {}) => step(name, a, true);
   globalThis.click = (target, o = {}) => step('click', quiet({ target, ...o }));
-  globalThis.press = (target, o = {}) => step('element_action', quiet({ target, action: 'press', ...o }));
+  globalThis.press = (target, o = {}) => step('click', quiet({ target, mode: 'direct', ...o }));
   globalThis.type = (target, text, o = {}) => step('type_text', quiet(target == null ? { text, ...o } : { target, text, ...o }));
   globalThis.fill = (fields, o = {}) => Object.entries(fields).map(([k, v]) => step('set_value', quiet({ target: k, value: v, ...o })));
   globalThis.keys = (k, o = {}) => step('press_keys', quiet({ keys: k, ...o }));
   globalThis.open = (target, o = {}) => step('open_app', quiet({ target, ...o }));
-  globalThis.waitFor = (text, o = {}) => step('wait_for', quiet({ appears: text, ...o }));
-  globalThis.waitGone = (text, o = {}) => step('wait_for', quiet({ appears: text, gone: true, ...o }));
-  globalThis.expect = (text, o = {}) => step('wait_for', quiet({ appears: text, timeoutSec: 5, ...o }));
-  globalThis.shows = (text, o = {}) => step('wait_for', quiet({ appears: text, timeoutSec: 0, ...o }), true).ok;
+  // What is named may be text a window shows or a window's title: whichever shows first counts, the moment it does
+  const seen = text => ({ appears: text, text });
+  globalThis.waitFor = (text, o = {}) => step('wait_for', quiet({ ...seen(text), ...o }));
+  globalThis.waitGone = (text, o = {}) => step('wait_for', quiet({ ...seen(text), gone: true, ...o }));
+  globalThis.expect = (text, o = {}) => step('wait_for', quiet({ ...seen(text), timeoutSec: 5, ...o }));
+  globalThis.shows = (text, o = {}) => step('wait_for', quiet({ ...seen(text), timeoutSec: 0, ...o }), true).ok;
   globalThis.read = (o = {}) => step('read_text', win(o)).text;
   globalThis.look = (o = {}) => step('observe', win(o));
   globalThis.sleep = ms => call('sleep', ms);
@@ -65,6 +100,9 @@ const PRELUDE: &str = r#"(() => {
   globalThis.on = (text, press) => call('on', { text: String(text), press: String(press) });
   // Wait until f() gives something true (checked every everyMs, default 250), at most timeoutSec (default 30)
   globalThis.until = (f, o = {}) => {
+    // until(">= 141 | <= 133", { x0, y0, x1, y1 }): the computer reads the number (or text) in that region many
+    // times a second itself and goes on the moment a condition holds; the reading that met it comes back
+    if (typeof f === 'string') return step('wait_for', quiet({ until: f, ...o })).text;
     const sec = o.timeoutSec ?? 30, end = Date.now() + sec * 1000;
     for (;;) { const v = f(); if (v) return v; if (Date.now() > end) throw new Error(`until: not true within ${sec} s`); call('sleep', o.everyMs ?? 250); }
   };
@@ -176,6 +214,12 @@ pub struct Program {
     rules: Mutex<Vec<(String, String)>>,
     /// Where the desktop's timeline stood when it started: what happened since goes with a report of being stuck
     seq0: u64,
+    /// It runs a plan: its steps' results are kept for the plan's runner
+    plan: bool,
+    pace: Pace,
+    /// A plan's steps that went through, as { i, ok, text, data }, and how many of them were already reported
+    steps: Mutex<Vec<Value>>,
+    told: Mutex<usize>,
 }
 
 impl Program {
@@ -318,8 +362,14 @@ impl Host {
                     t.push(if at.is_empty() { name.clone() } else { format!("{name} {at}") });
                 }
             }
+            // A plan's step carries its place in the plan: kept for the runner, not given to the tool
+            let place = args.get("__i").and_then(Value::as_u64);
+            let mut sent = args.clone();
+            if let Some(o) = sent.as_object_mut() {
+                o.remove("__i");
+            }
             let (tx, rx) = smpsc::channel();
-            if self.tools.send(Req { tool: name.clone(), args: args.clone(), reply: tx }).is_err() {
+            if self.tools.send(Req { tool: name.clone(), args: sent, reply: tx }).is_err() {
                 return json!({ "__error": "the session has ended" });
             }
             let out = loop {
@@ -334,6 +384,14 @@ impl Host {
                 }
             };
             self.p.set(|s| s.actions += 1);
+            if self.p.plan
+                && out["ok"] == true
+                && let Some(i) = place
+            {
+                let room = if step::READS.contains(&name.as_str()) { 6000 } else { 600 };
+                let text: String = out["text"].as_str().unwrap_or("").chars().take(room).collect();
+                self.p.steps.lock().unwrap().push(json!({ "i": i, "ok": true, "text": text, "data": out["data"] }));
+            }
             if out["ok"] == true || lenient {
                 return out;
             }
@@ -486,7 +544,26 @@ fn secs(args: &Value, key: &str, def: f64, min: f64, max: f64) -> Duration {
 
 /// Start a program
 pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
-    let input = args.get("args").cloned().unwrap_or(Value::Null);
+    let plan = args.get("plan").filter(|v| v.is_object());
+    if let Some(pl) = plan {
+        let n = pl.get("steps").and_then(Value::as_array).map_or(0, Vec::len);
+        if n == 0 || n > PLAN_MAX {
+            return fail(format!("plan: give 1 to {PLAN_MAX} steps"));
+        }
+        if !str_arg(args, "script").trim().is_empty() || !str_arg(args, "skill").trim().is_empty() {
+            return fail("Give plan, script or skill, only one");
+        }
+    }
+    let pace = match str_arg(args, "pace") {
+        "" | "react" => Pace::React,
+        "normal" => Pace::Normal,
+        "fast" => Pace::Fast,
+        other => return fail(format!("pace: \"{other}\" is not one of react, normal, fast")),
+    };
+    let input = match plan {
+        Some(pl) => json!({ "steps": pl["steps"] }),
+        None => args.get("args").cloned().unwrap_or(Value::Null),
+    };
     let skill = match str_arg(args, "skill").trim() {
         "" => None,
         name => match skills::get(name) {
@@ -497,6 +574,7 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
     let src = match &skill {
         Some(s) if str_arg(args, "script").trim().is_empty() => s.script.clone(),
         Some(_) => return fail("Give skill or script, not both"),
+        None if plan.is_some() => PLAN.to_string(),
         None => str_arg(args, "script").to_string(),
     };
     if src.trim().is_empty() {
@@ -521,8 +599,9 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
             }
         }
     }
-    let no_learn = args.get("learn") == Some(&Value::Bool(false));
-    let learn = match args.get("learn").filter(|v| !v.is_null() && !v.is_boolean()) {
+    // A plan is not kept as a skill: its program is the driver's own, the same for every plan
+    let no_learn = args.get("learn") == Some(&Value::Bool(false)) || plan.is_some();
+    let learn = match args.get("learn").filter(|v| !v.is_null() && !v.is_boolean() && plan.is_none()) {
         None => None,
         Some(l) => {
             let name = l["name"].as_str().unwrap_or("").trim().to_string();
@@ -562,12 +641,21 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
             marks: Mutex::default(),
             trail: Mutex::default(),
             fixes: Mutex::default(),
-            rules: Mutex::default(),
+            rules: Mutex::new(plan.map(|pl| step::on_rules(pl.get("on"))).unwrap_or_default()),
             seq0: crate::events::seq(),
+            plan: plan.is_some(),
+            pace,
+            steps: Mutex::default(),
+            told: Mutex::default(),
         });
         ps.map.insert(p.id, p.clone());
         p
     };
+    // A plan watches for popups from its start (its rules, and buttons that only dismiss), and is one piece of
+    // work on the overlay; a script does from its first on()
+    if let Some(pl) = plan {
+        popups::plan_mark(&json!({ "plan": format!("program-{}", p.id), "on": pl.get("on").cloned().unwrap_or(json!({})), "keep": pl.get("keep").cloned().unwrap_or(json!([])) }));
+    }
     let (dtx, drx) = smpsc::channel();
     *p.decide.lock().unwrap() = Some(dtx);
     let (ttx, mut trx) = tokio::sync::mpsc::unbounded_channel::<Req>();
@@ -577,6 +665,10 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
         let p = p.clone();
         tokio::spawn(in_session(async move {
             let mut n = 0;
+            // An input went in without the screen being let to rest; one that went into a page through the browser,
+            // which settles by its own changes, not by the screen (which may not even show it, when it is covered)
+            let mut unsettled = false;
+            let mut page_unsettled: Option<Value> = None;
             while let Some(r) = trx.recv().await {
                 let Ok(_call) = me.calls.try_read() else { break };
                 if session_over() || p.stop.load(Ordering::SeqCst) || Instant::now() >= deadline { break; }
@@ -595,8 +687,37 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
                 // A popup being dismissed goes first
                 popups::clear(Duration::from_secs(2)).await;
                 if session_over() || p.stop.load(Ordering::SeqCst) || Instant::now() >= deadline { break; }
-                let step = batch::run_step(&me, &r.tool, &r.args, format!("p{}-{n}", p.id), false);
-                let out = PROGRAM_DEADLINE.scope(deadline, step).await;
+                // Inputs go on before the screen is still; what reads the screen sees it at rest
+                if READS_SCREEN.contains(&r.tool.as_str())
+                    && let Some(a) = page_unsettled.take()
+                {
+                    web::settle_after_fast(&a).await;
+                }
+                if READS_SCREEN.contains(&r.tool.as_str()) && unsettled {
+                    tokio::task::spawn_blocking(|| {
+                        screen::wait_stable(screen::watch_area(None), Duration::from_millis(150), Duration::from_millis(1500), screen::NOISE_QUICK);
+                        locate::settled();
+                    })
+                    .await
+                    .ok();
+                    unsettled = false;
+                }
+                let input = step::INPUTS.contains(&r.tool.as_str());
+                let fast = input && p.pace == Pace::Fast;
+                let settled = !unsettled && !locate::reacting();
+                let rules = p.rules.lock().unwrap().clone();
+                let run = step::run_recovering(&me, &r.tool, &r.args, format!("p{}-{n}", p.id), fast, &rules, settled);
+                let out = if p.pace == Pace::Normal { PROGRAM_DEADLINE.scope(deadline, run).await } else { PROGRAM_DEADLINE.scope(deadline, REACT.scope(true, run)).await };
+                if input && p.pace != Pace::Normal {
+                    if out.data.as_ref().and_then(|d| d.get("channel")).and_then(Value::as_str) == Some("page") {
+                        // A page step that reacted already waited on the page's own changes; a fast one did not
+                        if fast {
+                            page_unsettled = Some(r.args.clone());
+                        }
+                    } else {
+                        unsettled = true;
+                    }
+                }
                 let _ = r.reply.send(as_js(&out));
             }
         }));
@@ -665,7 +786,12 @@ pub(super) async fn exec(ctx: &Ctx, args: &Value) -> Output {
             } else if p.learn.is_some() {
                 note = Some("Not kept as a skill: it did not end well".into());
             }
-            if !p.rules.lock().unwrap().is_empty() {
+            if p.plan {
+                let done = popups::plan_mark(&json!({ "plan": format!("program-{}", p.id), "end": true }));
+                if !done.is_empty() {
+                    p.log(format!("Popups dismissed along the way:\n{done}"));
+                }
+            } else if !p.rules.lock().unwrap().is_empty() {
                 let done = popups::stop(&format!("program-{}", p.id));
                 if !done.is_empty() {
                     p.log(format!("Popups dismissed along the way:\n{done}"));
@@ -762,7 +888,7 @@ pub(super) async fn resume(ctx: &Ctx, args: &Value) -> Output {
 /// Stuck: the window it is stuck in, as it is now, goes with the report (taken as it draws itself when others
 /// cover it, so nothing on the screen moves)
 async fn pictured(ctx: &Ctx, p: &Program, mut out: Output) -> Output {
-    if p.phase() != Phase::Stuck {
+    if p.phase() != Phase::Stuck || p.plan {
         return out;
     }
     let window = p.status.lock().unwrap().call.as_ref().and_then(|c| c["args"].get("window").cloned()).unwrap_or(Value::Null);
@@ -823,7 +949,7 @@ async fn report(p: &Program, wait: Duration) -> Output {
         text += &format!("\nLog{}:\n{}", if from > 0 { format!(" (last 20 of {})", s.log.len()) } else { String::new() }, s.log.iter().skip(from).cloned().collect::<Vec<_>>().join("\n"));
     }
     // Stuck: what came up and went on the desktop while it ran (a dialog that opened is often why)
-    let events = if s.phase == Phase::Stuck { crate::events::since(p.seq0).map(|v| batch::window_events(&v, p.started)) } else { None };
+    let events = if s.phase == Phase::Stuck { crate::events::since(p.seq0).map(|v| step::window_events(&v, p.started)) } else { None };
     if let Some(Value::Array(evs)) = &events
         && !evs.is_empty()
     {
@@ -838,6 +964,14 @@ async fn report(p: &Program, wait: Duration) -> Output {
             "skill": p.skill, "learned": s.skill_note,
         }
     });
+    let mut data = data;
+    // A plan's steps that went through since the last report
+    if p.plan {
+        let steps = p.steps.lock().unwrap();
+        let mut told = p.told.lock().unwrap();
+        data["program"]["steps"] = json!(steps[*told..].to_vec());
+        *told = steps.len();
+    }
     Output { ok: !matches!(s.phase, Phase::Failed | Phase::Stopped), text: Some(text), data: Some(data), ..Default::default() }
 }
 
@@ -867,6 +1001,32 @@ mod tests {
 
     fn run(src: &str, host: impl Fn(&str, Value) -> Value + 'static) -> End {
         run_js(src, &json!({ "who": "Ann" }), Instant::now() + Duration::from_secs(5), Arc::new(AtomicBool::new(false)), host)
+    }
+
+    #[test]
+    fn a_plan_runs_its_steps_in_order_with_their_places_and_asks_its_checks() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let s = seen.clone();
+        let steps = json!({ "steps": [
+            { "tool": "click", "args": { "target": "Compose", "window": "Gmail" } },
+            { "tool": "check" },
+            { "tool": "type_text", "args": { "text": "hi" } },
+        ] });
+        let host = move |op: &str, a: Value| {
+            s.borrow_mut().push((op.to_string(), a.clone()));
+            if op == "ask" { json!(true) } else { json!({ "ok": true }) }
+        };
+        let end = run_js(PLAN, &steps, Instant::now() + Duration::from_secs(5), Arc::new(AtomicBool::new(false)), host);
+        assert_eq!(end, End::Done(Value::Null));
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0].1["args"], json!({ "target": "Compose", "window": "Gmail", "__i": 0 }));
+        assert_eq!((seen[1].0.as_str(), &seen[1].1["question"]), ("ask", &json!("check")));
+        assert_eq!(seen[1].1["details"], json!({ "i": 1 }));
+        assert_eq!(seen[2].1["args"]["__i"], json!(2));
+        // A check that does not hold ends the plan there
+        let end = run_js(PLAN, &steps, Instant::now() + Duration::from_secs(5), Arc::new(AtomicBool::new(false)), |op, _| if op == "ask" { json!(false) } else { json!({ "ok": true }) });
+        assert!(matches!(end, End::Failed { ref error, .. } if error.contains("check did not hold")));
     }
 
     #[test]

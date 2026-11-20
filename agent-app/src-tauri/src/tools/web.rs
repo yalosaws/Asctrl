@@ -699,7 +699,7 @@ const SET_VALUE: &str = r#"(raw) => {
 /// Most of a page's text in one reply
 const MAX_TEXT: usize = 100_000;
 
-/// After fast plan steps in a page: wait for the page (its own changes, not the screen) to settle before a step
+/// After fast steps in a page: wait for the page (its own changes, not the screen) to settle before a step
 /// that reads it. The last step armed the change counter; its changes are counted from then.
 pub(super) async fn settle_after_fast(args: &Value) -> Option<(bool, u128)> {
     let p = page(args).await?;

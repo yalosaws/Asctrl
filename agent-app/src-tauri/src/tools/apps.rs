@@ -43,8 +43,16 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
     if target.is_empty() {
         return fail("target is empty");
     }
+    // Said in the reply when the browser asked for could not be used and the default one opened the page
+    let mut instead = "";
     match str_arg(args, "browser") {
         "" | "default" => {}
+        // The person's own browser without Asctrl's extension: the page opens there all the same (the default
+        // browser is theirs), worked through its controls and pixels instead of its page, rather than nothing
+        // happening until someone decides
+        "user" if crate::browser_ext::any().is_none() => {
+            instead = " (in the default browser: Asctrl's extension is not connected in any browser, so the page is worked through its controls and pixels, not through the page itself)";
+        }
         b @ ("asctrl" | "user") => {
             let _turn = match acting().await {
                 Ok(t) => t,
@@ -122,6 +130,7 @@ pub(super) async fn open_app(ctx: &Ctx, args: &Value) -> Output {
                 Some(Err(t)) => format!("{done}. The page was still loading after {:.0} s", t.as_secs_f64()),
                 None => done,
             };
+            let done = format!("{done}{instead}");
             let done = match electron {
                 Some(port) => match crate::cdp::attach_app(port, Duration::from_secs(20), h.map(winmgr::pid_of).unwrap_or(0)).await {
                     Ok(c) => format!("{done}. It is an Electron program ({}), started with a debugging port: its windows are worked through their pages, as in a browser, text targets found in the page and pressed and typed into without the mouse", c.name),

@@ -19,8 +19,6 @@ export type ToolName =
   | "type_text"
   | "press_keys"
   | "set_value"
-  | "element_action"
-  | "batch"
   /** A program: runs on the computer, comes back when it ends or needs the AI (see ProgramData) */
   | "exec"
   | "resume"
@@ -29,7 +27,6 @@ export type ToolName =
   /** Programs that worked, kept to run again (exec with learn / skill) */
   | "skills"
   /** A plan (run) starts or ends: tells the overlay, does nothing else */
-  | "plan_mark"
   // Programs, windows, clipboard
   | "open_app"
   | "focus_window"
@@ -136,7 +133,7 @@ export interface ToolResult {
   /** File result (download_file, base64) */
   file?: { name: string; data: string };
   error?: string;
-  /** Structured results, for a program reading the reply: ActionData, BatchData, ObserveData. Programs read
+  /** Structured results, for a program reading the reply: ActionData, ObserveData, ProgramData. Programs read
    *  these, never the wording of text or error, which is written for the AI and may change. */
   data?: unknown;
 }
@@ -158,9 +155,9 @@ export interface Miss {
   /** ambiguous: several things fit equally well; absent: nothing fits (or a list has no such item); stale: the
    *  screen is not what the AI saw; other: anything else */
   kind: "ambiguous" | "absent" | "stale" | "other";
-  /** The controls to choose among: the equal matches, then (after a batch step's recovery) the closest ones */
+  /** The controls to choose among: the equal matches, then (after a step's recovery) the closest ones */
   candidates: Candidate[];
-  /** After a batch step's recovery: the window they are in */
+  /** After a step's recovery: the window they are in */
   window?: { handle: number; program: string; title: string };
 }
 
@@ -170,36 +167,22 @@ export interface ActionData {
   effect?: "changed" | "unchanged";
   /** Set when the target missed */
   miss?: Miss;
-}
-
-/** One step of a batch */
-export interface BatchStepResult {
-  ok: boolean;
-  text: string;
-  /** It went in without waiting for the screen */
-  fast: boolean;
-  data?: ActionData;
-  /** What the driver did to get the step through: "↷ …" lines of their own, "(…)" words on the step's line */
+  /** What was done to get it through, as a program's step: "↷ …" lines of their own, "(…)" words on the step's line */
   notes?: string[];
 }
 
-/** batch's reply */
-export interface BatchData {
-  steps: BatchStepResult[];
-  /** The step it stopped at */
-  failed: number | null;
-  /** When it failed: the failed step's window as observe reads it (unless asked where: false) */
-  where?: string;
-  /** The plan ended with it (asked with end): what the popup watcher did during the plan, one line each */
-  ended?: string;
-  /** Titled windows that came up, went away or came to the front while it ran (the last 30), from the driver's
-   *  timeline; absent when the timeline is off */
-  windows?: WindowEvent[];
+/** A plan's step that went through, as the program running the plan reports it */
+export interface StepResult {
+  /** Its place among the plan's steps */
+  i: number;
+  ok: boolean;
+  text: string;
+  data?: ActionData & { channel?: string };
 }
 
 /** Something that happened to a window, as the driver's timeline saw it */
 export interface WindowEvent {
-  /** Since the batch started */
+  /** Since the program started */
   ms: number;
   kind: "shown" | "hidden" | "destroyed" | "front" | "minimized" | "restored";
   handle: number;
@@ -262,5 +245,7 @@ export interface ProgramData {
     skill: string | null;
     /** What became of it as a skill (with learn) */
     learned: string | null;
+    /** A plan's steps that went through since the last report */
+    steps?: StepResult[];
   };
 }
